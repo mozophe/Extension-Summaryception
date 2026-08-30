@@ -19,7 +19,6 @@ function turnsAt(chat, indices) {
 
 describe('buildLayer0Partitions', () => {
     it('returns no partitions when there are no assistant turns', async () => {
-        installSummaryContext();
         const partitions = await buildLayer0Partitions({
             chat: makeSizedChat(2),
             sourceStartIdx: 0,
@@ -31,7 +30,6 @@ describe('buildLayer0Partitions', () => {
     });
 
     it('filters out turns before sourceStartIdx', async () => {
-        installSummaryContext();
         const chat = makeSizedChat(1);
         const partitions = await buildLayer0Partitions({
             chat,
@@ -44,7 +42,6 @@ describe('buildLayer0Partitions', () => {
     });
 
     it('keeps a single partition when the source fits the target', async () => {
-        installSummaryContext();
         const chat = makeSizedChat(2, { userLength: 500, assistantLength: 2000 });
         const partitions = await buildLayer0Partitions({
             chat,
@@ -63,7 +60,6 @@ describe('buildLayer0Partitions', () => {
     });
 
     it('splits oversized sources into balanced partitions on turn boundaries', async () => {
-        installSummaryContext();
         const chat = makeSizedChat(6, { userLength: 500, assistantLength: 2000 });
         const partitions = await buildLayer0Partitions({
             chat,
@@ -90,7 +86,6 @@ describe('buildLayer0Partitions', () => {
     });
 
     it('gives an oversized single turn its own partition beyond the cap', async () => {
-        installSummaryContext();
         const chat = [
             makeMessage({ isUser: true, mes: 'x'.repeat(500) }),
             makeMessage({ mes: 'x'.repeat(30000) }),
@@ -117,7 +112,6 @@ describe('buildLayer0Partitions', () => {
     });
 
     it('extends the final segment to finalSourceEndIdx', async () => {
-        installSummaryContext();
         const chat = [
             ...makeSizedChat(2, { userLength: 500, assistantLength: 2000 }),
             makeMessage({ isUser: true, mes: 'x'.repeat(500) }),
@@ -141,17 +135,17 @@ describe('buildLayer0Partitions', () => {
 });
 
 describe('countSourceRangeTokens', () => {
-    it('counts ghosted messages but skips hidden and system ones', async () => {
-        installSummaryContext();
+    it('counts only visible conversation messages', async () => {
         const chat = [
             makeMessage({ mes: 'x'.repeat(100) }),
             makeMessage({ mes: 'x'.repeat(100), isHidden: true }),
             makeMessage({ mes: 'x'.repeat(100), isSystem: true }),
-            makeMessage({ mes: 'x'.repeat(100), isHidden: true, ghosted: true }),
+            { ...makeMessage({ mes: 'x'.repeat(100) }), extra: { type: 'tool' } },
         ];
+        installSummaryContext({ chat });
 
         const stats = await countSourceRangeTokens(chat, 0, 3, makeSummarySettings());
 
-        expect(stats.finalTokens).toBe(2 * messageLineTokens(false, 100));
+        expect(stats.finalTokens).toBe(messageLineTokens(false, 100));
     });
 });

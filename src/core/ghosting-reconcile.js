@@ -1,173 +1,28 @@
 import { getChat } from '../foundation/context.js';
+import { rangesFromSortedIndices, resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { getChatStore } from '../foundation/state.js';
 import { debug } from '../foundation/logger.js';
-import {
-    bumpSummaryStoreMutationEpoch,
-    calculateContiguousSummarizedUpTo,
-    getChatStore,
-    getEffectiveSettings,
-    saveChatStore,
-} from '../foundation/state.js';
 import { repairGhostingForRange } from './ghosting.js';
 
 /**
- * Repair missing Summaryception ghost flags after loading existing metadata.
- * @returns {Promise<boolean>} True when repair work was started
+ * Repair missing ghosting for surviving Layer 0 source messages.
+ * @returns {Promise<boolean>} True when repair work was started.
  */
 export async function repairMissingGhostingForSummaries() {
     const chat = getChat();
     const store = getChatStore();
-    if (store.summarizedUpTo < 0 || !hasSummaries(store)) {
+    const sourceMessageIds = (store.layers[0] || []).flatMap(
+        (snippet) => snippet.sourceMessageIds || [],
+    );
+    const indices = resolveScIdsToIndices(chat, sourceMessageIds);
+    const ranges = rangesFromSortedIndices(indices);
+    if (ranges.length === 0) {
         return false;
     }
 
-    const range = getProcessedRepairRange(store, chat);
-    if (!range || !hasGhostingWork(chat, range)) {
-        return false;
+    debug(`Repairing summarized ghosting for ${indices.length} surviving source messages.`);
+    for (const [start, end] of ranges) {
+        await repairGhostingForRange(start, end);
     }
-
-    debug(`Repairing summarized ghosting gaps in processed range 0-${range[1]}`);
-    await repairGhostingForRange(range[0], range[1]);
     return true;
-}
-
-/**
- * Detect and trim Summaryception metadata copied from a longer branched chat.
- * @returns {Promise<void>}
- */
-export async function repairIfBranched() {
-    const chat = getChat();
-    const store = getChatStore();
-
-    if (!chat || chat.length === 0 || store.summarizedUpTo < 0) {
-        return;
-    }
-
-    const chatLength = chat.length;
-    if (store.summarizedUpTo < chatLength) {
-        return;
-    }
-
-    const oldSummarizedUpTo = store.summarizedUpTo;
-    debug(
-        `Branch detected! summarizedUpTo (${oldSummarizedUpTo}) >= chat length (${chatLength}). Repairing...`,
-    );
-
-    const removed = trimLayer0PastBranch(store, chatLength);
-    store.summarizedUpTo = calculateContiguousSummarizedUpTo(store);
-    store.ghostedIndices = store.ghostedIndices.filter((idx) => idx < chatLength);
-    if (removed > 0) {
-        bumpSummaryStoreMutationEpoch(store);
-    }
-
-    await saveChatStore();
-
-    debug(
-        `Branch repair complete. summarizedUpTo: ${oldSummarizedUpTo} -> ${store.summarizedUpTo}`,
-    );
-    toastr.info(
-        `Branch detected - trimmed ${oldSummarizedUpTo - store.summarizedUpTo} turns of stale summary data that referenced messages beyond the branch point.`,
-        'Summaryception - Branch Repair',
-        { timeOut: 6000 },
-    );
-}
-
-/**
- * Remove Layer 0 snippets that point beyond the current chat length.
- * @param {object} store
- * @param {number} chatLength
- * @returns {number}
- */
-function trimLayer0PastBranch(store, chatLength) {
-    if (!store.layers[0]) {
-        return 0;
-    }
-
-    const before = store.layers[0].length;
-    store.layers[0] = store.layers[0].filter((snippet) => {
-        if (!snippet.turnRange) {
-            return true;
-        }
-        return snippet.turnRange[1] < chatLength;
-    });
-
-    const removed = before - store.layers[0].length;
-    if (removed > 0) {
-        debug(`Removed ${removed} Layer 0 snippets that referenced turns beyond branch point`);
-    }
-    return removed;
-}
-
-/**
- * Check whether the store contains any summary snippets.
- * @param {object} store
- * @returns {boolean}
- */
-function hasSummaries(store) {
-    return store.layers.some((layer) => layer.length > 0);
-}
-
-/**
- * Build the processed prefix that may need ghosting repair.
- * @param {SummaryceptionStore} store
- * @param {ChatMessage[]} chat
- * @returns {[number, number] | null}
- */
-function getProcessedRepairRange(store, chat) {
-    const end = Math.min(store.summarizedUpTo, chat.length - 1);
-    if (end < 0) {
-        return null;
-    }
-
-    return [0, end];
-}
-
-/**
- * Check whether a repair range contains missing ownership or visual hide work.
- * @param {ChatMessage[]} chat
- * @param {[number, number]} range
- * @returns {boolean}
- */
-function hasGhostingWork(chat, range) {
-    for (let i = range[0]; i <= range[1]; i++) {
-        if (shouldRepairLoadedMessage(chat[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * Check whether one loaded message should be repaired.
- * @param {ChatMessage | undefined} msg
- * @returns {boolean}
- */
-function shouldRepairLoadedMessage(msg) {
-    if (!msg || isUserHidden(msg)) {
-        return false;
-    }
-    const hideNonText = getEffectiveSettings().hideNonTextMessages !== false;
-    if (!hideNonText && !msg.mes?.trim()) {
-        return false;
-    }
-
-    const owned = msg.extra?.sc_ghosted === true;
-    return !owned || !isVisuallyHidden(msg);
-}
-
-/**
- * Check whether a message is user-hidden or non-Summaryception system state.
- * @param {ChatMessage} msg
- * @returns {boolean}
- */
-function isUserHidden(msg) {
-    return isVisuallyHidden(msg) && msg.extra?.sc_ghosted !== true;
-}
-
-/**
- * Check whether SillyTavern is visually hiding a message.
- * @param {ChatMessage} msg
- * @returns {boolean}
- */
-function isVisuallyHidden(msg) {
-    return msg?.is_hidden === true || msg?.is_system === true;
 }

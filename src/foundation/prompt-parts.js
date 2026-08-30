@@ -85,7 +85,7 @@ export function insertBeforeTrigger(prompt, insert, triggerLine) {
         return extra ? `${head}\n\n${extra}\n\n${trigger}` : `${head}\n\n${trigger}`;
     }
     // Fallback: append after body (preserves prior behavior if the template
-    // does not end with the expected trigger — e.g. a custom user setting).
+    // does not end with the expected trigger (e.g. a custom user setting).
     const extra = String(insert ?? '').trim();
     return extra ? `${body.trimEnd()}\n\n${extra}` : body;
 }

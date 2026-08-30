@@ -1,4 +1,4 @@
-import { debug } from '../foundation/logger.js';
+import { debug, warn } from '../foundation/logger.js';
 import { getEffectiveSettings } from '../foundation/state.js';
 import {
     STATE_SNAPSHOT_MAX_TOKENS,
@@ -11,12 +11,11 @@ import {
     getLayer0SummaryTokenTarget,
     isLayer0SizeGuardCall,
 } from './layer0-compression.js';
-import { buildRepairDiagnostics } from './repair-diagnostics.js';
+import { buildRepairDiagnostics, buildStructuralRepairFeedback } from './repair-diagnostics.js';
 import { compactStateSnapshotText, parseSnippet } from './summarizer-state.js';
 import { normalizeStructuralHeaderLines } from './structural-headers.js';
 import { countTextTokens } from './token-count.js';
-import { getSourceTokenCount } from './token-budget/source-token-counter.js';
-import { buildStructuralRepairFeedback } from './token-budget/repair-feedback-adapter.js';
+import { getSourceTokenCount } from './token-budget.js';
 
 // ─── Output Cleaning ─────────────────────────────────────────────────
 
@@ -135,6 +134,21 @@ export function validateSummarizerOutputIntegrity(text, metadata = {}) {
 
     return { valid: true, error: null };
 }
+/**
+ * Guard summarizer output before committing; warn once when invalid.
+ * @param {string} text - Cleaned summarizer output
+ * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata]
+ * @param {string} [warnPrefix] - Optional prefix for the warning message
+ * @returns {boolean}
+ */
+export function isSummarizerOutputSafe(text, metadata = {}, warnPrefix = '') {
+    const integrityResult = validateSummarizerOutputIntegrity(text, metadata);
+    if (integrityResult.valid) {
+        return true;
+    }
+    warn(`${warnPrefix}${integrityResult.error.message}`);
+    return false;
+}
 
 /**
  * Validate exact Layer 0 output size after structural validation.
@@ -235,7 +249,7 @@ export async function validateLayer0OutputSize(text, settings, metadata = {}) {
 async function compactStateNearMiss(stateText, stateTokens) {
     // Only skip when the block already fits; otherwise let the deterministic
     // compactor try. Its own post-trim token check rejects anything that still
-    // can't fit, so there is no upper bound to tune here — refusing to try a
+    // can't fit, so there is no upper bound to tune here; refusing to try a
     // trim based on the *oversize* magnitude is exactly what forced the
     // wasteful full LLM retries seen in production (a 384/478-token block
     // trims cleanly under the 300-token hard max once the compactor is allowed
@@ -434,5 +448,4 @@ function rejectLayer0Size(diagnostics, sourceBudget = {}) {
     };
 }
 
-// Re-export so historical callers importing getSourceTokenCount from prompts.js keep working.
-export { getSourceTokenCount } from './token-budget/source-token-counter.js';
+export { getSourceTokenCount } from './token-budget.js';

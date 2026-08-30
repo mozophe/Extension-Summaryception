@@ -1,7 +1,7 @@
-const selectorFor = (id) => `label[for="${id}"]`;
-const controlFor = (id) => `#${id}`;
+export const selectorFor = (id) => `label[for="${id}"]`;
+export const controlFor = (id) => `#${id}`;
 
-const basicHelp = ({ selector, title, short, controls, controlsText, when, risk }) => ({
+export const basicHelp = ({ selector, title, short, controls, controlsText, when, risk }) => ({
     selector,
     title,
     short,

@@ -106,53 +106,67 @@ export function error(...args) {
 }
 
 /**
- * Trace visible/ghosted chat counts for ghosting diagnostics.
- * @param {Array<{ is_user?: boolean, is_system?: boolean, is_hidden?: boolean, mes?: string, extra?: object }>} chat - Chat messages
- * @param {{ summarizedUpTo: number }} store - Summaryception chat store
+ * Coerce any thrown value into a plain object with the standard error fields.
+ * @param {unknown} err - A thrown value. It can be an Error, a plain object, a string, or null.
+ * @returns {{ name: string, message: string, status: number|null, retryable: boolean|null }}
+ */
+export function serializeError(err) {
+    const e =
+        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean | (() => boolean), response?: { status?: number } }} */ (
+            err
+        );
+    return {
+        name: (e && e.name) || 'Error',
+        message: e && e.message ? e.message : String(e),
+        status: (e && (e.status || e.statusCode || (e.response && e.response.status))) || null,
+        retryable:
+            e && typeof e.retryable === 'boolean'
+                ? e.retryable
+                : e && typeof e.retryable === 'function'
+                  ? e.retryable()
+                  : null,
+    };
+}
+
+/**
+ * Trace visible/owned chat counts for ghosting diagnostics.
+ * @param {ChatMessage[]} chat
+ * @param {SummaryceptionStore} store
  * @returns {void}
  */
 export function debugVisibleTurns(chat, store) {
     trace('=== DEBUG VISIBLE TURNS ===');
-    trace('  store.summarizedUpTo:', store.summarizedUpTo);
     trace('  Total chat messages:', chat.length);
 
+    const ownedIds = new Set(store.ghostedMessageIds);
     let visibleCount = 0;
     let ghostedCount = 0;
     let hiddenCount = 0;
     const visibleIndices = [];
 
     for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (!m) {
+        const message = chat[i];
+        if (!message) {
             continue;
         }
-        const messageText = m.mes?.trim() || '';
-        if (!m.is_user && !m.is_system && !m.extra?.sc_ghosted && messageText.length > 0) {
+        const owned = typeof message.sc_id === 'string' && ownedIds.has(message.sc_id);
+        const messageText = message.mes?.trim() || '';
+        if (!message.is_user && !message.is_system && !owned && messageText.length > 0) {
             visibleCount++;
             visibleIndices.push(i);
         }
-        if (m.extra?.sc_ghosted) {
+        if (owned) {
             ghostedCount++;
         }
-        if (m.is_hidden || m.is_system) {
+        if (message.is_hidden || message.is_system) {
             hiddenCount++;
         }
     }
 
-    trace('  Visible non-ghosted turns:', visibleCount);
-    trace('  Ghosted turns:', ghostedCount);
+    trace('  Visible non-owned turns:', visibleCount);
+    trace('  Summaryception-owned turns:', ghostedCount);
     trace('  Hidden/System turns:', hiddenCount);
     trace('  First 10 visible indices:', visibleIndices.slice(0, 10));
     trace('  Last 10 visible indices:', visibleIndices.slice(-10));
-
-    const unghosteredSummarized = visibleIndices.filter((idx) => idx <= store.summarizedUpTo);
-    if (unghosteredSummarized.length > 0) {
-        trace(
-            '  WARNING: Found ' +
-                unghosteredSummarized.length +
-                ' visible messages that are BEFORE summarizedUpTo!',
-        );
-        trace('  First 5 unghostered summarized indices:', unghosteredSummarized.slice(0, 5));
-    }
     trace('=== END DEBUG ===');
 }

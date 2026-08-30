@@ -1,4 +1,4 @@
-import { defaultSettings } from '../foundation/constants.js';
+import { TOAST_TITLE, defaultSettings } from '../foundation/constants.js';
 import { warn, isTraceEnabled, trace } from '../foundation/logger.js';
 import { getEffectiveSettings, getPlayerName } from '../foundation/state.js';
 import { appendLayer0PromptConstraints } from './layer0-compression.js';
@@ -12,11 +12,11 @@ import { estimateSummarizerUsage, recordSummarizerUsage } from './summarizer-usa
 import { countTextTokens, formatTokenCount } from './token-count.js';
 import { getLayer0SummaryTokenTarget, isLayer0SizeGuardCall } from './layer0-compression.js';
 import {
+    buildLayer0BudgetHint,
     countLayer0SourceBudget,
     getSourceTokenCount,
-} from './token-budget/source-token-counter.js';
+} from './token-budget.js';
 import { buildStateSchemaText } from '../foundation/state-categories.js';
-import { buildLayer0BudgetHint } from './token-budget/budget-hint-builder.js';
 
 /**
  * @typedef {object} SummarizerPipelineInputRequest
@@ -307,11 +307,11 @@ function getStringSetting(value, fallback) {
 function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metadata }) {
     const sourceState = metadata.sourceState || '(none)';
     const prompt = template
-        .replace('{{player_name}}', getPlayerName())
-        .replace('{{context_str}}', contextStr || '(none yet)')
-        .replace('{{source_state}}', sourceState)
-        .replace('{{story_txt}}', storyTxt)
-        .replace('{{state_schema}}', buildStateSchemaText(settings));
+        .replaceAll('{{player_name}}', getPlayerName())
+        .replaceAll('{{context_str}}', contextStr || '(none yet)')
+        .replaceAll('{{source_state}}', sourceState)
+        .replaceAll('{{story_txt}}', storyTxt)
+        .replaceAll('{{state_schema}}', buildStateSchemaText(settings));
     return appendLayer0PromptConstraints(prompt, settings, metadata);
 }
 
@@ -327,7 +327,7 @@ function notifyChinesePolicyRejection(percent) {
     );
     toastr.warning(
         `Summarizer response contained too much CN text (${displayPercent}%). Retrying...`,
-        'Summaryception',
+        TOAST_TITLE,
         { timeOut: 5000 },
     );
 }

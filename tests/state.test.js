@@ -1,21 +1,31 @@
 import { describe, expect, it } from 'vitest';
 
-import { UI_MODES } from '../src/foundation/constants.js';
+import {
+    CACHE_TTL,
+    MEMORY_MODE_PRESETS,
+    MEMORY_MODES,
+    UI_MODES,
+    applyMemoryModePreset,
+    defaultSettings,
+} from '../src/foundation/constants.js';
 import {
     bumpSummaryStoreMutationEpoch,
-    calculateContiguousSummarizedUpTo,
     getChatStore,
+    getCurrentSummarizedBoundary,
     getEffectiveSettings,
+    getPlayerName,
     getSettings,
     getSummaryStoreMutationEpoch,
-    getPlayerName,
 } from '../src/foundation/state.js';
-import { makeSummaryStore } from './test-helpers.js';
-import { installSummaryContext, installSillyTavernStub } from './test-helpers.js';
+import {
+    installSummaryContext,
+    installSillyTavernStub,
+    makeMessages,
+    makeSummaryStore,
+} from './test-helpers.js';
 
 describe('getSettings', () => {
     it('returns a settings object and reuses the same reference on subsequent calls', () => {
-        installSummaryContext();
         const first = getSettings();
         expect(typeof first).toBe('object');
         // The module stores rather than re-clones an existing settings object.
@@ -36,6 +46,44 @@ describe('getSettings', () => {
         // …while the originally-provided key survived unchanged.
         expect(settings.enabled).toBe(true);
     });
+
+    it('remaps persisted append-only mode to prefix_cache and resets invalid modes', () => {
+        installSummaryContext({
+            settings: { memoryMode: 'append_only' },
+        });
+        expect(getSettings().memoryMode).toBe(MEMORY_MODES.PREFIX_CACHE);
+
+        installSummaryContext({ settings: { memoryMode: 'not-a-mode' } });
+        expect(getSettings().memoryMode).toBe(MEMORY_MODES.BALANCED);
+    });
+});
+
+describe('memory mode budgets', () => {
+    it('defaults and clamps independent recent and queued budgets', () => {
+        installSummaryContext({
+            settings: { verbatimTokenBudget: 999, queuedTokenBudget: 999999 },
+        });
+        expect(getSettings()).toMatchObject({
+            verbatimTokenBudget: 4000,
+            queuedTokenBudget: 64000,
+        });
+    });
+
+    it('applies presets only on real mode transitions', () => {
+        const settings = { ...defaultSettings, memoryMode: MEMORY_MODES.BALANCED };
+        expect(applyMemoryModePreset(settings, MEMORY_MODES.BALANCED)).toBe(false);
+        expect(applyMemoryModePreset(settings, MEMORY_MODES.PREFIX_CACHE)).toBe(true);
+        expect(settings).toMatchObject(MEMORY_MODE_PRESETS[MEMORY_MODES.PREFIX_CACHE]);
+        expect(applyMemoryModePreset(settings, 'invalid')).toBe(false);
+    });
+
+    it('defaults and clamps the provider cache TTL', () => {
+        installSummaryContext({ settings: { cacheTtlMinutes: 9999 } });
+        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.MAX_MINUTES);
+
+        installSummaryContext({ settings: {} });
+        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.DEFAULT_MINUTES);
+    });
 });
 
 describe('getEffectiveSettings', () => {
@@ -44,7 +92,7 @@ describe('getEffectiveSettings', () => {
         // so OFF deterministically yields disabled effective settings. We assert
         // the OFF-branch output directly: the plan's "raw stays enabled:true" half
         // is not reflectable through getSettings() because normalizeModeSettings
-        // overwrites enabled to match the mode — drift noted, contract class
+        // overwrites enabled to match the mode; drift noted, contract class
         // (branching) preserved.
         installSummaryContext({ settings: { uiMode: UI_MODES.OFF, enabled: true } });
         const effective = getEffectiveSettings();
@@ -57,52 +105,39 @@ describe('getEffectiveSettings', () => {
         installSummaryContext({ settings: { uiMode: UI_MODES.ADVANCED } });
         expect(getEffectiveSettings()).toBe(getSettings());
     });
-
-    it('returns an enabled object with the derived Easy-mode values', () => {
-        // installSummaryContext defaults uiMode to 'easy' (the makeSummarySettings
-        // default), so an explicit Easy override exercises the same path.
-        installSummaryContext({ settings: { uiMode: UI_MODES.EASY } });
-        const effective = getEffectiveSettings();
-        expect(typeof effective).toBe('object');
-        expect(effective.enabled).toBe(true);
-    });
 });
 
 describe('getChatStore', () => {
     it('creates a normalized default store on a fresh context', () => {
-        installSummaryContext();
         const store = getChatStore();
-        expect(Array.isArray(store.layers)).toBe(true);
-        expect(store.summarizedUpTo).toBe(-1);
-        expect(Array.isArray(store.ghostedIndices)).toBe(true);
-        expect(typeof store.mutationEpoch).toBe('number');
+        expect(store).toMatchObject({ layers: [], ghostedMessageIds: [], mutationEpoch: 0 });
     });
 
-    it('repairs garbage metadata in place', () => {
+    it('normalizes UUID arrays and rejects source-less snippets', () => {
         installSummaryContext({
             metadata: {
                 summaryception: {
-                    layers: 'junk',
-                    summarizedUpTo: 'x',
-                    ghostedIndices: [1, 'a', -2, 3],
+                    layers: [
+                        [
+                            { text: 'valid', sourceMessageIds: ['a', '', 'a', 'b'] },
+                            { text: 'source-less' },
+                        ],
+                    ],
+                    ghostedMessageIds: ['b', '', 'b', 'a'],
                     mutationEpoch: NaN,
                 },
             },
         });
+
         const store = getChatStore();
-        expect(Array.isArray(store.layers)).toBe(true);
-        expect(typeof store.summarizedUpTo).toBe('number');
-        // Only non-negative integer indices survive; 1 and 3 are preserved.
-        expect(store.ghostedIndices).toContain(1);
-        expect(store.ghostedIndices).toContain(3);
-        expect(store.ghostedIndices).not.toContain(-2);
-        expect(Number.isFinite(store.mutationEpoch)).toBe(true);
+        expect(store.layers).toEqual([[{ text: 'valid', sourceMessageIds: ['a', 'b'] }]]);
+        expect(store.ghostedMessageIds).toEqual(['b', 'a']);
+        expect(store.mutationEpoch).toBe(0);
     });
 });
 
 describe('summary store mutation epoch', () => {
     it('counts up from a normalized baseline on each bump', () => {
-        installSummaryContext();
         const store = getChatStore();
         expect(bumpSummaryStoreMutationEpoch(store)).toBe(1);
         expect(store.mutationEpoch).toBe(1);
@@ -115,42 +150,30 @@ describe('summary store mutation epoch', () => {
     });
 });
 
-describe('calculateContiguousSummarizedUpTo', () => {
-    it('returns -1 when layer 0 is empty', () => {
-        installSummaryContext();
-        const store = getChatStore();
-        expect(calculateContiguousSummarizedUpTo(store)).toBe(-1);
+describe('getCurrentSummarizedBoundary', () => {
+    it('returns -1 when no Layer 0 source ID resolves', () => {
+        expect(getCurrentSummarizedBoundary(makeMessages(2), makeSummaryStore())).toBe(-1);
     });
 
-    it('extends across contiguous layer-0 ranges', () => {
+    it('tracks surviving source IDs after a live message deletion shifts indices', () => {
+        const chat = makeMessages(5);
         const store = makeSummaryStore({
-            layers: [[{ turnRange: [0, 2] }, { turnRange: [3, 5] }]],
+            layers: [[{ text: 'summary', sourceMessageIds: ['message-1', 'message-4'] }]],
         });
-        expect(calculateContiguousSummarizedUpTo(store)).toBe(5);
-    });
 
-    it('stops the cursor at the first gap and ignores later ranges, even when input is unsorted', () => {
-        const sortedGap = makeSummaryStore({
-            layers: [[{ turnRange: [0, 2] }, { turnRange: [4, 6] }]],
-        });
-        expect(calculateContiguousSummarizedUpTo(sortedGap)).toBe(2);
-
-        const unsorted = makeSummaryStore({
-            layers: [[{ turnRange: [4, 6] }, { turnRange: [0, 2] }]],
-        });
-        expect(calculateContiguousSummarizedUpTo(unsorted)).toBe(2);
+        expect(getCurrentSummarizedBoundary(chat, store)).toBe(4);
+        chat.splice(2, 1);
+        expect(getCurrentSummarizedBoundary(chat, store)).toBe(3);
     });
 });
 
 describe('getPlayerName', () => {
     it('returns name1 from the installed context', () => {
-        installSummaryContext();
         expect(getPlayerName()).toBe('Player1');
     });
 
     it('falls back to "User" when name1 is absent', () => {
-        const ctx = installSummaryContext();
-        delete ctx.name1;
+        delete globalThis.SillyTavern.getContext().name1;
         expect(getPlayerName()).toBe('User');
     });
 });

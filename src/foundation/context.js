@@ -1,14 +1,12 @@
 /**
  * Thin facade over SillyTavern.getContext().
  *
- * Centralizes every read/write against the SillyTavern runtime so that
- * API renames (chatMetadata, setExtensionPrompt, etc.) only need to be
- * updated in one place. Each accessor is defensive: missing fields
- * return null or a safe fallback instead of throwing.
+ * Centralizes every read/write against the SillyTavern runtime so API changes
+ * need one update. Required APIs target the latest stable SillyTavern release;
+ * optional integrations remain defensive.
  */
 
 const SILLYTAVERN_MACRO_SYSTEM_PATH = '/scripts/macros/macro-system.js';
-
 /**
  * Get the raw SillyTavern context object.
  * @returns {SillyTavernContext} The current SillyTavern context
@@ -81,6 +79,29 @@ export async function saveChat() {
 }
 
 /**
+ * Reload the current chat from disk and refresh the rendered UI.
+ * @returns {Promise<void>}
+ */
+export async function reloadCurrentChat() {
+    const reload = getContext().reloadCurrentChat;
+    if (typeof reload === 'function') {
+        await reload();
+    }
+}
+
+/**
+ * Shift existing rendered message ids after an inserted chat index.
+ * @param {number} index
+ * @returns {void}
+ */
+export function shiftRenderedMessageIds(index) {
+    const shift = getContext().updateViewMessageIds;
+    if (typeof shift === 'function') {
+        shift(index);
+    }
+}
+
+/**
  * Execute a slash command through SillyTavern's command parser.
  * @param {string} command - The slash command string
  * @param {Record<string, unknown>} [options] - Command options
@@ -103,29 +124,21 @@ export function setExtensionPrompt(name, text, options = {}) {
 }
 
 /**
- * Register a SillyTavern macro, preferring the current registry and falling back to the legacy context bridge.
+ * Register a SillyTavern macro with the current registry.
  * @param {string} name - Macro identifier without braces.
  * @param {(context?: object) => string} handler - Macro expansion handler.
  * @param {string} [description] - Macro description for ST docs/autocomplete.
- * @returns {Promise<boolean>} Whether a macro API accepted the registration.
+ * @returns {Promise<boolean>} Whether the registry accepted the macro.
  */
 export async function registerMacro(name, handler, description = '') {
-    if (await registerMacroWithRegistry(name, handler, description)) {
-        return true;
-    }
-    return registerMacroWithLegacyBridge(name, handler, description);
-}
-
-/**
- * Unregister a SillyTavern macro when a runtime API is available.
- * @param {string} name - Macro identifier without braces.
- * @returns {Promise<boolean>} Whether a macro API accepted the unregister request.
- */
-export async function unregisterMacro(name) {
-    if (await unregisterMacroWithRegistry(name)) {
-        return true;
-    }
-    return unregisterMacroWithLegacyBridge(name);
+    const { macros, MacroCategory } = await import(SILLYTAVERN_MACRO_SYSTEM_PATH);
+    return Boolean(
+        macros.register(name, {
+            category: MacroCategory.CHAT,
+            description,
+            handler: () => handler(),
+        }),
+    );
 }
 
 /**
@@ -139,63 +152,6 @@ export async function generateRaw(options) {
         throw new Error('generateRaw is not available in the current context.');
     }
     return await ctx.generateRaw(options);
-}
-
-async function registerMacroWithRegistry(name, handler, description) {
-    try {
-        const macroSystem = await import(SILLYTAVERN_MACRO_SYSTEM_PATH);
-        const register = macroSystem?.macros?.register;
-        if (typeof register !== 'function') {
-            return false;
-        }
-        register(name, {
-            category: macroSystem.MacroCategory?.CHAT || 'chat',
-            description,
-            handler: () => handler(),
-        });
-        return true;
-    } catch (_e) {
-        return false;
-    }
-}
-
-function registerMacroWithLegacyBridge(name, handler, description) {
-    try {
-        const ctx = getContext();
-        if (typeof ctx.registerMacro !== 'function') {
-            return false;
-        }
-        ctx.registerMacro(name, () => handler(), description);
-        return true;
-    } catch (_e) {
-        return false;
-    }
-}
-
-async function unregisterMacroWithRegistry(name) {
-    try {
-        const macroSystem = await import(SILLYTAVERN_MACRO_SYSTEM_PATH);
-        const unregister = macroSystem?.macros?.registry?.unregisterMacro;
-        if (typeof unregister !== 'function') {
-            return false;
-        }
-        return Boolean(unregister.call(macroSystem.macros.registry, name));
-    } catch (_e) {
-        return false;
-    }
-}
-
-function unregisterMacroWithLegacyBridge(name) {
-    try {
-        const ctx = getContext();
-        if (typeof ctx.unregisterMacro !== 'function') {
-            return false;
-        }
-        ctx.unregisterMacro(name);
-        return true;
-    } catch (_e) {
-        return false;
-    }
 }
 
 /**
@@ -212,17 +168,18 @@ export async function callTokenCountAsync(text) {
 }
 
 /**
- * Estimate the current foreground ST prompt by running Generate in dry-run mode.
- * This is intentionally button-driven UI work because prompt assembly can be slow.
- * @param {{ timeoutMs?: number }} [options] - Optional timeout in milliseconds
- * @returns {Promise<number | null>} Token count, or null when ST cannot expose it
+ * Check both supported SillyTavern dry-run event signatures.
+ * @param {unknown} eventData
+ * @param {unknown} dryRunArg
+ * @returns {boolean}
  */
-export async function estimateMainPromptTokens(options = {}) {
-    const payload = await captureMainPromptPayload(options);
-    if (payload === null || payload === undefined) {
-        return null;
-    }
-    return await countPromptPayloadTokens(payload);
+export function isDryRunEvent(eventData, dryRunArg) {
+    return (
+        dryRunArg === true ||
+        (eventData !== null &&
+            typeof eventData === 'object' &&
+            /** @type {{ dryRun?: unknown }} */ (eventData).dryRun === true)
+    );
 }
 
 /**
@@ -361,204 +318,8 @@ function hasStopButtonMarker(element) {
     return text.includes('fa-stop') || text.includes('fa-circle-stop') || text.includes('stop');
 }
 
-async function captureMainPromptPayload({ timeoutMs = 15000 } = {}) {
-    const ctx = getContext();
-    const eventSource = ctx.eventSource;
-    const eventName = getContextEventTypes(ctx)?.GENERATE_AFTER_DATA;
-    if (typeof ctx.generate !== 'function' || !eventSource || !eventName) {
-        return null;
-    }
-
-    let promptPayload = null;
-    const handler = (generateData, dryRun) => {
-        if (dryRun) {
-            promptPayload = extractPromptPayload(generateData);
-        }
-    };
-    if (!addRuntimeListener(eventSource, eventName, handler)) {
-        return null;
-    }
-
-    const controller = createAbortController();
-    const timeout = createDryRunTimeout(timeoutMs, () => controller?.abort());
-    try {
-        await Promise.race([
-            ctx.generate.call(ctx, 'normal', controller ? { signal: controller.signal } : {}, true),
-            timeout.promise,
-        ]);
-    } catch (_e) {
-        return null;
-    } finally {
-        timeout.cleanup();
-        removeRuntimeListener(eventSource, eventName, handler);
-    }
-    return timeout.didTimeout() ? null : promptPayload;
-}
-
 function getContextEventTypes(ctx) {
     return ctx.eventTypes || ctx.event_types || null;
-}
-
-function extractPromptPayload(generateData) {
-    if (!generateData || typeof generateData !== 'object') {
-        return null;
-    }
-    if (Object.hasOwn(generateData, 'prompt')) {
-        return generateData.prompt;
-    }
-    if (Object.hasOwn(generateData, 'input')) {
-        return generateData.input;
-    }
-    return null;
-}
-
-async function countPromptPayloadTokens(payload) {
-    if (Array.isArray(payload)) {
-        const endpointCount = await countChatPromptTokensViaEndpoint(payload);
-        if (endpointCount !== null) {
-            return endpointCount;
-        }
-    }
-    return await countPromptStringTokens(stringifyPromptPayload(payload));
-}
-
-async function countChatPromptTokensViaEndpoint(messages) {
-    if (typeof fetch !== 'function') {
-        return null;
-    }
-    const model = getTokenizerModelQuery();
-    try {
-        const response = await fetch(`/api/tokenizers/openai/count${model}`, {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify(messages),
-        });
-        if (response && typeof response.ok === 'boolean' && !response.ok) {
-            return null;
-        }
-        const data = await response.json();
-        return normalizeTokenCount(data?.token_count);
-    } catch (_e) {
-        return null;
-    }
-}
-
-async function countPromptStringTokens(text) {
-    const ctx = getContext();
-    if (typeof ctx.getTokenCountAsync !== 'function') {
-        return null;
-    }
-    try {
-        const padding = Number(ctx.powerUserSettings?.token_padding);
-        const count = await ctx.getTokenCountAsync(
-            text,
-            Number.isFinite(padding) ? padding : undefined,
-        );
-        return normalizeTokenCount(count);
-    } catch (_e) {
-        return null;
-    }
-}
-
-function getTokenizerModelQuery() {
-    try {
-        const ctx = getContext();
-        const model = typeof ctx.getTokenizerModel === 'function' ? ctx.getTokenizerModel() : '';
-        return model ? `?model=${encodeURIComponent(String(model))}` : '';
-    } catch (_e) {
-        return '';
-    }
-}
-
-function stringifyPromptPayload(payload) {
-    if (typeof payload === 'string') {
-        return payload;
-    }
-    if (Array.isArray(payload)) {
-        return payload.map(stringifyPromptMessage).join('\n\n');
-    }
-    return safeJsonStringify(payload);
-}
-
-function stringifyPromptMessage(message) {
-    if (!message || typeof message !== 'object') {
-        return String(message ?? '');
-    }
-    const role = message.role ? `[${message.role}]` : '';
-    const name = message.name ? `${message.name}: ` : '';
-    const content = stringifyPromptContent(message.content);
-    return [role, `${name}${content}`].filter(Boolean).join('\n');
-}
-
-function stringifyPromptContent(content) {
-    if (typeof content === 'string') {
-        return content;
-    }
-    if (Array.isArray(content)) {
-        return content.map(stringifyPromptContent).join('\n');
-    }
-    return safeJsonStringify(content);
-}
-
-function safeJsonStringify(value) {
-    try {
-        return JSON.stringify(value ?? '') || '';
-    } catch (_e) {
-        return String(value ?? '');
-    }
-}
-
-function normalizeTokenCount(count) {
-    const number = Number(count);
-    if (!Number.isFinite(number)) {
-        return null;
-    }
-    return Math.max(0, Math.ceil(number));
-}
-
-function addRuntimeListener(eventSource, eventName, handler) {
-    if (typeof eventSource.on === 'function') {
-        eventSource.on(eventName, handler);
-        return true;
-    }
-    if (typeof eventSource.addEventListener === 'function') {
-        eventSource.addEventListener(eventName, handler);
-        return true;
-    }
-    return false;
-}
-
-function removeRuntimeListener(eventSource, eventName, handler) {
-    if (typeof eventSource.removeListener === 'function') {
-        eventSource.removeListener(eventName, handler);
-    } else if (typeof eventSource.removeEventListener === 'function') {
-        eventSource.removeEventListener(eventName, handler);
-    }
-}
-
-function createAbortController() {
-    if (typeof AbortController !== 'function') {
-        return null;
-    }
-    return new AbortController();
-}
-
-function createDryRunTimeout(timeoutMs, onTimeout) {
-    let timedOut = false;
-    const ms = Math.max(1000, Number(timeoutMs) || 15000);
-    let timer = null;
-    const promise = new Promise((resolve) => {
-        timer = setTimeout(() => {
-            timedOut = true;
-            onTimeout();
-            resolve(null);
-        }, ms);
-    });
-    return {
-        promise,
-        cleanup: () => clearTimeout(timer),
-        didTimeout: () => timedOut,
-    };
 }
 
 /**

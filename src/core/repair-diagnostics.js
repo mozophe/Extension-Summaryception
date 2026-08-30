@@ -1,3 +1,5 @@
+import { computeSentenceCap, computeStateLineCap } from './token-budget.js';
+
 const REDUCTION_GUIDANCE = [
     { amount: 0.8, label: 'about four-fifths' },
     { amount: 0.75, label: 'about three-quarters' },
@@ -64,11 +66,16 @@ export function getReductionGuidance(actualTokens, targetTokens) {
  * @param {object} [options]
  * @param {string} [options.wrapperTag]
  * @param {string} [options.rejectedSectionTagPrefix]
+ * @param {string[]} [options.instructions]
  * @returns {string}
  */
 export function formatRepairDiagnostics(
     diagnostics,
-    { wrapperTag = 'summaryception_repair_feedback', rejectedSectionTagPrefix = 'rejected_' } = {},
+    {
+        wrapperTag = 'summaryception_repair_feedback',
+        rejectedSectionTagPrefix = 'rejected_',
+        instructions = [],
+    } = {},
 ) {
     const wrapper = String(wrapperTag);
     const source = diagnostics || {};
@@ -83,9 +90,63 @@ export function formatRepairDiagnostics(
     appendRejectedSectionBlocks(lines, failing, rejectedSectionTagPrefix);
     appendPassingSectionGuidance(lines, passing);
     appendRejectedDraftFallback(lines, source, failing);
+    lines.push(...instructions.filter(Boolean));
 
     lines.push('</' + wrapper + '>');
     return lines.join('\n');
+}
+/**
+ * Build countable repair feedback for output above a hard maximum.
+ * @param {object} diagnostics
+ * @param {{ sourceStateKeyCount?: number, targetTokens?: number, layer?: 'l0' | 'l1' | 'l2' }} [sourceBudget]
+ * @returns {string}
+ */
+export function buildStructuralRepairFeedback(diagnostics = {}, sourceBudget = {}) {
+    const violations = Array.isArray(diagnostics.violations) ? diagnostics.violations : [];
+    const lines = [];
+
+    for (const violation of violations) {
+        if (!violation || violation.reason !== 'above-hard-maximum') {
+            continue;
+        }
+        const text = String(violation.text || '');
+        if (violation.id === 'state') {
+            const actual = countStateLines(text);
+            const cap = computeStateLineCap(sourceBudget.sourceStateKeyCount);
+            if (actual > cap) {
+                lines.push(
+                    `Your [STATE] had ${actual} lines; maximum ${cap}. Remove the ${actual - cap} least-durable keys.`,
+                );
+            }
+        } else if (violation.id === 'narrative') {
+            const actual = countSentences(text);
+            const cap = computeSentenceCap(sourceBudget.layer ?? 'l0', sourceBudget.targetTokens);
+            if (actual > cap) {
+                lines.push(
+                    `Your [NARRATIVE] had ${actual} sentences; maximum ${cap}. Merge or drop the ${actual - cap} least-important.`,
+                );
+            }
+        }
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Count sentences in a narrative passage.
+ * @param {string} text
+ * @returns {number}
+ */
+export function countSentences(text) {
+    const trimmed = String(text || '').trim();
+    return trimmed ? trimmed.split(/[.!?]+\s+/).filter(Boolean).length : 0;
+}
+
+function countStateLines(text) {
+    return String(text || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && /.+:.+/.test(line)).length;
 }
 
 function normalizeCount(value) {

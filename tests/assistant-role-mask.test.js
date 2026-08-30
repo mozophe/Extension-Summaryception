@@ -103,6 +103,30 @@ describe('maskUserRoleAsAssistantInGenerateData payload shapes', () => {
                 .every((m) => m.role === 'assistant'),
         ).toBe(true);
     });
+
+    it('preserves reasoning fields while rewriting roles', () => {
+        const messages = [
+            {
+                role: 'user',
+                content: 'a',
+                reasoning: 'saved reasoning',
+                reasoning_content: 'provider reasoning',
+            },
+        ];
+
+        expect(
+            maskUserRoleAsAssistantInGenerateData(
+                { messages },
+                onSettings(MASK_USER_ROLE_MODES.REWRITE_ALL),
+            ),
+        ).toBe(1);
+        expect(messages[0]).toEqual({
+            role: 'assistant',
+            content: 'a',
+            reasoning: 'saved reasoning',
+            reasoning_content: 'provider reasoning',
+        });
+    });
 });
 
 describe('maskUserRoleAsAssistantInGenerateData modes', () => {

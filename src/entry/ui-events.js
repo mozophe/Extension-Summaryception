@@ -1,6 +1,9 @@
 import {
+    MEMORY_MODE_PRESETS,
     MEMORY_MODES,
+    TOAST_TITLE,
     MASK_USER_ROLE_MODES,
+    applyMemoryModePreset,
     PROMOTION_PROMPT_PRESETS,
     PROMOTION_REPAIR_PROMPT_PRESETS,
     PROMOTION_SYSTEM_PROMPT_PRESETS,
@@ -12,6 +15,8 @@ import {
     defaultSettings,
 } from '../foundation/constants.js';
 import { getChat } from '../foundation/context.js';
+import { clampInteger } from '../foundation/numeric.js';
+import { rangesFromSortedIndices, resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { error, warn } from '../foundation/logger.js';
 import {
     bumpSummaryStoreMutationEpoch,
@@ -21,7 +26,7 @@ import {
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
-import { ghostMessagesUpTo, unghostAllMessages } from '../core/ghosting.js';
+import { ghostMessagesInRange, unghostAllMessages } from '../core/ghosting.js';
 import {
     abortSummarization,
     getIsSummarizing,
@@ -37,12 +42,13 @@ import {
 import { updateInjection } from '../features/injection.js';
 import { persistAndRefresh } from '../features/persist.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
-import { refreshMainLLMContextEstimate, updateUI, syncLLMContextPreview } from './ui.js';
+import { updateUI, syncLLMContextPreview } from './ui.js';
 import {
     clearManualProgressToast,
     confirmSlopBreaker,
     createManualProgressToast,
     showCatchupOutcome,
+    showBusySummaryToast,
     showSlopBreakerNoop,
     showSlopBreakerOutcome,
     updateManualProgressToast,
@@ -52,7 +58,6 @@ import {
     bindDocumentSetting,
     bindSliderSettingPairs,
     readChecked,
-    readIntegerOrZero,
     readString,
     syncRoleMaskModeControl,
 } from './ui-bind.js';
@@ -108,6 +113,16 @@ const PROMPT_FIELDS = [
     },
 ];
 
+/**
+ * Save settings, then update injection and the UI.
+ * @returns {void}
+ */
+export function saveAndRefreshUi() {
+    saveSettings();
+    updateInjection();
+    updateUI();
+}
+
 // Event bindings
 
 /**
@@ -117,7 +132,6 @@ const PROMPT_FIELDS = [
 export function bindUIEvents() {
     bindModeHandlers();
     bindToggleHandlers();
-    bindMemoryModeHandlers();
     bindSliderHandlers();
     bindTextareaHandlers();
     bindClickHandlers();
@@ -143,10 +157,7 @@ function bindModeHandlers() {
         if (mode === UI_MODES.EASY || mode === UI_MODES.ADVANCED) {
             s.configMode = mode;
         }
-        saveSettings();
-        updateInjection();
-        updateUI();
-
+        saveAndRefreshUi();
         if (s.enabled) {
             requestAutoSummaryRefresh('mode changed');
         }
@@ -163,10 +174,7 @@ function bindToggleHandlers() {
         s.enabled = $(this).prop('checked');
         // Preserve the chosen complexity panel; only flip on/off, not Easy↔Advanced.
         s.uiMode = s.enabled ? s.configMode || UI_MODES.EASY : UI_MODES.OFF;
-        saveSettings();
-        updateInjection();
-        updateUI();
-
+        saveAndRefreshUi();
         if (s.enabled) {
             requestAutoSummaryRefresh('enabled');
         }
@@ -216,63 +224,26 @@ function bindToggleHandlers() {
         selector: '#sc_mask_user_role_mode',
         key: 'maskUserRoleMode',
         read: readString,
-        beforeSave: (settings, value, $source) => {
-            const mode = String(value);
+        beforeSave: (settings, _value, $source) => {
+            const mode = String(_value);
             if (!(/** @type {string[]} */ (Object.values(MASK_USER_ROLE_MODES)).includes(mode))) {
                 settings.maskUserRoleMode = defaultSettings.maskUserRoleMode;
                 $source.val(defaultSettings.maskUserRoleMode);
             }
         },
     });
-}
-
-/**
- * Bind handlers for memory mode and custom injection placement.
- * @returns {void}
- */
-function bindMemoryModeHandlers() {
-    bindEasyMemoryModeHandler();
-    bindAdvancedMemoryModeHandler();
+    $(document).on(
+        'change',
+        'input[name="sc_easy_memory_mode"], input[name="sc_memory_mode"]',
+        function () {
+            const settings = getSettings();
+            if (!applyMemoryModePreset(settings, String($(this).val()))) {
+                return;
+            }
+            saveAndRefreshUi();
+        },
+    );
     bindCustomPlacementHandlers();
-}
-
-function bindEasyMemoryModeHandler() {
-    $(document).on('change', 'input[name="sc_easy_memory_mode"]', function () {
-        const mode = String($(this).val());
-        if (mode !== MEMORY_MODES.STANDARD && mode !== MEMORY_MODES.CACHE) {
-            return;
-        }
-
-        const s = getSettings();
-        if (s.easyMemoryMode === mode) {
-            return;
-        }
-
-        s.easyMemoryMode = mode;
-        saveSettings();
-        updateInjection();
-        updateUI();
-    });
-}
-
-function bindAdvancedMemoryModeHandler() {
-    $(document).on('change', 'input[name="sc_memory_mode"]', function () {
-        const mode = String($(this).val());
-        if (mode !== MEMORY_MODES.STANDARD && mode !== MEMORY_MODES.CACHE) {
-            return;
-        }
-
-        const s = getSettings();
-        if (s.memoryMode === mode) {
-            return;
-        }
-
-        s.memoryMode = mode;
-        s.verbatimTokenBudget = mode === MEMORY_MODES.CACHE ? 32000 : 22000;
-        saveSettings();
-        updateInjection();
-        updateUI();
-    });
 }
 
 function bindCustomPlacementHandlers() {
@@ -281,25 +252,25 @@ function bindCustomPlacementHandlers() {
         {
             eventName: 'change',
             selector: '#sc_easy_connection_source',
-            key: 'easyConnectionSource',
+            key: 'connectionSource',
             read: readString,
         },
         {
             eventName: 'change',
             selector: '#sc_easy_connection_profile',
-            key: 'easyConnectionProfileId',
+            key: 'connectionProfileId',
             read: readString,
         },
         {
             eventName: 'change',
             selector: '#sc_easy_merge_connection_source',
-            key: 'easyMergeConnectionSource',
+            key: 'mergeConnectionSource',
             read: readString,
         },
         {
             eventName: 'change',
             selector: '#sc_easy_merge_connection_profile',
-            key: 'easyMergeConnectionProfileId',
+            key: 'mergeConnectionProfileId',
             read: readString,
         },
         {
@@ -318,7 +289,7 @@ function bindCustomPlacementHandlers() {
             eventName: 'input change',
             selector: '#sc_custom_memory_depth',
             key: 'customMemoryDepth',
-            read: ($element) => clampNumberInput($element.val(), 0, 10000),
+            read: ($element) => clampInteger($element.val(), 0, 10000),
         },
     ];
 
@@ -343,26 +314,11 @@ function requestAutoSummaryRefresh(reason) {
         .finally(updateUI);
 }
 
-function clampNumberInput(value, min, max) {
-    const parsed = Number.parseInt(String(value), 10);
-    if (!Number.isFinite(parsed)) {
-        return min;
-    }
-    return Math.min(max, Math.max(min, parsed));
-}
-
 /**
- * Bind handlers for strip patterns and response length inputs.
+ * Bind the strip patterns input handler.
  * @returns {void}
  */
 function bindInputHelpers() {
-    bindDocumentSetting({
-        eventName: 'input',
-        selector: '#sc_summarizer_response_length',
-        key: 'summarizerResponseLength',
-        read: readIntegerOrZero,
-    });
-
     bindDocumentSetting({
         eventName: 'change',
         selector: '#sc_strip_patterns',
@@ -447,9 +403,9 @@ function cancelManualRun(controller) {
 function onStopSummarize() {
     if (!getIsSummarizing() && !hasActiveAbortController()) {
         if (getSettings().autoPaused) {
-            toastr.info('Already paused.', 'Summaryception');
+            toastr.info('Already paused.', TOAST_TITLE);
         } else {
-            toastr.info('Nothing is running.', 'Summaryception');
+            toastr.info('Nothing is running.', TOAST_TITLE);
         }
         return;
     }
@@ -457,11 +413,9 @@ function onStopSummarize() {
     const s = getSettings();
     s.autoPaused = true;
     saveSettings();
-    toastr.warning(
-        'Summarization paused. Progress saved. Press Resume to continue.',
-        'Summaryception',
-        { timeOut: 5000 },
-    );
+    toastr.warning('Summarization paused. Progress saved. Press Resume to continue.', TOAST_TITLE, {
+        timeOut: 5000,
+    });
     $(this).prop('disabled', true);
     setTimeout(() => $(this).prop('disabled', false), 2000);
     updateUI();
@@ -474,12 +428,12 @@ function onStopSummarize() {
 function onResumeSummarize() {
     const s = getSettings();
     if (!s.autoPaused) {
-        toastr.info('Not paused.', 'Summaryception');
+        toastr.info('Not paused.', TOAST_TITLE);
         return;
     }
     s.autoPaused = false;
     saveSettings();
-    toastr.success('Resumed. Automatic summarization is active again.', 'Summaryception', {
+    toastr.success('Resumed. Automatic summarization is active again.', TOAST_TITLE, {
         timeOut: 3000,
     });
     updateUI();
@@ -487,62 +441,115 @@ function onResumeSummarize() {
 }
 
 /**
- * Force the catch-up pass to summarize turns beyond the dynamic verbatim window.
+ * Force Summarize button click handler.
  * @returns {Promise<void>}
  */
 async function onForceSummarize() {
-    const s = getEffectiveSettings();
+    await executeForceSummarize($(this));
+}
+
+/**
+ * Build the shared abort/progress wiring for a manual summarization run.
+ * @returns {{ options: object, clearProgressToast: () => void }}
+ */
+function makeManualRunOptions() {
+    const controller = new AbortController();
+    let progressToast = null;
+    const options = {
+        signal: controller.signal,
+        onStart: (progress) => {
+            progressToast = createManualProgressToast({
+                ...progress,
+                onCancel: () => cancelManualRun(controller),
+            });
+        },
+        onProgress: (progress) => updateManualProgressToast(progressToast, progress),
+    };
+    return {
+        options,
+        clearProgressToast: () => clearManualProgressToast(progressToast),
+    };
+}
+
+/**
+ * Shared manual-run guard. Show the toast for the first failing check.
+ * @param {object} s Effective settings.
+ * @returns {boolean} true when a manual run is allowed.
+ */
+function guardManualRun(s) {
     if (!s.enabled) {
         toastr.warning('Enable Summaryception first.');
-        return;
+        return false;
     }
     if (getIsSummarizing()) {
-        toastr.warning('Already summarizing. Please wait.');
-        return;
+        showBusySummaryToast();
+        return false;
     }
     showManualCacheWarning(s);
-    $(this)
-        .prop('disabled', true)
-        .html('<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>');
+    return true;
+}
+
+/**
+ * Disable a button with busy html while `fn` runs. Restore the idle html after.
+ * @param {object | null} $button jQuery-wrapped button, or null to skip.
+ * @param {{ busy: string, idle: string }} html Busy and idle button html.
+ * @param {() => Promise<void>} fn Work to run while the button is busy.
+ * @returns {Promise<void>}
+ */
+async function withBusyButton($button, { busy, idle }, fn) {
+    if ($button) {
+        $button.prop('disabled', true).html(busy);
+    }
     try {
-        const plan = await buildForceSummaryRoutePlan(getChat(), getChatStore(), s);
-
-        if (!plan.ready) {
-            toastr.info(
-                'Nothing to summarize - current chat is within the verbatim window.',
-                'Summaryception',
-            );
-            return;
-        }
-
-        const overflow = Math.max(plan.batchTurns.length, plan.overflowCount);
-        toastr.info(`${overflow} turns ready to process. Starting...`, 'Summaryception', {
-            timeOut: 2000,
-        });
-
-        const controller = new AbortController();
-        let progressToast = null;
-        const outcome = await runManualWithProgress(
-            () =>
-                runCatchup(plan.rawPlan.visibleTurns, overflow, {
-                    signal: controller.signal,
-                    onStart: (progress) => {
-                        progressToast = createManualProgressToast({
-                            ...progress,
-                            onCancel: () => cancelManualRun(controller),
-                        });
-                    },
-                    onProgress: (progress) => updateManualProgressToast(progressToast, progress),
-                }),
-            () => clearManualProgressToast(progressToast),
-        );
-        showCatchupOutcome(outcome);
-        updateInjection();
-        reloadAfterManualRun(outcome);
+        await fn();
     } finally {
-        $(this)
-            .prop('disabled', false)
-            .html('<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>');
+        if ($button) {
+            $button.prop('disabled', false).html(idle);
+        }
+    }
+}
+
+/**
+ * Run Force Summarize from a panel button or the stale-cache advice toast.
+ * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
+ * @returns {Promise<void>}
+ */
+async function executeForceSummarize($button) {
+    const s = getEffectiveSettings();
+    if (!guardManualRun(s)) {
+        return;
+    }
+    try {
+        await withBusyButton(
+            $button,
+            {
+                busy: '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>',
+                idle: '<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>',
+            },
+            async () => {
+                const plan = await buildForceSummaryRoutePlan(getChat(), getChatStore(), s);
+
+                if (!plan.ready) {
+                    toastr.info('Nothing eligible to summarize.', TOAST_TITLE);
+                    return;
+                }
+
+                const overflow = Math.max(plan.batchTurns.length, plan.overflowCount);
+                toastr.info(`${overflow} turns ready to process. Starting...`, TOAST_TITLE, {
+                    timeOut: 2000,
+                });
+
+                const manual = makeManualRunOptions();
+                const outcome = await runManualWithProgress(
+                    () => runCatchup(manual.options),
+                    manual.clearProgressToast,
+                );
+                showCatchupOutcome(outcome);
+                updateInjection();
+                reloadAfterManualRun(outcome);
+            },
+        );
+    } finally {
         updateUI();
     }
 }
@@ -553,15 +560,9 @@ async function onForceSummarize() {
  */
 async function onSlopBreaker() {
     const s = getEffectiveSettings();
-    if (!s.enabled) {
-        toastr.warning('Enable Summaryception first.');
+    if (!guardManualRun(s)) {
         return;
     }
-    if (getIsSummarizing()) {
-        toastr.warning('Already summarizing. Please wait.');
-        return;
-    }
-    showManualCacheWarning(s);
 
     const plan = await buildSlopSummaryRoutePlan(getChat(), getChatStore(), s);
     if (!plan.ready) {
@@ -572,44 +573,36 @@ async function onSlopBreaker() {
         return;
     }
 
-    $(this)
-        .prop('disabled', true)
-        .html('<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>');
     try {
-        const controller = new AbortController();
-        let progressToast = null;
-        const outcome = await runManualWithProgress(
-            () =>
-                runSlopBreaker({
-                    signal: controller.signal,
-                    onStart: (progress) => {
-                        progressToast = createManualProgressToast({
-                            ...progress,
-                            onCancel: () => cancelManualRun(controller),
-                        });
-                    },
-                    onProgress: (progress) => updateManualProgressToast(progressToast, progress),
-                }),
-            () => clearManualProgressToast(progressToast),
+        await withBusyButton(
+            $(this),
+            {
+                busy: '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>',
+                idle: '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
+            },
+            async () => {
+                const manual = makeManualRunOptions();
+                const outcome = await runManualWithProgress(
+                    () => runSlopBreaker(manual.options),
+                    manual.clearProgressToast,
+                );
+                showSlopBreakerOutcome(outcome);
+                updateInjection();
+                reloadAfterManualRun(outcome);
+            },
         );
-        showSlopBreakerOutcome(outcome);
-        updateInjection();
-        reloadAfterManualRun(outcome);
     } finally {
-        $(this)
-            .prop('disabled', false)
-            .html('<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>');
         updateUI();
     }
 }
 
 function showManualCacheWarning(settings) {
-    if (settings.memoryMode !== MEMORY_MODES.CACHE) {
+    if (settings.memoryMode !== MEMORY_MODES.PREFIX_CACHE) {
         return;
     }
     toastr.info(
         'Manual summarization updates memory immediately and may reset cache savings for the next request.',
-        'Summaryception',
+        TOAST_TITLE,
         { timeOut: 5000 },
     );
 }
@@ -673,22 +666,35 @@ function triggerImport() {
             }
 
             const store = getChatStore();
+            if (
+                !Array.isArray(data.ghostedMessageIds) ||
+                !data.layers.every(
+                    (layer) =>
+                        Array.isArray(layer) &&
+                        layer.every(
+                            (snippet) =>
+                                Array.isArray(snippet?.sourceMessageIds) &&
+                                snippet.sourceMessageIds.length > 0,
+                        ),
+                )
+            ) {
+                toastr.error('Invalid file format.');
+                return;
+            }
 
             await unghostAllMessages();
-
             store.layers = data.layers;
-            store.summarizedUpTo = data.summarizedUpTo ?? -1;
-            store.ghostedIndices = data.ghostedIndices || [];
+            store.ghostedMessageIds = data.ghostedMessageIds;
             bumpSummaryStoreMutationEpoch(store);
-
-            if (store.summarizedUpTo >= 0) {
-                await ghostMessagesUpTo(store.summarizedUpTo, { showProgress: true });
+            const indices = resolveScIdsToIndices(getChat(), store.ghostedMessageIds);
+            for (const [start, end] of rangesFromSortedIndices(indices)) {
+                await ghostMessagesInRange(start, end, { showProgress: true });
             }
 
             await persistAndRefresh({ ui: true });
             toastr.success(
-                `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded, messages ghosted up to index ${store.summarizedUpTo}.`,
-                'Summaryception',
+                `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded.`,
+                TOAST_TITLE,
                 { timeOut: 4000 },
             );
         } catch (err) {
@@ -719,8 +725,6 @@ function onResetDefaults() {
     const preservedCustomMemoryPosition = s.customMemoryPosition;
     const preservedCustomMemoryRole = s.customMemoryRole;
     const preservedCustomMemoryDepth = s.customMemoryDepth;
-
-    // Reset sliders
     s.memoryMode = preservedMemoryMode;
     s.customMemoryPosition = preservedCustomMemoryPosition;
     s.customMemoryRole = preservedCustomMemoryRole;
@@ -729,8 +733,10 @@ function onResetDefaults() {
     s.maxSummaryTurns = defaultSettings.maxSummaryTurns;
     s.maxL0SourceTokens = defaultSettings.maxL0SourceTokens;
     s.minSummaryBudget = defaultSettings.minSummaryBudget;
-    s.verbatimTokenBudget =
-        preservedMemoryMode === MEMORY_MODES.CACHE ? 32000 : defaultSettings.verbatimTokenBudget;
+    const retentionPreset =
+        MEMORY_MODE_PRESETS[preservedMemoryMode] || MEMORY_MODE_PRESETS.balanced;
+    s.verbatimTokenBudget = retentionPreset.verbatimTokenBudget;
+    s.queuedTokenBudget = retentionPreset.queuedTokenBudget;
     s.memoryTokenBudget = defaultSettings.memoryTokenBudget;
     s.layer0SummaryTokenTarget = defaultSettings.layer0SummaryTokenTarget;
     s.snippetsPerLayer = defaultSettings.snippetsPerLayer;
@@ -753,13 +759,10 @@ function onResetDefaults() {
     s.maskUserRoleAsAssistant = defaultSettings.maskUserRoleAsAssistant;
     s.maskUserRoleMode = defaultSettings.maskUserRoleMode;
 
-    saveSettings();
-    updateInjection();
-    updateUI();
-
+    saveAndRefreshUi();
     toastr.success(
         'Advanced settings reset to defaults. Memory mode, connection settings, and summary memory were preserved.',
-        'Summaryception',
+        TOAST_TITLE,
         { timeOut: 4000 },
     );
 }
@@ -789,7 +792,7 @@ function bindClickHandlers() {
             await clearSummaryceptionMemory({ updateUi: true });
             toastr.success(
                 'Memory cleared & messages unghosted. Reloading chat context.',
-                'Summaryception',
+                TOAST_TITLE,
                 { timeOut: 2000 },
             );
             reloadPage();
@@ -797,20 +800,26 @@ function bindClickHandlers() {
             error('Clear memory failed:', e);
             toastr.error(
                 'Clear failed. Open F12 and update Summaryception if this repeats.',
-                'Summaryception',
+                TOAST_TITLE,
                 { timeOut: 8000 },
             );
         }
     });
 
     $(document).on('click', '#sc_force_summarize, #sc_easy_force_summarize', onForceSummarize);
+    $(document).on('click', '#sc_stale_cache_force', function () {
+        const $toast = $(this).closest('.toast');
+        if ($toast.length) {
+            toastr.clear($toast);
+        }
+        void executeForceSummarize(null);
+    });
     $(document).on('click', '#sc_slop_breaker, #sc_easy_slop_breaker', onSlopBreaker);
 
     $(document).on('click', '#sc_stop_summarize, #sc_easy_stop_summarize', onStopSummarize);
     $(document).on('click', '#sc_resume_summarize, #sc_easy_resume_summarize', onResumeSummarize);
 
     $(document).on('click', '#sc_refresh_preview', () => updateUI());
-    $(document).on('click', '#sc_estimate_main_context', () => refreshMainLLMContextEstimate());
 
     $(document).on('click', '#sc_export', function () {
         const store = getChatStore();
@@ -821,7 +830,7 @@ function bindClickHandlers() {
         a.download = `summaryception_${Date.now()}.json`;
         a.click();
         URL.revokeObjectURL(url);
-        toastr.success('Memory exported', 'Summaryception');
+        toastr.success('Memory exported', TOAST_TITLE);
     });
 
     $(document).on('click', '#sc_import', triggerImport);
@@ -837,7 +846,7 @@ function bindClickHandlers() {
             return;
         }
         $('#sc_injection_template').val(RECALL_REPEAT_INJECTION_TEMPLATE).trigger('change');
-        toastr.success('Recall-repeat template inserted.', 'Summaryception');
+        toastr.success('Recall-repeat template inserted.', TOAST_TITLE);
     });
 
     $(document).on('click', '#sc_restore_injection_template', function () {
@@ -845,7 +854,7 @@ function bindClickHandlers() {
             return;
         }
         $('#sc_injection_template').val(defaultSettings.injectionTemplate).trigger('change');
-        toastr.success('Default injection template restored.', 'Summaryception');
+        toastr.success('Default injection template restored.', TOAST_TITLE);
     });
 }
 

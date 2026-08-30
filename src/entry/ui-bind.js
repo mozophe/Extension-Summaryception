@@ -72,6 +72,16 @@ export function bindDataSettingElements(selector, options = {}) {
 }
 
 /**
+ * Sync every declarative settings control from the provided settings object.
+ * @param {ReturnType<typeof getSettings>} [settings]
+ * @returns {void}
+ */
+export function syncAllSettingsToDOM(settings = getSettings()) {
+    syncDataSettingElements('[data-sc-setting]', settings);
+    syncSliderSettingPairs(SETTING_SLIDER_SELECTOR, settings);
+}
+
+/**
  * Sync all data-bound elements from the provided settings object.
  * @param {string} selector
  * @param {ReturnType<typeof getSettings>} [settings]
@@ -181,8 +191,22 @@ function getDataSettingReader($element) {
 }
 
 function syncDataSettingElementValue($element, settings, key) {
-    const fallback = getDataSettingFallback($element);
-    $element.val(String(settings[key] || fallback));
+    if (!(key in settings)) {
+        return;
+    }
+    const value = settings[key];
+    if ($element.is(':checkbox')) {
+        $element.prop('checked', Boolean(value));
+    } else if ($element.is(':radio')) {
+        $element.prop('checked', String(value) === String($element.val()));
+    } else {
+        const fallback = getDataSettingFallback($element);
+        const displayValue =
+            getDataSettingType($element) === 'lines' && Array.isArray(value)
+                ? value.join('\n')
+                : value;
+        $element.val(displayValue ?? fallback);
+    }
 }
 
 function getDataSettingFallback($element) {
@@ -290,7 +314,7 @@ function formatSliderChipValue(value, slider) {
 }
 
 /**
- * Show and enable the role-mask mode control only while masking is enabled.
+ * Sync role-mask controls with masking enabled state.
  * @param {boolean} enabled
  * @returns {void}
  */

@@ -1,6 +1,6 @@
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
 import { applyRegexToMessage } from './regex-proxy.js';
-import { buildMemoryInjection } from './memory-injection.js';
+import { buildMemoryInjectionParts, renderInjectionTemplate } from './memory-injection.js';
 import { countMessageTokens } from './token-count.js';
 
 export { buildMemoryInjection } from './memory-injection.js';
@@ -13,6 +13,16 @@ export { buildMemoryInjection } from './memory-injection.js';
  * @property {string} mes - Assistant message text.
  * @property {string} name - Assistant display name.
  */
+
+/**
+ * Build an assistant turn view of a chat message.
+ * @param {ChatMessage} message - Assistant chat message
+ * @param {number} index - Chat index for the message
+ * @returns {AssistantTurn} Assistant turn
+ */
+export function toAssistantTurn(message, index) {
+    return { index, mes: String(message.mes), name: message.name || 'Assistant' };
+}
 
 /**
  * @typedef {object} IndexedChatMessage
@@ -91,6 +101,21 @@ function* iterateBackwardChatRange(chat, startIndex, endIndex) {
 }
 
 /**
+ * Check whether a live chat record belongs in Layer 0 summarizer planning.
+ * @param {ChatMessage | undefined} message
+ * @returns {boolean}
+ */
+export function isSummarizerConversationMessage(message) {
+    if (!message?.mes || !String(message.mes).trim()) {
+        return false;
+    }
+    if (message.is_system || message.is_hidden || message.extra?.type) {
+        return false;
+    }
+    return true;
+}
+
+/**
  * Extract all assistant turns from the chat.
  * @param {ChatMessage[]} chat - The SillyTavern chat array
  * @returns {AssistantTurn[]} Assistant turns
@@ -99,10 +124,8 @@ export function getAssistantTurns(chat) {
     const turns = [];
     for (let i = 0; i < chat.length; i++) {
         const m = chat[i];
-        const isOurGhost = m.extra?.sc_ghosted === true;
-        const isAssistant = !m.is_user && (!m.is_system || isOurGhost);
-        if (isAssistant && m.mes && m.mes.trim().length > 0) {
-            turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
+        if (isSummarizerConversationMessage(m) && !m.is_user) {
+            turns.push(toAssistantTurn(m, i));
         }
     }
     return turns;
@@ -120,11 +143,11 @@ export function getVisibleAssistantTurns(chat) {
         if (
             !m.is_user &&
             !m.is_system &&
-            !m.extra?.sc_ghosted &&
+            !isSummaryceptionOwnedMessage(m) &&
             m.mes &&
             m.mes.trim().length > 0
         ) {
-            turns.push({ index: i, mes: m.mes, name: m.name || 'Assistant' });
+            turns.push(toAssistantTurn(m, i));
         }
     }
     return turns;
@@ -151,6 +174,49 @@ export function getPromptDepthsByChatIndex(chat) {
 
     return depths;
 }
+/**
+ * Format a chat message as the summarizer sees it.
+ * @param {ChatMessage} message
+ * @param {string} text
+ * @returns {string}
+ */
+export function formatMessageSpeakerLine(message, text) {
+    return `${message.is_user ? 'Player' : 'Assistant'}: ${text}`;
+}
+
+/**
+ * Render one chat message into speaker lines, with and without regex scripts.
+ * @param {ChatMessage} message
+ * @param {number | undefined} depth
+ * @param {{ applyRegexScripts?: boolean }} [options]
+ * @returns {Promise<{ rawText: string, finalText: string, rawLine: string, finalLine: string, changed: boolean }>}
+ */
+async function renderMessageLines(message, depth, { applyRegexScripts } = {}) {
+    const rawText = String(message.mes || '').trim();
+    const finalText = applyRegexScripts
+        ? await applyRegexToMessage(rawText, Boolean(message.is_user), depth)
+        : rawText;
+    const rawLine = formatMessageSpeakerLine(message, rawText);
+    const finalLine = formatMessageSpeakerLine(message, finalText);
+
+    return { rawText, finalText, rawLine, finalLine, changed: rawLine !== finalLine };
+}
+
+/**
+ * Apply source regex scripts and count one rendered chat message.
+ * @param {ChatMessage} message
+ * @param {number | undefined} depth
+ * @param {ExtensionSettings} settings
+ * @returns {Promise<{ rawTokens: number, finalTokens: number, rawTokensEstimated: boolean, finalTokensEstimated: boolean, changed: boolean }>}
+ */
+export async function countProcessedMessage(message, depth, settings) {
+    const { rawLine, finalLine, changed } = await renderMessageLines(message, depth, {
+        applyRegexScripts: settings.applyRegexScripts,
+    });
+    const tokens = await countMessageTokens(message, rawLine, finalLine);
+
+    return { ...tokens, changed };
+}
 
 /**
  * @typedef {object} PassageRegexStats
@@ -171,9 +237,8 @@ export function getPromptDepthsByChatIndex(chat) {
  */
 
 /**
- * Build passage text and regex token stats from a range of chat messages.
- * Skips messages that are hidden (by user or system) UNLESS they were
- * hidden by Summaryception (sc_ghosted). Also skips empty messages.
+ * Skips user-hidden messages while retaining messages hidden by Summaryception ownership.
+ * Also skips empty messages.
  * @param {ChatMessage[]} chat
  * @param {number} startIdx
  * @param {number} endIdx
@@ -217,43 +282,26 @@ function createPassageStatsAccumulator() {
 }
 
 async function renderPassageMessage({ message, depth, applyRegexScripts }) {
-    if (!isMessagePassageEligible(message)) {
+    if (!isSummarizerConversationMessage(message)) {
         return null;
     }
 
-    const rawText = message.mes.trim();
-    const finalText = await getPassageFinalText({
-        message,
-        rawText,
-        depth,
-        applyRegexScripts,
-    });
-    const speaker = message.is_user ? 'Player' : 'Assistant';
-
     return {
         message,
-        rawLine: `${speaker}: ${rawText}`,
-        finalLine: `${speaker}: ${finalText}`,
-        changed: finalText !== rawText,
+        ...(await renderMessageLines(message, depth, { applyRegexScripts })),
     };
 }
 
-function isMessagePassageEligible(message) {
-    if (!message?.mes || !message.mes.trim()) {
+/**
+ * Check whether Summaryception owns a live message's hidden state.
+ * @param {ChatMessage | undefined} message
+ * @returns {boolean}
+ */
+export function isSummaryceptionOwnedMessage(message) {
+    if (typeof message?.sc_id !== 'string') {
         return false;
     }
-    return !isUserHiddenMessage(message);
-}
-
-function isUserHiddenMessage(message) {
-    return (message.is_system || message.is_hidden) && !message.extra?.sc_ghosted;
-}
-
-async function getPassageFinalText({ message, rawText, depth, applyRegexScripts }) {
-    if (!applyRegexScripts) {
-        return rawText;
-    }
-    return await applyRegexToMessage(rawText, message.is_user, depth);
+    return getChatStore().ghostedMessageIds.includes(message.sc_id);
 }
 
 function addPassageTokenStats(accumulator, counted) {
@@ -298,7 +346,7 @@ export async function buildPassageFromRange(chat, startIdx, endIdx) {
 
 /**
  * Build a full context string from all layers down to (and including) a target layer.
- * Deepest layers first, target layer last — gives the summarizer full awareness
+ * Deepest layers first, target layer last, giving the summarizer full awareness
  * of what's already been captured so it can avoid redundancy.
  *
  * @param {number} downToLayer - Include this layer and all layers above it
@@ -306,8 +354,10 @@ export async function buildPassageFromRange(chat, startIdx, endIdx) {
  */
 export function buildFullContext(downToLayer = 0) {
     const store = getChatStore();
-    const memory = buildMemoryInjection(getLayersAtOrAbove(store.layers, downToLayer));
-    return memory || '(none yet)';
+    const injectionParts = buildMemoryInjectionParts(getLayersAtOrAbove(store.layers, downToLayer));
+    // Summarizer context is the raw memory body, never template-wrapped,
+    // so no injectionTemplate is supplied; '(none yet)' stands in when empty.
+    return renderInjectionTemplate(injectionParts, {}, { emptyFallback: '(none yet)' });
 }
 
 function getLayersAtOrAbove(layers, downToLayer) {

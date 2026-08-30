@@ -1,9 +1,14 @@
 import { MODULE_NAME } from '../foundation/constants.js';
-import { getChatMetadata } from '../foundation/context.js';
-import { error, info } from '../foundation/logger.js';
+import {
+    executeSlashCommandsWithOptions,
+    getChat,
+    getChatMetadata,
+    saveChat,
+    saveMetadata,
+} from '../foundation/context.js';
+import { info } from '../foundation/logger.js';
 import { bumpSummaryStoreMutationEpoch, getChatStore } from '../foundation/state.js';
-import { unghostAllMessages } from '../core/ghosting.js';
-import { persistAndRefresh } from './persist.js';
+import { refreshExtensionState } from './persist.js';
 
 // ─── Memory Clear Workflow ───────────────────────────────────────────
 
@@ -15,25 +20,29 @@ import { persistAndRefresh } from './persist.js';
 export async function clearSummaryceptionMemory(
     /** @type {{ updateUi?: boolean }} */ { updateUi = false } = {},
 ) {
-    try {
-        await unghostAllMessages();
-    } catch (e) {
-        error('Error during unghost (continuing with clear):', e);
-        toastr.warning(
-            'Some messages could not be unghosted, but memory will still be cleared.',
-            'Summaryception',
-        );
+    const chat = getChat();
+    if (chat.length > 0) {
+        await executeSlashCommandsWithOptions(`/unhide 0-${chat.length - 1}`, {
+            showOutput: false,
+        });
     }
-
     const store = getChatStore();
     store.layers.length = 0;
-    store.summarizedUpTo = -1;
-    store.ghostedIndices = [];
+    store.ghostedMessageIds = [];
     bumpSummaryStoreMutationEpoch(store);
+    refreshExtensionState({ injection: true, ui: updateUi });
 
-    const chatMetadata = getChatMetadata();
-    chatMetadata[MODULE_NAME] = store;
+    delete getChatMetadata()[MODULE_NAME];
+    for (const message of getChat()) {
+        delete message.sc_id;
+        for (const key of Object.keys(message.extra || {})) {
+            if (key.startsWith('sc_')) {
+                delete message.extra?.[key];
+            }
+        }
+    }
 
-    await persistAndRefresh({ injection: true, ui: updateUi });
-    info('Memory cleared & messages unghosted.');
+    await saveMetadata();
+    await saveChat();
+    info('Memory and Summaryception chat metadata cleared; all messages unhidden.');
 }

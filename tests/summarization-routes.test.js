@@ -8,140 +8,91 @@ import {
 } from '../src/core/summarization-routes.js';
 import { MEMORY_MODES } from '../src/foundation/constants.js';
 import {
-    installSummaryContext,
-    makeMessages,
     makeSizedChat,
     makeSummarySettings,
     makeSummaryStore,
+    readySettings,
 } from './test-helpers.js';
 
 describe('buildAutoSummaryRoutePlan', () => {
-    it('dispatches a ready cache route with atomic partition commits', async () => {
-        installSummaryContext();
-        const chat = makeSizedChat(6, { userLength: 500, assistantLength: 2000 });
-        const settings = makeSummarySettings({
-            memoryMode: MEMORY_MODES.CACHE,
-            verbatimTokenBudget: 6000,
-            minSummaryBudget: 6000,
-            maxL0SourceTokens: 24000,
-        });
-
-        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.CACHE_AUTO);
-        expect(plan.ready).toBe(true);
-        expect(plan.commitMode).toBe(SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS);
-        expect(plan.phase).toBe('layer0');
+    it.each([
+        [MEMORY_MODES.BALANCED, SUMMARY_ROUTES.STANDARD_AUTO, SUMMARY_COMMIT_MODES.TURNS],
+        [
+            MEMORY_MODES.PREFIX_CACHE,
+            SUMMARY_ROUTES.CACHE_AUTO,
+            SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS,
+        ],
+    ])('uses one recent/queued readiness result for %s', async (mode, route, commitMode) => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), readySettings(mode));
+        expect(plan.route).toBe(route);
+        expect(plan.commitMode).toBe(commitMode);
         expect(plan.reason).toBe('ready');
-        expect(plan.partitions.length).toBe(2);
-        expect(plan.totalBatches).toBe(plan.partitions.length);
-        expect(plan.batchTurns.length).toBe(2);
-    });
-
-    it('dispatches an idle cache route when the live window fits the budget', async () => {
-        installSummaryContext();
-        const chat = makeSizedChat(2, { userLength: 50, assistantLength: 50 });
-        const settings = makeSummarySettings({
-            memoryMode: MEMORY_MODES.CACHE,
-            verbatimTokenBudget: 16000,
-        });
-
-        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.CACHE_AUTO);
-        expect(plan.ready).toBe(false);
-        expect(plan.totalBatches).toBe(0);
-        expect(plan.partitions).toEqual([]);
-    });
-
-    it('dispatches the standard route on the budget branch with turn commits', async () => {
-        installSummaryContext();
-        const chat = makeSizedChat(3, { userLength: 500, assistantLength: 2000 });
-        const settings = makeSummarySettings({
-            memoryMode: MEMORY_MODES.STANDARD,
-            verbatimTokenBudget: 4000,
-            minSummaryBudget: 5000,
-            maxL0SourceTokens: 24000,
-            minSummaryTurns: 2,
-            maxSummaryTurns: 5,
-        });
-
-        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.STANDARD_AUTO);
-        expect(plan.commitMode).toBe(SUMMARY_COMMIT_MODES.TURNS);
-        expect(plan.reason).toBe('budget');
         expect(plan.ready).toBe(true);
+    });
+
+    it('Balanced routes only the first partition', async () => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const plan = await buildAutoSummaryRoutePlan(
+            chat,
+            makeSummaryStore(),
+            readySettings(MEMORY_MODES.BALANCED),
+        );
+        expect(plan.partitions).toHaveLength(2);
+        expect(plan.batchTurns).toBe(plan.partitions[0].turns);
+        expect(plan.batchTurns.length).toBeLessThan(plan.overflowCount);
         expect(plan.totalBatches).toBe(1);
-        expect(plan.batchTurns.map((turn) => turn.index)).toEqual([1, 3]);
     });
 
-    it('dispatches the standard route on the max-turns branch', async () => {
-        installSummaryContext();
-        const chat = makeSizedChat(5, { userLength: 500, assistantLength: 2000 });
-        const settings = makeSummarySettings({
-            verbatimTokenBudget: 1000,
-            minSummaryBudget: 6000,
-            maxL0SourceTokens: 24000,
-            minSummaryTurns: 2,
-            maxSummaryTurns: 3,
-        });
-
-        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.STANDARD_AUTO);
-        expect(plan.reason).toBe('max');
-        expect(plan.ready).toBe(true);
-        expect(plan.batchTurns.map((turn) => turn.index)).toEqual([1, 3]);
+    it.each([MEMORY_MODES.PREFIX_CACHE])('%s routes every B partition atomically', async (mode) => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), readySettings(mode));
+        expect(plan.partitions).toHaveLength(2);
+        expect(plan.totalBatches).toBe(plan.partitions.length);
+        expect(plan.partitions.flatMap((part) => part.turns)).toHaveLength(plan.overflowCount);
     });
 
-    it('dispatches the standard repair branch with no batch turns for a user-only overflow', async () => {
-        installSummaryContext();
-        const chat = makeMessages(3, { isUser: true, mes: 'x'.repeat(2000) });
-        const settings = makeSummarySettings({ verbatimTokenBudget: 4000 });
-
-        const plan = await buildAutoSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.STANDARD_AUTO);
-        expect(plan.reason).toBe('repair');
-        expect(plan.ready).toBe(true);
-        expect(plan.batchTurns).toEqual([]);
+    it('stays idle below Recent + Queued despite max turns', async () => {
+        const chat = makeSizedChat(8, { userLength: 20, assistantLength: 60 });
+        const plan = await buildAutoSummaryRoutePlan(
+            chat,
+            makeSummaryStore(),
+            makeSummarySettings({
+                memoryMode: MEMORY_MODES.BALANCED,
+                verbatimTokenBudget: 10000,
+                queuedTokenBudget: 10000,
+                maxSummaryTurns: 2,
+            }),
+        );
+        expect(plan.reason).toBe('none');
+        expect(plan.ready).toBe(false);
     });
 });
 
 describe('buildForceSummaryRoutePlan', () => {
-    it('overrides readiness gates and commits every candidate turn', async () => {
-        installSummaryContext();
-        const chat = makeSizedChat(2, { userLength: 500, assistantLength: 2000 });
-        const settings = makeSummarySettings({
-            verbatimTokenBudget: 4000,
-            minSummaryBudget: 6000,
-            maxL0SourceTokens: 24000,
-            minSummaryTurns: 2,
-            maxSummaryTurns: 5,
-        });
-
-        const plan = await buildForceSummaryRoutePlan(chat, makeSummaryStore(), settings);
-
-        expect(plan.route).toBe(SUMMARY_ROUTES.FORCE);
+    it('summarizes the queued block while preserving Recent Chat', async () => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const plan = await buildForceSummaryRoutePlan(
+            chat,
+            makeSummaryStore(),
+            readySettings(MEMORY_MODES.BALANCED),
+        );
         expect(plan.reason).toBe('force');
         expect(plan.ready).toBe(true);
-        expect(plan.commitMode).toBe(SUMMARY_COMMIT_MODES.TURNS);
-        expect(plan.totalBatches).toBe(1);
-        expect(plan.batchTurns.map((turn) => turn.index)).toEqual([1]);
+        expect(plan.rawPlan.verbatimStartIdx).toBeGreaterThan(0);
+        expect(plan.batchTurns.every((turn) => turn.index < plan.rawPlan.verbatimStartIdx)).toBe(
+            true,
+        );
+        expect(plan.batchTurns.length).toBeLessThan(plan.rawPlan.visibleTurnCount);
     });
 
-    it('stays idle on an empty chat', async () => {
-        installSummaryContext();
-
+    it('stays idle on empty chat', async () => {
         const plan = await buildForceSummaryRoutePlan(
             [],
             makeSummaryStore(),
             makeSummarySettings(),
         );
-
         expect(plan.reason).toBe('none');
         expect(plan.ready).toBe(false);
-        expect(plan.totalBatches).toBe(0);
     });
 });

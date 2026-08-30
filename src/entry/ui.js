@@ -3,16 +3,20 @@ import {
     MEMORY_POSITIONS,
     UI_MODES,
     defaultSettings,
+    TOAST_TITLE,
 } from '../foundation/constants.js';
-import {
-    estimateMainPromptTokens,
-    getChat,
-    isSendButtonInStopMode,
-} from '../foundation/context.js';
+import { getChat } from '../foundation/context.js';
+import { resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { warn } from '../foundation/logger.js';
-import { getEffectiveSettings, getSettings, getChatStore } from '../foundation/state.js';
+import {
+    getEffectiveSettings,
+    getSettings,
+    getChatStore,
+    getCurrentSummarizedBoundary,
+} from '../foundation/state.js';
 import { getIsSummarizing } from '../core/summarizer.js';
-import { countTextTokens, formatTokenValue } from '../core/token-count.js';
+import { countTextTokens, formatCompactTokenCount, formatTokenValue } from '../core/token-count.js';
+
 import { buildAutoSummaryRoutePlan } from '../core/summarization-routes.js';
 import { getEffectiveMemoryUsage } from '../core/memory-budget.js';
 import { assembleSummaryBlock } from '../features/injection.js';
@@ -24,14 +28,13 @@ import {
     regenerateSnippetAt,
     updateSnippetTextAt,
 } from '../features/snippet-manager.js';
+import { syncAllSettingsToDOM, syncRoleMaskModeControl } from './ui-bind.js';
+import { showBusySummaryToast } from './ui-dialogs.js';
 import {
-    SETTING_SLIDER_SELECTOR,
-    syncDataSettingElements,
-    syncRoleMaskModeControl,
-    syncSliderSettingPairs,
-} from './ui-bind.js';
+    updateEasyConnectionSubPanels,
+    updateEasyMergeConnectionSubPanels,
+} from './ui-connection.js';
 
-const CONNECTION_DATA_SETTING_SELECTOR = '#summaryception_connection_settings [data-sc-setting]';
 const CONTEXT_COLOR_CLASSES = 'sc-ctx-safe sc-ctx-warn sc-ctx-caution sc-ctx-danger';
 
 /**
@@ -47,37 +50,13 @@ export async function updateUI() {
         syncSettingsInputs(s, effectiveSettings);
         syncEnabledContent(s);
 
-        $('#sc_summarizer_system_prompt_preset').val(s.summarizerSystemPromptPreset);
-        $('#sc_prompt_preset').val(s.promptPreset);
-        $('#sc_summarizer_repair_prompt_preset').val(s.summarizerRepairPromptPreset);
-        $('#sc_promotion_system_prompt_preset').val(s.promotionSystemPromptPreset);
-        $('#sc_promotion_prompt_preset').val(s.promotionPromptPreset);
-        $('#sc_promotion_repair_prompt_preset').val(s.promotionRepairPromptPreset);
-        $('#sc_debug_mode').prop('checked', s.debugMode);
-        $('#sc_trace_mode').prop('checked', s.traceMode);
-        $('#sc_prompt_input_log_mode').prop('checked', s.promptInputLogMode);
-        $('#sc_prompt_output_log_mode').prop('checked', s.promptOutputLogMode);
-        $('#sc_apply_regex_scripts').prop('checked', s.applyRegexScripts);
-        $('#sc_hide_non_text_messages').prop('checked', s.hideNonTextMessages !== false);
-        $('#sc_strip_chinese_ideographs').prop('checked', s.stripChineseIdeographs !== false);
-        $('#sc_inject_current_state').prop('checked', Boolean(s.injectCurrentState));
+        syncRoleMaskModeControl(s.maskUserRoleAsAssistant);
         // alwaysOn category: the input is disabled in markup, so reflect it as
         // permanently ticked rather than reading the (ignored) persisted flag.
         $('#sc_state_cat_date_time').prop('checked', true);
-        $('#sc_state_cat_bonds').prop('checked', s.stateCatBonds);
-        $('#sc_state_cat_chekhov').prop('checked', s.stateCatChekhov);
-        $('#sc_state_cat_gm_notes').prop('checked', s.stateCatGmNotes);
-        $('#sc_state_cat_inventory').prop('checked', s.stateCatInventory);
-        $('#sc_state_cat_location').prop('checked', s.stateCatLocation);
-        $('#sc_mask_user_role_as_assistant').prop('checked', s.maskUserRoleAsAssistant);
-        $('#sc_mask_user_role_mode').val(s.maskUserRoleMode);
-        syncRoleMaskModeControl(s.maskUserRoleAsAssistant);
-        $('#sc_strip_patterns').val((s.stripPatterns || []).join('\n'));
-        $('#sc_summarizer_response_length').val(s.summarizerResponseLength || 0);
-        syncConnectionInputs(s);
 
-        await renderOverview(effectiveSettings, store);
-        await renderEasyOverview(effectiveSettings, store);
+        await renderStatusOverview('sc_status', 'enabled', effectiveSettings, store);
+        await renderStatusOverview('sc_easy_status', 'mode', effectiveSettings, store);
         await renderBudgetStatus(effectiveSettings, store);
         await renderEasyBudgetStatus(effectiveSettings, store);
         renderLayerStats(effectiveSettings, store);
@@ -95,25 +74,7 @@ export async function updateUI() {
  * @returns {void}
  */
 function syncSettingsInputs(s, effectiveSettings) {
-    $('#sc_enabled').prop('checked', s.enabled);
-    $(`input[name="sc_ui_mode"][value="${s.uiMode}"]`).prop('checked', true);
-    $('#sc_easy_connection_source').val(s.easyConnectionSource || 'default');
-    $('#sc_easy_connection_profile').val(s.easyConnectionProfileId || '');
-    $('#sc_easy_merge_connection_source').val(s.easyMergeConnectionSource || 'inherit');
-    $('#sc_easy_merge_connection_profile').val(s.easyMergeConnectionProfileId || '');
-    $(`input[name="sc_easy_memory_mode"][value="${s.easyMemoryMode}"]`).prop('checked', true);
-    $(`input[name="sc_memory_mode"][value="${s.memoryMode}"]`).prop('checked', true);
-    $('#sc_custom_memory_position').val(s.customMemoryPosition);
-    $('#sc_custom_memory_role').val(s.customMemoryRole);
-    $('#sc_custom_memory_depth').val(s.customMemoryDepth);
-    syncSliderSettingPairs(SETTING_SLIDER_SELECTOR, s);
-    $('#sc_injection_template').val(s.injectionTemplate);
-    $('#sc_summarizer_system_prompt').val(s.summarizerSystemPrompt);
-    $('#sc_summarizer_user_prompt').val(s.summarizerUserPrompt);
-    $('#sc_summarizer_repair_prompt').val(s.summarizerRepairPrompt);
-    $('#sc_promotion_system_prompt').val(s.promotionSystemPrompt);
-    $('#sc_promotion_user_prompt').val(s.promotionUserPrompt);
-    $('#sc_promotion_repair_prompt').val(s.promotionRepairPrompt);
+    syncAllSettingsToDOM(s);
     syncEasyPayloadSchematic(effectiveSettings);
     syncMemoryModeControls(s);
     syncLLMContextPreview(s);
@@ -123,7 +84,7 @@ function syncSettingsInputs(s, effectiveSettings) {
 function syncEnabledContent(s) {
     // Show the off banner when the extension is off, but keep the complexity
     // panel (chosen via configMode) visible below it so configuration stays
-    // editable while off — turning off no longer hides the settings UI.
+    // editable while off; turning off no longer hides the settings UI.
     const off = s.uiMode === UI_MODES.OFF;
     const complexity = off ? s.configMode || UI_MODES.EASY : s.uiMode;
     $('#sc_off_content').toggle(off);
@@ -139,120 +100,68 @@ function syncEnabledContent(s) {
 function syncEasyPayloadSchematic(s = getEffectiveSettings()) {
     $('#sc_easy_payload_memory_budget').text(formatBudgetTokenLabel(s.memoryTokenBudget));
     $('#sc_easy_payload_verbatim_budget').text(formatBudgetTokenLabel(s.verbatimTokenBudget));
+    $('#sc_easy_payload_queued_budget').text(formatBudgetTokenLabel(s.queuedTokenBudget));
 }
 
 /**
- * Sync read-only LLM call context preview.
+ * Build configured recent/queued context limits for the main request preview.
  * @param {ReturnType<typeof getSettings>} [s]
- * @returns {void}
+ * @returns {{ rawChatMin: number, rawChatMax: number, mainMin: number, mainMax: number }}
+ */
+export function buildMainContextPreviewModel(s = getEffectiveSettings()) {
+    const memoryBudget = readTokenSetting(s, 'memoryTokenBudget');
+    const verbatimBudget = readTokenSetting(s, 'verbatimTokenBudget');
+    const queuedBudget = readTokenSetting(s, 'queuedTokenBudget');
+    return {
+        rawChatMin: verbatimBudget,
+        rawChatMax: verbatimBudget + queuedBudget,
+        mainMin: memoryBudget + verbatimBudget,
+        mainMax: memoryBudget + verbatimBudget + queuedBudget,
+    };
+}
+
+/**
+ *
  */
 export function syncLLMContextPreview(s = getEffectiveSettings()) {
-    const maxL0Source = readTokenSetting(s.maxL0SourceTokens, defaultSettings.maxL0SourceTokens);
-    const minL0Source = readTokenSetting(s.minSummaryBudget, defaultSettings.minSummaryBudget);
-    const memoryBudget = readTokenSetting(s.memoryTokenBudget, defaultSettings.memoryTokenBudget);
-    const verbatimBudget = readTokenSetting(
-        s.verbatimTokenBudget,
-        defaultSettings.verbatimTokenBudget,
-    );
-    const snippetsPerPromotion = readTokenSetting(
-        s.snippetsPerPromotion,
-        defaultSettings.snippetsPerPromotion,
-    );
-    const summaryTarget = readTokenSetting(
-        s.layer0SummaryTokenTarget,
-        defaultSettings.layer0SummaryTokenTarget,
-    );
-
+    const model = buildMainContextPreviewModel(s);
+    const maxL0Source = readTokenSetting(s, 'maxL0SourceTokens');
+    const minL0Source = readTokenSetting(s, 'minSummaryBudget');
+    const memoryBudget = readTokenSetting(s, 'memoryTokenBudget');
+    const snippetsPerPromotion = readTokenSetting(s, 'snippetsPerPromotion');
+    const summaryTarget = readTokenSetting(s, 'layer0SummaryTokenTarget');
     const BASE_PROMPT_OVERHEAD = 2000;
     const DEEP_MEMORY_RATIO = 0.5;
-
-    const mainBudget = memoryBudget + verbatimBudget;
     const l0Typical = minL0Source + memoryBudget + BASE_PROMPT_OVERHEAD;
     const l0Max = maxL0Source + memoryBudget + BASE_PROMPT_OVERHEAD;
     const l1Source = snippetsPerPromotion * summaryTarget;
     const l1Total = l1Source + Math.round(memoryBudget * DEEP_MEMORY_RATIO) + 1000;
-
     const $mainValue = $('#sc_llm_context_main');
     const $l0Value = $('#sc_llm_context_l0');
     const $l1Value = $('#sc_llm_context_l1');
-
-    $mainValue.text(`Max ~${formatContextTokenCount(mainBudget)} + ST prompt`);
-    if (minL0Source < maxL0Source) {
-        $l0Value.text(
-            `~${formatContextTokenCount(l0Typical)} (Max ~${formatContextTokenCount(l0Max)})`,
-        );
-        setContextValueColor($l0Value, l0Typical);
-    } else {
-        $l0Value.text(`Max ~${formatContextTokenCount(l0Max)} tokens`);
-        setContextValueColor($l0Value, l0Max);
-    }
+    $mainValue.text(
+        `${formatContextTokenCount(model.mainMin)} → ${formatContextTokenCount(model.mainMax)} + ST prompt`,
+    );
+    $l0Value.text(
+        `~${formatContextTokenCount(l0Typical)} (Max ~${formatContextTokenCount(l0Max)})`,
+    );
     $l1Value.text(`Max ~${formatContextTokenCount(l1Total)} tokens`);
-
-    setContextValueColor($mainValue, mainBudget);
+    setContextValueColor($mainValue, model.mainMax);
+    setContextValueColor($l0Value, l0Typical);
     setContextValueColor($l1Value, l1Total);
 }
 
-/**
- * Refresh the current SillyTavern main prompt estimate on demand.
- * @returns {Promise<void>}
- */
-export async function refreshMainLLMContextEstimate() {
-    const $value = $('#sc_llm_context_main');
-    const $button = $('#sc_estimate_main_context');
-    if (!$value.length) {
-        return;
-    }
-    if (isSendButtonInStopMode()) {
-        $value.text('Busy').removeClass(CONTEXT_COLOR_CLASSES).addClass('sc-ctx-caution');
-        return;
-    }
-
-    setMainEstimateButtonBusy($button, true);
-    $value.text('Estimating...').removeClass(CONTEXT_COLOR_CLASSES);
-    try {
-        const tokens = await estimateMainPromptTokens();
-        if (typeof tokens !== 'number' || !Number.isFinite(tokens)) {
-            $value.text('Unavailable').addClass('sc-ctx-caution');
-            return;
-        }
-        $value.text(`Actual ~${formatContextTokenCount(tokens)} tokens`);
-        setContextValueColor($value, tokens);
-    } catch (e) {
-        warn('Main prompt estimate failed:', e);
-        $value.text('Unavailable').addClass('sc-ctx-caution');
-    } finally {
-        setMainEstimateButtonBusy($button, false);
-    }
-}
-
-function readTokenSetting(value, fallback) {
-    const number = Number(value);
-    return Number.isFinite(number) ? number : fallback;
+function readTokenSetting(settings, key) {
+    const number = Number(settings[key]);
+    return Number.isFinite(number) ? number : defaultSettings[key];
 }
 
 function formatContextTokenCount(tokens) {
-    if (tokens >= 1000) {
-        const value = tokens / 1000;
-        return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}k`;
-    }
-    return String(Math.max(0, Math.round(tokens)));
+    return formatCompactTokenCount(tokens);
 }
 
 function setContextValueColor($element, tokens) {
     $element.removeClass(CONTEXT_COLOR_CLASSES).addClass(getContextColorClass(tokens));
-}
-
-function setMainEstimateButtonBusy($button, busy) {
-    if (!$button.length) {
-        return;
-    }
-    $button.prop('disabled', busy);
-    const $icon = $button.find('i');
-    if (busy) {
-        $icon.removeClass('fa-calculator').addClass('fa-spinner fa-spin');
-    } else {
-        $icon.removeClass('fa-spinner fa-spin').addClass('fa-calculator');
-    }
 }
 
 /**
@@ -273,48 +182,19 @@ function getContextColorClass(tokens) {
     return 'sc-ctx-safe';
 }
 
-/**
- * Sync connection inputs that can change outside initConnectionUI.
- * @param {ReturnType<typeof getSettings>} s
- * @returns {void}
- */
-function syncConnectionInputs(s) {
-    syncDataSettingElements(CONNECTION_DATA_SETTING_SELECTOR, s);
-    $('#sc_easy_connection_source').val(s.easyConnectionSource || 'default');
-    $('#sc_easy_connection_profile').val(s.easyConnectionProfileId || '');
-    $('#sc_easy_merge_connection_source').val(s.easyMergeConnectionSource || 'inherit');
-    $('#sc_easy_merge_connection_profile').val(s.easyMergeConnectionProfileId || '');
-    $('#summaryception_connection_source').val(s.connectionSource || 'default');
-    $('#summaryception_connection_profile').val(s.connectionProfileId);
-    $('#summaryception_merge_connection_source').val(s.mergeConnectionSource || 'inherit');
-    $('#summaryception_merge_connection_profile').val(s.mergeConnectionProfileId);
-    $('#summaryception_fallback_connection_source').val(s.fallbackConnectionSource || 'disabled');
-    $('#summaryception_fallback_connection_profile').val(s.fallbackConnectionProfileId);
-}
-
 function syncEasyConnectionPanels(s) {
-    $('#sc_easy_profile_settings').toggle(s.easyConnectionSource === 'profile');
-    $('#sc_easy_merge_profile_settings').toggle(s.easyMergeConnectionSource === 'profile');
+    updateEasyConnectionSubPanels(s.connectionSource);
+    updateEasyMergeConnectionSubPanels(s.mergeConnectionSource);
 }
 
-async function renderOverview(s, store) {
+async function renderStatusOverview(prefix, modeField, s, store) {
     const metrics = getLayerMetrics(store);
     const ghostedCount = getGhostedCount();
 
-    $('#sc_status_enabled').text(getModeLabel(s));
-    $('#sc_status_worker').text(await getWorkerLabel(s, store));
-    $('#sc_status_snippets').text(String(metrics.totalSnippets));
-    $('#sc_status_ghosted').text(String(ghostedCount));
-}
-
-async function renderEasyOverview(s, store) {
-    const metrics = getLayerMetrics(store);
-    const ghostedCount = getGhostedCount();
-
-    $('#sc_easy_status_mode').text(getModeLabel(s));
-    $('#sc_easy_status_worker').text(await getWorkerLabel(s, store));
-    $('#sc_easy_status_snippets').text(String(metrics.totalSnippets));
-    $('#sc_easy_status_ghosted').text(String(ghostedCount));
+    $(`#${prefix}_${modeField}`).text(getModeLabel(s));
+    $(`#${prefix}_worker`).text(await getWorkerLabel(s, store));
+    $(`#${prefix}_snippets`).text(String(metrics.totalSnippets));
+    $(`#${prefix}_ghosted`).text(String(ghostedCount));
 }
 
 function getModeLabel(s) {
@@ -349,15 +229,15 @@ async function getVisibleBacklogCount(s, store) {
 }
 
 function syncMemoryModeControls(s) {
-    const isCache = s.memoryMode === MEMORY_MODES.CACHE;
+    const isPrefixCache = s.memoryMode === MEMORY_MODES.PREFIX_CACHE;
     const isMacroOnly = s.customMemoryPosition === MEMORY_POSITIONS.MACRO_ONLY;
-
     $('#sc_custom_memory_depth_row').toggle(s.customMemoryPosition === MEMORY_POSITIONS.IN_CHAT);
     $('#sc_custom_memory_role_row').toggle(!isMacroOnly);
     $('#sc_macro_memory_note').toggle(isMacroOnly);
-    $('#sc_memory_help_standard').toggle(s.memoryMode === MEMORY_MODES.STANDARD);
-    $('#sc_memory_help_cache').toggle(isCache);
-    $('#sc_manual_cache_warning').toggle(isCache);
+    $('#sc_memory_help_balanced').toggle(s.memoryMode === MEMORY_MODES.BALANCED);
+    $('#sc_memory_help_prefix_cache').toggle(isPrefixCache);
+    $('#sc_manual_cache_warning').toggle(isPrefixCache);
+    $('.sc-cache-mode-row').toggle(isPrefixCache);
     $('#sc_min_summary_turns, #sc_max_summary_turns').prop('disabled', false);
     $('#sc_min_summary_turns, #sc_max_summary_turns').closest('.sc-row').removeClass('sc-disabled');
     $('#sc_min_summary_budget_hint').text(SETTINGS_HELP.min_summary_budget.short);
@@ -366,7 +246,7 @@ function syncMemoryModeControls(s) {
 function getGhostedCount() {
     try {
         const chat = getChat();
-        return chat.filter((m) => m.extra?.sc_ghosted).length;
+        return resolveScIdsToIndices(chat, getChatStore().ghostedMessageIds).length;
     } catch (_e) {
         return 0;
     }
@@ -516,31 +396,18 @@ async function renderTriggerGauge(s, store) {
 }
 
 /**
- * Compute the queued-tokens gauge and effective summarization trigger point.
- * The trigger fires when queued turns and queued source tokens both clear their
- * gates; the marker sits at whichever gate is satisfied last. The turn gate is
- * projected into tokens via the average queued tokens per turn, so the label
- * names the binding gate rather than implying an exact token count.
+ * Compute the queued-chat gauge from the unified planner.
  * @param {import('../core/summarization-routes.js').SummaryRoutePlan} plan
  * @param {ReturnType<typeof getEffectiveSettings>} s
  * @returns {{ queuedTokens: number, queuedEstimated: boolean, triggerTokens: number, label: string }}
  */
 export function buildTriggerGaugeModel(plan, s) {
-    const raw = plan.rawPlan || {};
-    const queuedStats = raw.summaryStats || raw.flushStats || null;
-    const queuedTokens = normalizeBudgetCount(queuedStats?.finalTokens ?? 0);
-    const queuedEstimated = Boolean(queuedStats?.finalTokensEstimated);
-    const minBudget = normalizeBudgetCount(s.minSummaryBudget);
-    const minTurns = Math.max(1, Math.round(Number(s.minSummaryTurns)) || 1);
-    const maxTurns = Math.max(minTurns, Math.round(Number(s.maxSummaryTurns)) || minTurns);
-    const queuedTurns = Math.min(Math.max(0, Math.round(Number(raw.overflowCount) || 0)), maxTurns);
-    const turnEquivalent = queuedTurns > 0 ? Math.ceil((queuedTokens / queuedTurns) * minTurns) : 0;
-    const triggerTokens = Math.max(minBudget, turnEquivalent, 1);
+    const queuedStats = plan.rawPlan?.queuedStats;
     return {
-        queuedTokens,
-        queuedEstimated,
-        triggerTokens,
-        label: turnEquivalent > minBudget ? `Trigger: ${minTurns} turns` : 'Trigger: tokens',
+        queuedTokens: normalizeBudgetCount(queuedStats?.finalTokens ?? 0),
+        queuedEstimated: Boolean(queuedStats?.finalTokensEstimated),
+        triggerTokens: normalizeBudgetCount(s.queuedTokenBudget),
+        label: 'Summarize at Recent + Queued',
     };
 }
 
@@ -569,16 +436,13 @@ async function renderMemoryBudget(
 
 async function getVerbatimBudgetPart(s, store) {
     const plan = await buildAutoSummaryRoutePlan(getChat(), store, s);
+    const stats = plan.rawPlan.verbatimStats || { finalTokens: 0, finalTokensEstimated: false };
     return {
-        label: 'Verbatim Window',
+        label: 'Recent Chat',
         kind: 'verbatim',
-        count: getRouteBudgetStats(plan).finalTokens,
-        estimated: getRouteBudgetStats(plan).finalTokensEstimated,
+        count: stats.finalTokens,
+        estimated: stats.finalTokensEstimated,
     };
-}
-
-function getRouteBudgetStats(plan) {
-    return plan.rawPlan.budgetStats || plan.rawPlan.liveStats;
 }
 
 function orderMemoryBudgetParts(parts) {
@@ -701,7 +565,10 @@ function renderLayerStats(s, store) {
             }
         }
     }
-    statsHtml += `<div class="sc-layer-stat sc-muted">Summarized up to chat index: ${store.summarizedUpTo ?? -1}</div>`;
+    const boundary = getCurrentSummarizedBoundary(getChat(), store);
+    if (boundary >= 0) {
+        statsHtml += `<div class="sc-layer-stat sc-muted">Current summarized boundary: ${boundary}</div>`;
+    }
     if (!store.layers?.length || store.layers.every((l) => !l || l.length === 0)) {
         statsHtml = '<div class="sc-layer-stat sc-muted">No summaries yet for this chat.</div>';
     }
@@ -813,13 +680,14 @@ function buildSnippetBrowserItem(snippet, layerIndex, snippetIndex) {
         snippetIndex,
         text: snippet.text,
         meta: getSnippetMeta(snippet),
-        canRedo: Boolean(layerIndex === 0 && snippet.turnRange),
+        canRedo: Boolean(layerIndex === 0 && snippet.sourceMessageIds?.length),
     };
 }
 
 function getSnippetMeta(snippet) {
-    const rangeStr = snippet.turnRange
-        ? `turns ${snippet.turnRange[0]}-${snippet.turnRange[1]}`
+    const sourceCount = snippet.sourceMessageIds?.length || 0;
+    const rangeStr = sourceCount
+        ? `${sourceCount} source messages`
         : snippet.mergedCount
           ? `merged ${snippet.mergedCount} from L${snippet.fromLayer}`
           : '';
@@ -849,11 +717,15 @@ function renderSnippetBrowser(browser, view) {
     }
 
     browser.children('.sc-muted').remove();
-    removeMissingLayers(browser, new Set(view.layers.map((layer) => layer.key)));
+    removeMissingChildElements(
+        browser,
+        '.sc-browser-layer',
+        new Set(view.layers.map((layer) => layer.key)),
+    );
 
     let cursor = null;
     for (const layer of view.layers) {
-        const layerEl = getOrCreateLayerElement(browser, layer);
+        const layerEl = getOrCreateChildElement(browser, 'sc-browser-layer', layer.key);
         updateLayerElement(layerEl, layer);
         renderLayerSnippets(layerEl, layer);
         cursor = placeElementAfterCursor(browser, layerEl, cursor);
@@ -871,20 +743,20 @@ function renderEmptySnippetBrowser(browser) {
     $('<div class="sc-muted"></div>').text('No snippets to display.').appendTo(browser);
 }
 
-function removeMissingLayers(browser, layerKeys) {
-    browser.children('.sc-browser-layer').each(function () {
-        const layerEl = $(this);
-        if (!layerKeys.has(layerEl.attr('data-key')) && !hasFocusedSnippetEdit(layerEl)) {
-            layerEl.remove();
+function removeMissingChildElements(parent, selector, keys) {
+    parent.children(selector).each(function () {
+        const child = $(this);
+        if (!keys.has(child.attr('data-key')) && !hasFocusedSnippetEdit(child)) {
+            child.remove();
         }
     });
 }
 
-function getOrCreateLayerElement(browser, layer) {
-    const existing = browser
-        .children('.sc-browser-layer')
+function getOrCreateChildElement(parent, className, key) {
+    const existing = parent
+        .children(`.${className}`)
         .filter(function () {
-            return $(this).attr('data-key') === layer.key;
+            return $(this).attr('data-key') === key;
         })
         .first();
 
@@ -892,7 +764,7 @@ function getOrCreateLayerElement(browser, layer) {
         return existing;
     }
 
-    return $('<div class="sc-browser-layer"></div>');
+    return $(`<div class="${className}"></div>`);
 }
 
 function updateLayerElement(layerEl, layer) {
@@ -907,11 +779,11 @@ function updateLayerElement(layerEl, layer) {
 
 function renderLayerSnippets(layerEl, layer) {
     const rowKeys = new Set(layer.snippets.map((snippet) => snippet.key));
-    removeMissingSnippetRows(layerEl, rowKeys);
+    removeMissingChildElements(layerEl, '.sc-snippet', rowKeys);
 
     let cursor = layerEl.children('.sc-browser-layer-title').first();
     for (const snippet of layer.snippets) {
-        const row = getOrCreateSnippetRow(layerEl, snippet);
+        const row = getOrCreateChildElement(layerEl, 'sc-snippet', snippet.key);
         updateSnippetRow(row, snippet);
         cursor = placeElementAfterCursor(layerEl, row, cursor);
     }
@@ -929,30 +801,6 @@ function placeElementAfterCursor(parent, element, cursor) {
         parent.prepend(element);
     }
     return element;
-}
-
-function removeMissingSnippetRows(layerEl, rowKeys) {
-    layerEl.children('.sc-snippet').each(function () {
-        const row = $(this);
-        if (!rowKeys.has(row.attr('data-key')) && !hasFocusedSnippetEdit(row)) {
-            row.remove();
-        }
-    });
-}
-
-function getOrCreateSnippetRow(layerEl, snippet) {
-    const existing = layerEl
-        .children('.sc-snippet')
-        .filter(function () {
-            return $(this).attr('data-key') === snippet.key;
-        })
-        .first();
-
-    if (existing.length) {
-        return existing;
-    }
-
-    return $('<div class="sc-snippet"></div>');
 }
 
 function updateSnippetRow(row, snippet) {
@@ -1002,33 +850,33 @@ function ensureSnippetMeta(row, snippet) {
     return meta;
 }
 
+function ensureSnippetButton(row, className, label) {
+    let button = row.children(`.${className}`).first();
+    if (!button.length) {
+        button = $(`<button class="${className} menu_button"></button>`);
+    }
+    button.attr({
+        type: 'button',
+        title: label,
+        'aria-label': label,
+    });
+    return button;
+}
+
 function ensureSnippetRedo(row, snippet) {
     let redo = row.children('.sc-snippet-redo').first();
     if (!snippet.canRedo) {
         redo.remove();
         return null;
     }
-    if (!redo.length) {
-        redo = $('<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right"></button>');
-    }
-    redo.attr({
-        type: 'button',
-        title: 'Regenerate this snippet',
-        'aria-label': 'Regenerate this snippet',
-    });
+    redo = ensureSnippetButton(row, 'sc-snippet-redo', 'Regenerate this snippet');
+    redo.addClass('fa-solid fa-rotate-right');
     return redo;
 }
 
 function ensureSnippetDelete(row) {
-    let remove = row.children('.sc-snippet-delete').first();
-    if (!remove.length) {
-        remove = $('<button class="sc-snippet-delete menu_button fa-solid fa-xmark"></button>');
-    }
-    remove.attr({
-        type: 'button',
-        title: 'Delete this snippet',
-        'aria-label': 'Delete this snippet',
-    });
+    const remove = ensureSnippetButton(row, 'sc-snippet-delete', 'Delete this snippet');
+    remove.addClass('fa-solid fa-xmark');
     return remove;
 }
 
@@ -1104,7 +952,7 @@ async function commitSnippetEdit(textarea, position) {
         textarea.val(),
     );
     if (result.status === 'updated') {
-        toastr.success('Snippet updated', 'Summaryception', {
+        toastr.success('Snippet updated', TOAST_TITLE, {
             timeOut: 1500,
         });
     }
@@ -1136,7 +984,7 @@ async function onSnippetRedoClick() {
 
     toastr.info(
         `Regenerating summary for turns ${target.range[0]}-${target.range[1]}...`,
-        'Summaryception',
+        TOAST_TITLE,
         {
             timeOut: 3000,
             progressBar: true,
@@ -1154,7 +1002,7 @@ async function onSnippetDeleteClick() {
     const result = await deleteSnippetAt(position.layerIdx, position.snippetIdx);
     if (result.status === 'deleted') {
         updateUI();
-        toastr.info(`Snippet removed from Layer ${result.layerIndex}`, 'Summaryception');
+        toastr.info(`Snippet removed from Layer ${result.layerIndex}`, TOAST_TITLE);
     }
 }
 
@@ -1163,13 +1011,13 @@ function handleRegenerationTargetStatus(target) {
         return true;
     }
     if (target.status === 'busy') {
-        toastr.warning('Already summarizing. Please wait.', 'Summaryception');
+        showBusySummaryToast();
         return false;
     }
     if (target.status === 'unsupported') {
         toastr.warning(
             'Only Layer 0 (turn summary) snippets can be regenerated. Promoted meta-summaries have no source turns.',
-            'Summaryception',
+            TOAST_TITLE,
             { timeOut: 5000 },
         );
     }
@@ -1191,17 +1039,17 @@ function handleRegenerationResult(result) {
         updateUI();
         toastr.success(
             `Snippet regenerated for turns ${result.range[0]}-${result.range[1]}`,
-            'Summaryception',
+            TOAST_TITLE,
             { timeOut: 3000 },
         );
         return;
     }
     if (result.status === 'empty-source') {
-        toastr.error('Source turns are empty - cannot regenerate.', 'Summaryception');
+        toastr.error('Source turns are empty - cannot regenerate.', TOAST_TITLE);
     } else if (result.status === 'failed') {
-        toastr.error('Regeneration failed - original snippet kept.', 'Summaryception');
+        toastr.error('Regeneration failed - original snippet kept.', TOAST_TITLE);
     } else if (result.status === 'busy') {
-        toastr.warning('Already summarizing. Please wait.', 'Summaryception');
+        showBusySummaryToast();
     } else if (result.status === 'unsupported') {
         handleRegenerationTargetStatus(result);
     }

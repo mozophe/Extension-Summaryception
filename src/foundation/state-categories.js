@@ -1,5 +1,5 @@
 /**
- * Modular STATE category catalog — single source of truth for which state
+ * Modular STATE category catalog: single source of truth for which state
  * categories exist, their toggle settings, trim priority, and per-category
  * schema text emitted to the L0 summarizer.
  *
@@ -60,7 +60,7 @@ export const STATE_CATEGORIES = Object.freeze([
         helpWhen:
             "Replaces FF5's <internal_chekhovguntracker> storage. Disable that block in your preset when on.",
         helpRisk:
-            'Keep the FIRE-decision d20 logic in your preset CoT — only the bullet register lives here.',
+            'Keep the FIRE-decision d20 logic in your preset CoT; only the bullet register lives here.',
     },
     {
         key: 'gm_notes',
@@ -96,7 +96,7 @@ export const STATE_CATEGORIES = Object.freeze([
         helpShort: 'Current scene location.',
         helpWhen:
             'Optional. Needed if your preset uses proximity-based modifiers (e.g. Chekhov location-match).',
-        helpRisk: 'Low risk — dispensable if your preset does not key off scene location.',
+        helpRisk: 'Low risk; dispensable if your preset does not key off scene location.',
     },
 ]);
 
@@ -173,18 +173,18 @@ export function getActiveLineCap(settings, ceiling = Number.POSITIVE_INFINITY) {
 // ─── Per-category schema fragments ────────────────────────────────────
 // Bodies adapted 1:1 from FF5's <internal_*> tags
 // (docs/Freaky Frankenstein 5.0 - Internal States.json) with
-// {{setvar::...}}/{{getvar::...}} plumbing stripped — the extension stores
+// {{setvar::...}}/{{getvar::...}} plumbing stripped; the extension stores
 // state in [STATE], not ST setvars. `{cap}` is replaced with the concrete
 // `lineCapDefault` integer at build time. Token caps never appear here.
 const SCHEMA_FRAGMENTS = Object.freeze({
     current_date_time:
         'current_date_time: <YYYY-MM-DD HH ddd>. Hour-level 24h precision. Normalize from raw bracket headers or passage timestamps; drop minutes. Carry forward prior value if no explicit time in passage. REQUIRED every snapshot.',
     location: 'location: <current place>. One short phrase.',
-    bonds: 'bonds: one pair per line, max {cap} lines. Format per pair: "BOND: NPC1↔NPC2=<value -5..+20> | Sparks: <value> | Grudge: <value>". Tiers/Behaviors: -5..-3 hostile; -2..+2 neutral; +3..+7 warmth; +8..+15 trust (+8 nervous crush, +12 confident interest); +16..+20 chosen family (+15 verbal "I love you", irreversible). Physical Gates: +4 friendly hug/shoulder; +8 hand-hold/sustained touch; +14 romantic kiss; +18 full intimacy. BOND shifts: -1 insult/dismissal/ignoring; -2 betrayal/cruelty. NEVER raise BOND directly — only via Sparks conversion. Sparks: +1 per positive interaction (max +2/turn/pair); every 5 turns if Sparks≥7 → BOND+1, reset Sparks; -1 Sparks per 5 turns no contact. Grudge: +1 per slight (max 1/turn/entity); every 3 turns if Grudge≥3 → BOND-1, reset Grudge.',
+    bonds: 'bonds: one pair per line, max {cap} lines. Format per pair: "BOND: NPC1↔NPC2=<value -5..+20> | Sparks: <value> | Grudge: <value>". Tiers/Behaviors: -5..-3 hostile; -2..+2 neutral; +3..+7 warmth; +8..+15 trust (+8 nervous crush, +12 confident interest); +16..+20 chosen family (+15 verbal "I love you", irreversible). Physical Gates: +4 friendly hug/shoulder; +8 hand-hold/sustained touch; +14 romantic kiss; +18 full intimacy. BOND shifts: -1 insult/dismissal/ignoring; -2 betrayal/cruelty. NEVER raise BOND directly; only via Sparks conversion. Sparks: +1 per positive interaction (max +2/turn/pair); every 5 turns if Sparks≥7 → BOND+1, reset Sparks; -1 Sparks per 5 turns no contact. Grudge: +1 per slight (max 1/turn/entity); every 3 turns if Grudge≥3 → BOND-1, reset Grudge.',
     chekhov:
-        'chekhov: one bullet per line, max {cap} lines. Format: "[BULLET: desc] (weight: 1-3, age: 0/12) [depends: prereq] [secret]". Time-locks as "[LOCKED: T:HH:MM]". Aging: each summarizer call covers one batch of source turns — age every unlocked bullet by the number of turns in that batch (visible in the passage), never by +1 per call; time-locked bullets stay frozen. Cap each per-call increment to the batch turn count (do not add extra age for elapsed wall-clock time not reflected in the passage). Firing threshold (computed by preset CoT, NOT here): base W1=18|W2=13|W3=8, minus age, minus proximity/scene/urgency mods; eligible only at age>=4; prune non-locked at age>=12 or when active>20 (prune oldest/lowest weight). Loading: scan narrative for debt (unresolved setups, promises, foreshadowing) and load 1-2 bullets/turn. Storage only — firing d20 logic stays in preset. Never narrate mechanics in prose.',
+        'chekhov: one bullet per line, max {cap} lines. Format: "[BULLET: desc] (weight: 1-3, age: 0/12) [depends: prereq] [secret]". Time-locks as "[LOCKED: T:HH:MM]". Aging: each summarizer call covers one batch of source turns; age every unlocked bullet by the number of turns in that batch (visible in the passage), never by +1 per call; time-locked bullets stay frozen. Cap each per-call increment to the batch turn count (do not add extra age for elapsed wall-clock time not reflected in the passage). Firing threshold (computed by preset CoT, NOT here): base W1=18|W2=13|W3=8, minus age, minus proximity/scene/urgency mods; eligible only at age>=4; prune non-locked at age>=12 or when active>20 (prune oldest/lowest weight). Loading: scan narrative for debt (unresolved setups, promises, foreshadowing) and load 1-2 bullets/turn. Storage only; firing d20 logic stays in preset. Never narrate mechanics in prose.',
     gm_notes:
-        'gm_notes: pipe-separated entries, max {cap} entries (prune oldest when exceeded). 1-2 concise sentences per entry. Prefix: [R] Reminder (rules/knowledge limits/OOC directives); [T] Thread (plot arcs/loose ends/foreshadowing); [D] Debug (issues/anomalies/verification). Do NOT log BOND/Sparks/Grudge shifts or anything with a dedicated spot in bonds/chekhov/inventory. Only log elements that lack a dedicated spot elsewhere. Jot and move — no deliberation.',
+        'gm_notes: pipe-separated entries, max {cap} entries (prune oldest when exceeded). 1-2 concise sentences per entry. Prefix: [R] Reminder (rules/knowledge limits/OOC directives); [T] Thread (plot arcs/loose ends/foreshadowing); [D] Debug (issues/anomalies/verification). Do NOT log BOND/Sparks/Grudge shifts or anything with a dedicated spot in bonds/chekhov/inventory. Only log elements that lack a dedicated spot elsewhere. Jot and move; no deliberation.',
     inventory:
         'inventory: one line, max {cap} item-groups. Format: "Inv: [items] | Titles: [traits] | Status: [conditions]". Track strictly for {{user}} only; do not track for NPCs. Add items when found, remove when lost/used. Titles are dynamically earned story titles providing passive modifiers. Status = temporary physical/mental conditions (Injured/Tired/Inspired), cleared via time or narrative. Buffs/debuffs capped ±2, domain-locked (e.g. Charmer→social, Slayer→combat). Consumable/one-time items go here; future-affecting one-shots go in chekhov. Never write modifier values in prose.',
 });

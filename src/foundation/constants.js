@@ -12,12 +12,53 @@ export { RECALL_REPEAT_INJECTION_TEMPLATE } from './prompt-constants.js';
 
 export const MODULE_NAME = 'summaryception';
 export const LOG_PREFIX = '[Summaryception]';
+export const TOAST_TITLE = 'Summaryception';
 
 export const MEMORY_MODES = Object.freeze({
-    STANDARD: 'standard',
-    CACHE: 'cache',
+    BALANCED: 'balanced',
+    PREFIX_CACHE: 'prefix_cache',
     CUSTOM: 'custom',
 });
+export const MEMORY_MODE_PRESETS = Object.freeze({
+    [MEMORY_MODES.BALANCED]: Object.freeze({
+        verbatimTokenBudget: 22000,
+        queuedTokenBudget: 6000,
+    }),
+    [MEMORY_MODES.PREFIX_CACHE]: Object.freeze({
+        verbatimTokenBudget: 20000,
+        queuedTokenBudget: 16000,
+    }),
+});
+
+/**
+ * Selectable memory modes that own an initial retention preset.
+ * `custom` is intentionally excluded: it carries no preset.
+ * @type {ReadonlyArray<string>}
+ */
+const SELECTABLE_MEMORY_MODES = Object.freeze([MEMORY_MODES.BALANCED, MEMORY_MODES.PREFIX_CACHE]);
+
+/**
+ * Apply a mode's initial retention preset to settings.
+ * Every actual mode transition intentionally overwrites the recent and queued budgets (and the Append Only baked cap)
+ * with the destination preset. Reselecting the already-active mode is a no-op,
+ * and an invalid mode leaves settings untouched.
+ * @param {ExtensionSettings} settings
+ * @param {string} mode
+ * @returns {boolean} true when settings were mutated, false otherwise.
+ */
+export function applyMemoryModePreset(settings, mode) {
+    if (!SELECTABLE_MEMORY_MODES.includes(String(mode))) {
+        return false;
+    }
+    if (settings.memoryMode === mode) {
+        return false;
+    }
+    const preset = MEMORY_MODE_PRESETS[mode];
+    settings.memoryMode = mode;
+    settings.verbatimTokenBudget = preset.verbatimTokenBudget;
+    settings.queuedTokenBudget = preset.queuedTokenBudget;
+    return true;
+}
 
 export const UI_MODES = Object.freeze({
     OFF: 'off',
@@ -96,24 +137,30 @@ export const REQUEST_TIMEOUT = Object.freeze({
     MERGE_DEFAULT_SECONDS: 90, // L1+ promotions (smaller payloads)
     RETRY_ATTEMPT_RATIO: 0.75,
 });
+
+// ─── Provider Cache TTL ─────────────────────────────────────────────
+// Minutes a provider keeps a cached prompt prefix alive in Prefix Cache mode.
+// Stored on settings as cacheTtlMinutes. Older chats make
+// the cache stale; the stale-cache advisor uses this to suggest an early
+// Force Summarize on chat load.
+export const CACHE_TTL = Object.freeze({
+    MIN_MINUTES: 5,
+    MAX_MINUTES: 240,
+    STEP_MINUTES: 5,
+    DEFAULT_MINUTES: 30,
+});
 // ─── Default Settings ────────────────────────────────────────────────
 
 export const defaultSettings = Object.freeze({
     enabled: true,
     // Latched by Stop; blocks only automatic cycles. Manual runs ignore it.
     autoPaused: false,
+    memoryMode: MEMORY_MODES.BALANCED,
+    cacheTtlMinutes: CACHE_TTL.DEFAULT_MINUTES, // provider cache lifetime, Prefix Cache only
     // Decoupled from uiMode: which complexity panel (Easy/Advanced) to render,
     // shown even when the extension is off so config stays editable.
     configMode: UI_MODES.EASY,
     uiMode: UI_MODES.EASY,
-    easySummarizerContextTokens: 16000,
-    easyMemoryTokenBudget: 10000,
-    easyMemoryMode: MEMORY_MODES.STANDARD,
-    easyConnectionSource: 'default', // 'default' | 'profile'
-    easyConnectionProfileId: '',
-    easyMergeConnectionSource: 'inherit', // 'inherit' | 'profile'
-    easyMergeConnectionProfileId: '',
-    memoryMode: MEMORY_MODES.STANDARD,
     customMemoryPosition: MEMORY_POSITIONS.IN_PROMPT,
     customMemoryRole: MEMORY_ROLES.SYSTEM,
     customMemoryDepth: 0,
@@ -121,7 +168,7 @@ export const defaultSettings = Object.freeze({
     // ─── Modular STATE categories (stateCat*) ─────────────────────────
     // Most categories ship enabled: the extension's [CURRENT STATE] injection
     // is meant to be the sole carrier, so users should disable the equivalent
-    // blocks in their RP preset. stateCatDateTime is informational only —
+    // blocks in their RP preset. stateCatDateTime is informational only;
     // alwaysOn forces true at runtime regardless of this flag. Chekhov ships
     // off: it needs matching FIRE-decision logic in the preset CoT to be useful.
     stateCatDateTime: true,
@@ -137,6 +184,7 @@ export const defaultSettings = Object.freeze({
     advancedModelContext: 48000,
     minSummaryBudget: 16000,
     verbatimTokenBudget: 22000,
+    queuedTokenBudget: 6000,
     memoryTokenBudget: 10000,
     snippetsPerLayer: 24,
     snippetsPerPromotion: 3,

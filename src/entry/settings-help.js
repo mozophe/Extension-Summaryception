@@ -1,4 +1,10 @@
-import { CONNECTION_HELP_ENTRIES } from './settings-help-data.js';
+import { clampNumericSetting } from '../foundation/numeric.js';
+import {
+    CONNECTION_HELP_ENTRIES,
+    selectorFor,
+    controlFor,
+    basicHelp,
+} from './settings-help-data.js';
 
 const HELP_EVENT_NS = '.summaryceptionSettingsHelp';
 const HELP_TOOLTIP_ID = 'sc_help_tooltip';
@@ -13,9 +19,6 @@ const HELP_FOCUS_SELECTOR = [
 ].join(', ');
 const HELP_TOOLTIP_DELAY_MS = 500;
 
-const selectorFor = (id) => `label[for="${id}"]`;
-const controlFor = (id) => `#${id}`;
-
 let helpTooltipTimer = null;
 
 const sliderHelp = ({ selector, title, short, meaning, higher, lower, defaultText, controls }) => ({
@@ -26,29 +29,20 @@ const sliderHelp = ({ selector, title, short, meaning, higher, lower, defaultTex
     controls,
 });
 
-const basicHelp = ({ selector, title, short, controls, controlsText, when, risk }) => ({
-    selector,
-    title,
-    short,
-    detail: `${controlsText} ${when} ${risk}`,
-    controls,
-});
-
 const MEMORY_MODE_HELP = Object.freeze({
-    standard: {
-        title: 'Standard',
-        short: 'Summarizes overflow as it comes, so the main prompt stays smaller and steadier.',
-        controlsText: 'Toggles the rolling verbatim window plus continuous summaries on or off.',
-        when: 'Turn it on when you want steadier context size and higher recall in a smaller total context, or when your provider has no real prompt caching.',
-        risk: 'You pay full input price for the changing prompt on every turn.',
+    balanced: {
+        title: 'Default',
+        short: 'Keeps recent chat near the useful range and summarizes overflow as it arrives.',
+        controlsText: 'Uses the 22k rolling verbatim window with continuous summaries.',
+        when: 'Use it when prompt caching is unavailable, weak, or not worth planning around.',
+        risk: 'The changing prompt may be billed at full input price on every turn.',
     },
-    cache: {
-        title: 'Cache Friendly',
-        short: 'Uses a bigger 32k live window for providers that discount cached input.',
-        controlsText:
-            'Locks a stable memory prefix in place and holds off flushing until the live cache window fills.',
-        when: 'Use it when your provider supports prompt caching and bills cached tokens at a steep discount.',
-        risk: 'Total context grows larger (memory plus 32k), and a manual summarize run can wipe your cache savings.',
+    prefix_cache: {
+        title: 'Prefix Cache',
+        short: 'For normal caches that can reuse the unchanged start of a prompt even when the tail changes.',
+        controlsText: 'Lets live chat grow to 32k before flushing older chat in one commit.',
+        when: 'Use it when cached input is cheaper and your provider can reuse a partial prompt prefix.',
+        risk: 'The prompt is larger, and a summary flush starts a new cache prefix. Normal lorebooks need no changes.',
     },
 });
 
@@ -116,25 +110,41 @@ const HELP_ENTRIES = [
             controlsText:
                 'This relabels your chat turns as the AI\'s own words before the request leaves, so the model quits handing your character plot armor. Chat-completion models are RLHF-trained to treat whatever sits in the user role as a real person to please and keep safe, which is why your character never truly loses. Flip your turns to the assistant role and the whole log reads like one narrator telling a story, so you become just another character who can get hurt, surprised, or told no. It only touches the outgoing request; your saved chat stays exactly as you wrote it. Works best when you roleplay in third person and edit your preset so it never says "user" or "you". The modes: marker first adds a throwaway user line at the top for APIs that demand one; no marker turns every turn into the AI (request-only, zero user messages); marker last puts that throwaway user line at the end; keep the final user block leaves your last message as user, which is handy when another extension such as Rabbit-Response-Team injects its instruction there.',
             when: 'Reach for it when you want the model to stop shielding your character and just play the scene straight.',
-            risk: 'providers may normalize or reject unusual role layouts or synthetic marker messages, and a no-marker request with zero user messages can be refused outright — that is exactly what the marker modes are for.',
+            risk: 'providers may normalize or reject unusual role layouts or synthetic marker messages, and a no-marker request with zero user messages can be refused outright. That is exactly what the marker modes are for.',
         }),
     ],
     [
         'verbatim_token_budget',
         sliderHelp({
             selector: selectorFor('sc_verbatim_token_budget'),
-            title: 'Verbatim Token Budget',
-            short: 'Recent chat kept word-for-word before summaries start.',
+            title: 'Recent Chat Budget',
+            short: 'Recent raw chat kept live.',
             controls: [
                 controlFor('sc_verbatim_token_budget'),
                 controlFor('sc_verbatim_token_budget_val'),
             ],
             meaning:
-                'How much recent chat stays word-for-word before older turns get summarized into Layer 0.',
-            higher: 'keeps more exact recent chat but eats more context.',
-            lower: 'summarizes sooner and frees up room for memory.',
-            defaultText:
-                '22k; Cache Friendly bumps this to 32k and can save ~70% per turn on caching providers.',
+                'Sets the recent raw-chat range kept word-for-word while older raw chat waits in the queued window.',
+            higher: 'keeps more exact recent chat but uses more context.',
+            lower: 'moves the recent boundary forward sooner.',
+            defaultText: '22k in Balanced; mode presets may change it.',
+        }),
+    ],
+    [
+        'queued_token_budget',
+        sliderHelp({
+            selector: selectorFor('sc_queued_token_budget'),
+            title: 'Queued Chat Budget',
+            short: 'Older raw chat held for automatic summarization.',
+            controls: [
+                controlFor('sc_queued_token_budget'),
+                controlFor('sc_queued_token_budget_val'),
+            ],
+            meaning:
+                'Sets the queued older raw-chat range. Automatic summarization waits until Recent + Queued is full.',
+            higher: 'lets more raw chat accumulate before a flush.',
+            lower: 'flushes queued chat sooner after the recent window is full.',
+            defaultText: '6k in Balanced; mode presets may change it.',
         }),
     ],
     [
@@ -192,33 +202,32 @@ const HELP_ENTRIES = [
         sliderHelp({
             selector: selectorFor('sc_max_l0_source_tokens'),
             title: 'Max Source per Call',
-            short: 'Hard ceiling for raw chat sent in one Layer 0 request.',
+            short: 'Hard cap on raw chat sent in one Layer 0 call.',
             controls: [
                 controlFor('sc_max_l0_source_tokens'),
                 controlFor('sc_max_l0_source_tokens_val'),
             ],
-            meaning:
-                'The maximum raw-chat source size sent in a single Layer 0 summarizer call. Auto-derived from Model context; override it here.',
+            meaning: 'Sets the maximum raw-chat source size sent in one Layer 0 summarizer call.',
             higher: 'allows bigger batches for models with more context.',
             lower: 'keeps each summarizer request smaller and safer.',
-            defaultText: '24k, inside an 8k-64k range; auto-derived from Model context.',
+            defaultText: '24k; auto-derived from Model context.',
         }),
     ],
     [
         'min_summary_budget',
         sliderHelp({
             selector: selectorFor('sc_min_summary_budget'),
-            title: 'Batch Trigger Size',
-            short: 'How much overflow text to collect before short batches run.',
+            title: 'Target Source per Call',
+            short: 'Preferred raw-chat size for each balanced Layer 0 partition.',
             controls: [
                 controlFor('sc_min_summary_budget'),
                 controlFor('sc_min_summary_budget_val'),
             ],
             meaning:
-                'The minimum overflow size before a normal Layer 0 batch is worth summarizing; it cannot exceed Max Source per Call. Auto-derived from Model context; override it here.',
-            higher: 'waits for bigger chunks and makes fewer summarizer calls.',
-            lower: 'summarizes smaller chunks sooner.',
-            defaultText: '16k, with a fixed 4k-32k control range; auto-derived from Model context.',
+                'Sets the preferred size of each balanced Layer 0 partition. Recent + Queued fullness controls automatic summarization.',
+            higher: 'makes fewer, larger summarizer calls up to the source cap.',
+            lower: 'creates smaller partitions and more summarizer calls.',
+            defaultText: '16k; auto-derived from Model context.',
         }),
     ],
     [
@@ -246,6 +255,20 @@ const HELP_ENTRIES = [
             higher: 'packs more chat into each summary call.',
             lower: 'keeps each summary request smaller and easier.',
             defaultText: '8.',
+        }),
+    ],
+    [
+        'cache_ttl',
+        sliderHelp({
+            selector: selectorFor('sc_cache_ttl'),
+            title: 'Cache TTL',
+            short: 'Minutes your provider keeps a cached prompt prefix alive.',
+            controls: [controlFor('sc_cache_ttl'), controlFor('sc_cache_ttl_val')],
+            meaning:
+                'Used by Prefix Cache and Append Only only. When the last turn is older than the TTL, the cache is treated as expired. Loading such a chat suggests a Force Summarize: the next message pays full input price either way, so summarizing first avoids paying full price twice.',
+            higher: 'waits longer before the early-summarize suggestion appears.',
+            lower: 'suggests early summarizing sooner for short-lived caches.',
+            defaultText: '30 minutes.',
         }),
     ],
     [
@@ -282,19 +305,19 @@ const HELP_ENTRIES = [
         }),
     ],
     [
-        'memory_mode_standard',
+        'memory_mode_balanced',
         memoryModeHelp({
-            selector: selectorFor('sc_memory_mode_standard'),
-            controls: [controlFor('sc_memory_mode_standard')],
-            mode: 'standard',
+            selector: selectorFor('sc_memory_mode_balanced'),
+            controls: [controlFor('sc_memory_mode_balanced')],
+            mode: 'balanced',
         }),
     ],
     [
-        'memory_mode_cache',
+        'memory_mode_prefix_cache',
         memoryModeHelp({
-            selector: selectorFor('sc_memory_mode_cache'),
-            controls: [controlFor('sc_memory_mode_cache')],
-            mode: 'cache',
+            selector: selectorFor('sc_memory_mode_prefix_cache'),
+            controls: [controlFor('sc_memory_mode_prefix_cache')],
+            mode: 'prefix_cache',
         }),
     ],
     [
@@ -371,7 +394,7 @@ const HELP_ENTRIES = [
             controlsText:
                 'Toggles the narrative-debt bullet register that ages and fires probabilistically. Keep the FIRE-decision d20 logic in your preset CoT; only the register lives here.',
             when: "Replaces FF5's <internal_chekhovguntracker> storage. Disable that block in your preset when on.",
-            risk: 'Keep the FIRE-decision d20 logic in your preset CoT — only the bullet register lives here.',
+            risk: 'Keep the FIRE-decision d20 logic in your preset CoT; only the bullet register lives here.',
         }),
     ],
     [
@@ -408,26 +431,26 @@ const HELP_ENTRIES = [
             short: 'Current scene location.',
             controls: [controlFor('sc_state_cat_location')],
             controlsText:
-                'Toggles tracking of the current scene location. Optional — only needed when your preset keys off proximity-based modifiers such as Chekhov location-match.',
+                'Toggles tracking of the current scene location. Optional; only needed when your preset keys off proximity-based modifiers such as Chekhov location-match.',
             when: 'Optional. Needed if your preset uses proximity-based modifiers (e.g. Chekhov location-match).',
-            risk: 'Low risk — dispensable if your preset does not key off scene location.',
+            risk: 'Low risk; dispensable if your preset does not key off scene location.',
         }),
     ],
     ...CONNECTION_HELP_ENTRIES,
     [
-        'easy_memory_mode_standard',
+        'easy_memory_mode_balanced',
         memoryModeHelp({
-            selector: selectorFor('sc_easy_memory_mode_standard'),
-            controls: [controlFor('sc_easy_memory_mode_standard')],
-            mode: 'standard',
+            selector: selectorFor('sc_easy_memory_mode_balanced'),
+            controls: [controlFor('sc_easy_memory_mode_balanced')],
+            mode: 'balanced',
         }),
     ],
     [
-        'easy_memory_mode_cache',
+        'easy_memory_mode_prefix_cache',
         memoryModeHelp({
-            selector: selectorFor('sc_easy_memory_mode_cache'),
-            controls: [controlFor('sc_easy_memory_mode_cache')],
-            mode: 'cache',
+            selector: selectorFor('sc_easy_memory_mode_prefix_cache'),
+            controls: [controlFor('sc_easy_memory_mode_prefix_cache')],
+            mode: 'prefix_cache',
         }),
     ],
     [
@@ -718,8 +741,16 @@ export function calculateHelpTooltipPosition({
     }
 
     return {
-        left: clamp(anchorRect.left, minLeft, maxLeft),
-        top: clamp(top, 8, Math.max(8, viewportHeight - tooltipHeight - 8)),
+        left: clampNumericSetting(anchorRect.left, {
+            fallback: minLeft,
+            min: minLeft,
+            max: maxLeft,
+        }),
+        top: clampNumericSetting(top, {
+            fallback: 8,
+            min: 8,
+            max: Math.max(8, viewportHeight - tooltipHeight - 8),
+        }),
     };
 }
 
@@ -995,8 +1026,4 @@ function positionTooltip($settings, $tooltip, anchor) {
         left: `${position.left}px`,
         top: `${position.top}px`,
     });
-}
-
-function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
 }

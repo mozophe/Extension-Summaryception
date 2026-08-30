@@ -1,27 +1,22 @@
-# UI and Workflow Gotchas
+# UI Gotchas
 
-## DOM and Binding
-
-- Settings DOM uses jQuery for queries, delegated events, and rendering. Native DOM creation is limited to ephemeral inputs and downloads.
-- Data attributes declare bindings: one for standard fields, and a slider and partner-input pair for range controls with a value chip.
-- Sliders persist on input. Text and numeric chips persist on change or blur.
-
-## Mode Gating
-
-- The operating mode gates whether the extension runs. The complexity mode selects which panel renders.
-- The two are deliberately decoupled, so the chosen panel stays visible and editable while the extension is off.
-- When off, the off banner renders alongside the complexity panel, never instead of it.
-- The Status tab opens on every startup. Never restore the previously active tab.
-
-## State Categories
-
-- A state category toggle needs two-way wiring: a write handler in the events module and a read-back sync in the render path. One side alone leaves the toggle visually stuck.
-
-## Workflow Boundaries
-
-- Feature modules return structured outcome objects. Entry modules format the toasts and notices and trigger refreshes.
+- Use jQuery for settings queries, delegated events, and rendering.
+- Data attributes declare setting bindings and slider value pairs.
+- Sliders save on input. Text and numeric controls save on change or blur.
+- Keep slider min, max, and step equal to the settings clamp bounds.
+- Operating mode gates runtime behavior. Complexity mode selects the visible panel.
+- Keep the selected panel editable while the extension is Off.
+- Show the Off banner beside the selected panel.
+- Open the Status tab on every startup.
+- A state category toggle needs both write handling and render synchronization.
+- Feature modules return structured outcomes. Entry modules format user notices.
+- Bind toast action buttons with delegated document clicks. Toast content does not exist at bind time.
 - Keep user-facing text out of feature modules.
-
-## Styling
-
-- Inherit host CSS variables. Keep styling restrained and responsive, collapsing near 520 pixels.
+- Keep the first view focused on status, activity, and required action.
+- Use compact sections and responsive grids. Collapse near 520 pixels.
+- Keep navigation sticky, opaque, keyboard accessible, and text-labelled.
+- Inherit host theme variables and use one restrained accent.
+- Keep status and actions visible without requiring a diagnostics view.
+- Import numeric clamp helpers from the foundation module. Do not reimplement clamp logic locally.
+- Format token counts with the shared compact formatter. Surfaces must agree on rounding.
+- Avoid horizontal scrolling, clipped labels, and missing focus states.

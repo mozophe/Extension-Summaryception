@@ -1,7 +1,13 @@
+import { TOAST_TITLE } from '../foundation/constants.js';
 import { getContext, getChat } from '../foundation/context.js';
-import { STATE_SNAPSHOT_MODE } from '../foundation/prompt-constants.js';
-import { bumpSummaryStoreMutationEpoch, getChatStore, saveChatStore } from '../foundation/state.js';
-import { debug, error, info, isTraceEnabled, trace, warn } from '../foundation/logger.js';
+import { ensureChatScIds, resolveScIdsToIndices } from '../foundation/message-identity.js';
+import {
+    bumpSummaryStoreMutationEpoch,
+    getChatStore,
+    getCurrentSummarizedBoundary,
+    saveChatStore,
+} from '../foundation/state.js';
+import { debug, error, info, isTraceEnabled, serializeError, trace } from '../foundation/logger.js';
 import { ghostMessagesInRange, repairGhostingForRange } from './ghosting.js';
 import {
     buildMemoryInjection,
@@ -13,15 +19,15 @@ import { callSummarizer } from './summarizer-request.js';
 import { buildSnippetMetadataFromState } from './snippet-metadata.js';
 import { commitWhenSafe, updateCommittedInjection } from './summarizer-commit.js';
 import { executeLayer0StoreTransaction } from './layer0-store-transaction.js';
-import { validateSummarizerOutputIntegrity } from './prompts.js';
+import { isSummarizerOutputSafe } from './prompts.js';
 import { parseSnippet } from './summarizer-state.js';
 import { getCurrentStateSnapshotText } from './memory-injection.js';
 import { countTextTokens, formatTokenCount, formatTokenValue } from './token-count.js';
 import {
+    buildSnapshotBasis,
     fingerprintSourceRange,
-    getChatIdentity,
     getSummaryStoreSnapshotEpoch,
-    isSameChatSnapshot,
+    isSnapshotStoreCurrent,
 } from './summarizer-snapshot.js';
 
 /**
@@ -39,13 +45,17 @@ export async function summarizeBatchFromTurns(
     trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
 
     const chat = getChat();
+    if (ensureChatScIds(chat)) {
+        await persistChatState({ chatSave: 'deferred' });
+    }
     const store = getChatStore();
+    const summarizedBoundary = getCurrentSummarizedBoundary(chat, store);
 
-    const eligibleTurns = visibleTurns.filter((t) => t.index > store.summarizedUpTo);
+    const eligibleTurns = visibleTurns.filter((turn) => turn.index > summarizedBoundary);
     trace('  eligibleTurns after filtering:', eligibleTurns.length);
 
     if (eligibleTurns.length === 0) {
-        await repairGhosting(visibleTurns, store.summarizedUpTo);
+        await repairGhosting(visibleTurns, summarizedBoundary);
         return false;
     }
 
@@ -90,12 +100,12 @@ export async function summarizeOneBatchFromTurns(visibleTurns) {
 /**
  * Repair ghosting for turns already marked as summarized.
  * @param {import('./chatutils.js').AssistantTurn[]} visibleTurns
- * @param {number} summarizedUpTo
+ * @param {number} boundaryIndex
  * @returns {Promise<void>}
  */
-async function repairGhosting(visibleTurns, summarizedUpTo) {
-    info('All visible turns are already summarized — repairing ghosting...');
-    const turnsToGhost = visibleTurns.filter((t) => t.index <= summarizedUpTo);
+async function repairGhosting(visibleTurns, boundaryIndex) {
+    info('All visible turns are already summarized; repairing ghosting...');
+    const turnsToGhost = visibleTurns.filter((t) => t.index <= boundaryIndex);
     if (turnsToGhost.length > 0) {
         const first = turnsToGhost[0].index;
         const last = turnsToGhost[turnsToGhost.length - 1].index;
@@ -123,14 +133,14 @@ async function summarizeBatchCore({ chat, store, eligibleTurns, opts }) {
 
     const { startIdx, endIdx: batchEndIdx } = getBatchRange(batch);
     const endIdx = getSourceEndIdx(batchEndIdx, opts.sourceEndIdx);
+    const summarizedBoundary = getCurrentSummarizedBoundary(chat, store);
     trace('  startIdx:', startIdx, 'endIdx:', endIdx);
-    trace('  store.summarizedUpTo:', store.summarizedUpTo);
+    trace('  resolved summarized boundary:', summarizedBoundary);
 
     info(`Summarizing ${batch.length} assistant turns (indices ${startIdx}–${endIdx})`);
 
     ensureLayer0(store);
-    const passageStart = store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1;
-
+    const passageStart = summarizedBoundary < 0 ? 0 : summarizedBoundary + 1;
     if (!isPassageRangeValid(passageStart, endIdx)) {
         return false;
     }
@@ -147,14 +157,16 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, { showToasts }) {
     const chat = getChat();
     const store = getChatStore();
     ensureLayer0(store);
-
+    /** @type {(success: boolean) => void} */
+    let completeToast = () => {};
     let contextText = buildFullContext(0);
     const snapshots = [];
     const pendingSnippets = [];
-    const baseSummarizedUpTo = store.summarizedUpTo;
+    const baseMutationEpoch = getSummaryStoreSnapshotEpoch(store);
 
     for (const partition of usablePartitions) {
-        if (store.summarizedUpTo !== baseSummarizedUpTo) {
+        if (getSummaryStoreSnapshotEpoch(store) !== baseMutationEpoch) {
+            completeToast(false);
             return false;
         }
 
@@ -167,17 +179,28 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, { showToasts }) {
         });
         tracePassageTokens(snapshot);
         if (!snapshot.passageText.trim()) {
+            completeToast(false);
             return false;
         }
 
-        const summary = await callSummarizer(snapshot.passageText, snapshot.contextText, {
-            kind: 'layer0',
-            sourceRange: snapshot.sourceRange,
-            assistantTurnCount: partition.turns.length,
-            regexStats: snapshot.passageStats,
-            sourceState: snapshot.sourceState,
-        });
+        if (snapshots.length === 0) {
+            completeToast = createSummarizationToast(showToasts);
+        }
+        let summary;
+        try {
+            summary = await callSummarizer(snapshot.passageText, snapshot.contextText, {
+                kind: 'layer0',
+                sourceRange: snapshot.sourceRange,
+                assistantTurnCount: partition.turns.length,
+                regexStats: snapshot.passageStats,
+                sourceState: snapshot.sourceState,
+            });
+        } catch (err) {
+            completeToast(false);
+            throw err;
+        }
         if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
+            completeToast(false);
             return false;
         }
 
@@ -186,17 +209,21 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, { showToasts }) {
         contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
     }
 
-    const result = await commitWhenSafe({
-        kind: 'layer0-atomic-cache',
-        snapshot: snapshots[0],
-        apply: async () =>
-            await commitAtomicLayer0Snippets({
-                snapshots,
-                pendingSnippets,
-                showToasts,
-            }),
-    });
-
+    let result;
+    try {
+        result = await commitWhenSafe({
+            kind: 'layer0-atomic-cache',
+            snapshot: snapshots[0],
+            apply: async () => {
+                const committed = await commitAtomicLayer0Snippets({ snapshots, pendingSnippets });
+                completeToast(committed);
+                return committed;
+            },
+        });
+    } catch (err) {
+        completeToast(false);
+        throw err;
+    }
     return result !== 'stale';
 }
 
@@ -213,8 +240,7 @@ async function summarizeBatchSafely(p) {
             throw err;
         }
         trace('  CAUGHT EXCEPTION:', {
-            name: err?.name,
-            message: err?.message,
+            ...serializeError(err),
             stack: err?.stack?.substring?.(0, 200),
         });
         error('summarizeBatchFromTurns exception:', err);
@@ -228,7 +254,7 @@ async function summarizeBatchSafely(p) {
  * @param {object} p - Batch parameters
  * @returns {Promise<boolean>}
  */
-async function performBatchSummary({ batch, chat, store, passageStart, endIdx, opts }) {
+async function performBatchSummary({ chat, store, passageStart, endIdx, opts }) {
     const snapshot = await captureLayer0Snapshot({ chat, store, passageStart, endIdx });
     tracePassageTokens(snapshot);
     if (!snapshot.passageText.trim()) {
@@ -238,35 +264,44 @@ async function performBatchSummary({ batch, chat, store, passageStart, endIdx, o
 
     await traceTextTokens('  contextStr tokens:', snapshot.contextText);
 
-    showBatchToast(batch.length, opts.showToasts);
+    const completeToast = createSummarizationToast(opts.showToasts);
 
     trace('  About to call callSummarizer...');
-    const summary = await callSummarizer(snapshot.passageText, snapshot.contextText, {
-        kind: 'layer0',
-        sourceRange: snapshot.sourceRange,
-        regexStats: snapshot.passageStats,
-        sourceState: snapshot.sourceState,
-    });
+    let summary;
+    try {
+        summary = await callSummarizer(snapshot.passageText, snapshot.contextText, {
+            kind: 'layer0',
+            sourceRange: snapshot.sourceRange,
+            regexStats: snapshot.passageStats,
+            sourceState: snapshot.sourceState,
+        });
+    } catch (err) {
+        completeToast(false);
+        throw err;
+    }
     await traceTextTokens('  summary tokens:', summary || '');
 
     if (!summary) {
         debug('Summarization failed for batch, leaving turns intact for next attempt.');
         trace('<<< EXITING summarizeBatchFromTurns - EMPTY SUMMARY');
+        completeToast(false);
         return false;
     }
-
-    const result = await commitWhenSafe({
-        kind: 'layer0',
-        snapshot,
-        apply: async () =>
-            await commitLayer0Snippet({
-                snapshot,
-                summary,
-                showToasts: opts.showToasts,
-            }),
-    });
-
-    trace(`<<< EXITING summarizeBatchFromTurns - ${result.toUpperCase()}`);
+    let result;
+    try {
+        result = await commitWhenSafe({
+            kind: 'layer0',
+            snapshot,
+            apply: async () => {
+                const committed = await commitLayer0Snippet({ snapshot, summary });
+                completeToast(committed);
+                return committed;
+            },
+        });
+    } catch (err) {
+        completeToast(false);
+        throw err;
+    }
     return result !== 'stale';
 }
 
@@ -318,16 +353,22 @@ async function traceTextTokens(label, text) {
  */
 async function captureLayer0Snapshot({ chat, store, passageStart, endIdx, contextText }) {
     const ctx = getContext();
+    const sourceMessageIds = chat.slice(passageStart, endIdx + 1).map((message) => message?.sc_id);
+    const stableSourceMessageIds = /** @type {string[]} */ (sourceMessageIds);
+    if (
+        sourceMessageIds.length !== endIdx - passageStart + 1 ||
+        sourceMessageIds.some((id) => typeof id !== 'string' || id.trim() === '')
+    ) {
+        throw new Error('Cannot summarize messages without stable Summaryception IDs.');
+    }
     const passage = await buildPassageFromRangeWithStats(chat, passageStart, endIdx);
     const resolvedContextText = contextText ?? buildFullContext(0);
 
     return {
-        chatId: getChatIdentity(ctx),
-        chatRef: chat,
-        summarizedUpTo: store.summarizedUpTo,
+        ...buildSnapshotBasis({ chatRef: chat, store, ctx }),
         sourceRange: [passageStart, endIdx],
+        sourceMessageIds: stableSourceMessageIds,
         sourceFingerprint: fingerprintSourceRange(chat, passageStart, endIdx),
-        summaryStoreEpoch: getSummaryStoreSnapshotEpoch(store),
         passageText: passage.text,
         passageStats: passage.stats,
         contextText: resolvedContextText,
@@ -340,16 +381,14 @@ async function captureLayer0Snapshot({ chat, store, passageStart, endIdx, contex
  * @param {object} p
  * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot
  * @param {string} p.summary - The LLM-generated summary text
- * @param {boolean} p.showToasts - Whether to show success toast
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Snippet({ snapshot, summary, showToasts }) {
+async function commitLayer0Snippet({ snapshot, summary }) {
     if (!isLayer0SnapshotValid(snapshot)) {
         return false;
     }
 
     const store = getChatStore();
-    const [passageStart, endIdx] = snapshot.sourceRange;
     ensureLayer0(store);
 
     if (!isLayer0SummarySafe(summary, snapshot)) {
@@ -358,25 +397,22 @@ async function commitLayer0Snippet({ snapshot, summary, showToasts }) {
 
     await executeLayer0Commit({
         store,
-        passageStart,
-        endIdx,
-        showToasts,
+        sourceMessageIds: snapshot.sourceMessageIds,
         rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
         onRollback: () => {
             debug('Layer 0 commit rolled back: post-save persistence failed.');
         },
         mutate: () => {
             store.layers[0].push(buildLayer0Snippet(snapshot, summary));
-            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
             bumpSummaryStoreMutationEpoch(store);
-            trace('  Updated store.summarizedUpTo to:', store.summarizedUpTo);
+            trace('  Added Layer 0 snippet for current source IDs.');
         },
     });
 
     return true;
 }
 
-async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, showToasts }) {
+async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets }) {
     if (snapshots.length === 0 || pendingSnippets.length !== snapshots.length) {
         return false;
     }
@@ -386,15 +422,11 @@ async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, showToas
 
     const store = getChatStore();
     ensureLayer0(store);
-
-    const passageStart = snapshots[0].sourceRange[0];
-    const endIdx = snapshots[snapshots.length - 1].sourceRange[1];
+    const sourceMessageIds = snapshots.flatMap((snapshot) => snapshot.sourceMessageIds);
 
     await executeLayer0Commit({
         store,
-        passageStart,
-        endIdx,
-        showToasts: false, // Suppress the generic toast; cache-break toast is shown below.
+        sourceMessageIds,
         rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
         onRollback: () => {
             debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
@@ -403,75 +435,53 @@ async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, showToas
             for (const snippet of pendingSnippets) {
                 store.layers[0].push(snippet);
             }
-
-            store.summarizedUpTo = Math.max(store.summarizedUpTo, endIdx);
             bumpSummaryStoreMutationEpoch(store);
         },
     });
 
-    if (showToasts) {
-        toastr.info(
-            `Cache break – ${pendingSnippets.length} batch${pendingSnippets.length === 1 ? '' : 'es'} saved. Safe to update lorebook or author's note now.`,
-            'Summaryception',
-            { timeOut: 6000 },
-        );
-    }
-
     return true;
 }
 
-/**
- * Commit a Layer 0 mutation and run downstream persistence effects transactionally.
- * @param {object} p
- * @param {SummaryceptionStore} p.store
- * @param {number} p.passageStart
- * @param {number} p.endIdx
- * @param {boolean} p.showToasts
- * @param {() => void} p.mutate
- * @param {string} p.rollbackMessage
- * @param {() => void} [p.onRollback]
- * @returns {Promise<void>}
- */
 async function executeLayer0Commit({
     store,
-    passageStart,
-    endIdx,
-    showToasts,
+    sourceMessageIds,
     mutate,
     rollbackMessage,
     onRollback,
 }) {
+    const chat = getChat();
+    const chatRollbackPoint = [...chat];
     await executeLayer0StoreTransaction({
         store,
         mutate,
         rollbackMessage,
-        onRollback,
+        onRollback: async () => {
+            chat.splice(0, chat.length, ...chatRollbackPoint);
+            onRollback?.();
+        },
         persist: async () => {
             await saveChatStore();
             await updateCommittedInjection({ logMemoryStatus: true });
-            await ghostMessagesInRange(passageStart, endIdx, { chatSave: 'deferred' });
+            await ghostSourceMessageIds(sourceMessageIds);
             await persistChatState({ chatSave: 'deferred' });
         },
     });
+}
 
-    if (showToasts) {
-        toastr.success(
-            `Summary saved (Layer 0: ${store.layers[0].length} snippets)`,
-            'Summaryception',
-            { timeOut: 2000 },
-        );
+async function ghostSourceMessageIds(sourceMessageIds) {
+    const indices = resolveScIdsToIndices(getChat(), sourceMessageIds);
+    if (indices.length === 0) {
+        return;
     }
+    await ghostMessagesInRange(indices[0], indices[indices.length - 1], { chatSave: 'deferred' });
 }
 
 function buildLayer0Snippet(snapshot, summary) {
-    const [passageStart, endIdx] = snapshot.sourceRange;
     const parsed = parseSnippet(summary);
     return {
         text: summary,
-        turnRange: /** @type {[number, number]} */ ([passageStart, endIdx]),
-        sourceRange: /** @type {[number, number]} */ ([passageStart, endIdx]),
+        sourceMessageIds: [...snapshot.sourceMessageIds],
         ...buildSnippetMetadataFromState(parsed.state),
-        stateMode: /** @type {'snapshot-v1'} */ (STATE_SNAPSHOT_MODE),
         timestamp: Date.now(),
     };
 }
@@ -494,17 +504,11 @@ function buildPendingLayer0Context(layers, pendingSnippets) {
  * @returns {boolean}
  */
 function isLayer0SummarySafe(summary, snapshot) {
-    const integrityResult = validateSummarizerOutputIntegrity(summary, {
+    return isSummarizerOutputSafe(summary, {
         kind: 'layer0',
         sourceRange: snapshot.sourceRange,
         regexStats: snapshot.passageStats,
     });
-    if (integrityResult.valid) {
-        return true;
-    }
-
-    warn(integrityResult.error.message);
-    return false;
 }
 
 /**
@@ -517,16 +521,10 @@ function isLayer0SnapshotValid(snapshot) {
     const store = getChatStore();
     const [startIdx, endIdx] = snapshot.sourceRange;
 
-    if (!isSameChatSnapshot(snapshot, ctx)) {
+    if (!isSnapshotStoreCurrent(snapshot, ctx, store)) {
         return false;
     }
-    if (store.summarizedUpTo !== snapshot.summarizedUpTo) {
-        return false;
-    }
-    if (fingerprintSourceRange(ctx.chat, startIdx, endIdx) !== snapshot.sourceFingerprint) {
-        return false;
-    }
-    return getSummaryStoreSnapshotEpoch(store) === snapshot.summaryStoreEpoch;
+    return fingerprintSourceRange(ctx.chat, startIdx, endIdx) === snapshot.sourceFingerprint;
 }
 
 /**
@@ -581,23 +579,34 @@ function isPassageRangeValid(passageStart, endIdx) {
     }
 
     error(`passageStart (${passageStart}) > endIdx (${endIdx}). Batch already summarized?`);
-    trace('<<< EXITING summarizeBatchFromTurns - PASSAGE START GREATER THAN END');
     return false;
 }
 
 /**
- * Show a progress toast for interactive batch summarization.
- * @param {number} batchLength - Number of turns in the batch
- * @param {boolean} showToasts - Whether to show toasts
- * @returns {void}
+ * @param {boolean} showToasts
+ * @returns {(success: boolean) => void}
  */
-function showBatchToast(batchLength, showToasts) {
+function createSummarizationToast(showToasts) {
     if (!showToasts) {
-        return;
+        return () => {};
     }
-
-    toastr.info(`Summarizing ${batchLength} turn${batchLength > 1 ? 's' : ''}…`, 'Summaryception', {
-        timeOut: 3000,
+    const progressToast = toastr.info('Updating conversation memory…', TOAST_TITLE, {
+        timeOut: 0,
+        extendedTimeOut: 0,
+        tapToDismiss: false,
         progressBar: true,
     });
+    let completed = false;
+    return (success) => {
+        if (completed) {
+            return;
+        }
+        completed = true;
+        toastr.clear(progressToast);
+        (success ? toastr.success : toastr.warning)(
+            success ? 'Conversation memory updated.' : 'Conversation memory was not updated.',
+            TOAST_TITLE,
+            { timeOut: 3000 },
+        );
+    };
 }

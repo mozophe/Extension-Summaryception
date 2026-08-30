@@ -1,28 +1,35 @@
 # Summaryception
 
-Browser-only SillyTavern extension for recursive layered summarization. Summarized messages are hidden from model context with native hide commands, but stay visible in the chat UI.
+- Browser-only SillyTavern extension for recursive layered summarization.
+- Summarized messages stay visible in chat but are hidden from model context.
 
 ## Work Rules
 
-- Husky owns lint, format, repomix output, and version bumps. Never run formatters manually.
-- Preserve unrelated changes. Never commit, push, or sync without explicit authorization.
+- Preserve unrelated changes.
+- Do not commit, push, or sync without explicit authorization.
+- Do not add migration shims or legacy constants.
+- New defaults apply to all users without stored-value detection.
 
 ## Global Boundaries
 
-- Imports flow one way: foundation, then core, then features, then entry. Never import upward.
-- Reach the SillyTavern runtime global only through the foundation context facade.
-- Read runtime behavior from effective settings. Use raw settings only for persistence and UI forms.
+- Reach SillyTavern runtime globals only through the foundation host facade.
+- Read runtime behavior from effective settings.
+- Use raw settings only for persistence and UI forms.
 - Any summary layer or snippet mutation must bump the store mutation epoch.
+- Implicit any is allowed. Annotate parameters that hold structured objects so the type gate checks property reads.
 
 ## Commands
 
 - `npm test` runs the suite.
+- The pre-commit hook formats the whole repo, then stages every change. Keep the tree free of unrelated edits before a commit.
 
 ## Documentation Map
 
-- Layering, facade, state ownership: `agent_docs/architecture/architecture.md`
-- Summarizer, memory, prompts, connections: `agent_docs/engine/engine.md`
-- UI, DOM, workflows: `agent_docs/ui/ui.md`
-- Testing: `agent_docs/testing/testing.md`
+- Architecture and state ownership: `agent_docs/architecture/architecture.md`
+- Summarizer, memory, prompts, and connections: `agent_docs/engine/engine.md`
+- UI and workflows: `agent_docs/ui/ui.md`
+- Testing contracts: `agent_docs/testing/testing.md`
 - Cost and budget tuning: `agent_docs/tuning/tuning.md`
-- Routers: `src/AGENTS.md`, `tests/AGENTS.md`
+- Tests share one setup hook for context bootstrap. Do not repeat it per test.
+- Conditional source guidance: `src/AGENTS.md`
+- Conditional test guidance: `tests/AGENTS.md`

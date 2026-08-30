@@ -1,23 +1,17 @@
-# Run Control
+# Run Control Gotchas
 
-## Single Automatic Gate
-
-- One engine function is the only entry point for automatic work. Every automatic trigger routes through the queue into that gate.
-- Automatic triggers include turn checks, requeue callbacks, generation-ended events, the enable and mode toggles, and post-batch continuation.
-- Add run-control guards inside the gate, never in a caller. A guard in a caller is bypassed by the other triggers.
-
-## Pause Latch
-
-- Stop latches a persistent paused flag. The gate then reports idle so the queue settles instead of spinning.
-- Automatic work does not resume by itself while the latch is set. Resume clears the latch and kicks a single cycle.
-- The paused flag is persisted with settings, so it survives a reload.
-
-## Manual Runs
-
-- Manual runs deliberately ignore both the paused latch and the enabled flag at engine level, so a one-shot order works while paused.
-- UI handlers still gate manual actions on the enabled flag and warn the user. Keep the check in the handler, not the engine.
-
-## Prompt Safety
-
-- Automatic work must not mutate the prompt during an active generation.
-- A stale prompt freeze is recovered at the start of an automatic cycle.
+- One engine gate owns all automatic work.
+- Route every automatic trigger through the queue and engine gate.
+- Put automatic run guards in the gate.
+- Stop persists a pause latch and lets the queue settle.
+- Resume clears the latch and starts one cycle.
+- Manual engine runs ignore the pause latch and enabled state.
+- The stale-cache advice toast starts the same manual run as the Force Summarize button.
+- Manual runs build their route plan inside the engine; callers pass run options only.
+- UI handlers still block manual actions when the extension is disabled.
+- Manual run callbacks and the abort signal pass as an explicit argument. Never carry them on the task object.
+- A manual run needs a numeric target boundary. Reject the run when the route plan omits it.
+- Automatic work must not mutate the prompt during generation.
+- The app-ready signal fires before the chat and its metadata load. Wait for the chat-changed signal to read chat state.
+- Loaded-chat reconciliation runs on every chat-changed signal: normalize keys, update injection, re-apply ghosting.
+- Recover stale prompt freezes at the start of an automatic cycle.

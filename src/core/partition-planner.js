@@ -1,7 +1,11 @@
 import { defaultSettings } from '../foundation/constants.js';
-import { getPromptDepthsByChatIndex, iterateChatRange } from './chatutils.js';
-import { applyRegexToMessage } from './regex-proxy.js';
-import { addBudgetStats, countMessageTokens, createBudgetStats } from './token-count.js';
+import {
+    countProcessedMessage,
+    getPromptDepthsByChatIndex,
+    isSummarizerConversationMessage,
+    iterateChatRange,
+} from './chatutils.js';
+import { addBudgetStats, createBudgetStats } from './token-count.js';
 
 const MIN_L0_SOURCE_TOKENS = 2000;
 const L0_SOURCE_OVERSHOOT_TOLERANCE = 1.15;
@@ -73,10 +77,13 @@ export async function countSourceRangeTokens(chat, startIdx, endIdx, settings) {
     }
 
     for (const { index, message } of iterateChatRange(chat, startIdx, endIdx)) {
-        if (!isPassageCountableMessage(message)) {
+        if (!isSummarizerConversationMessage(message)) {
             continue;
         }
-        addBudgetStats(stats, await countSourceMessage(message, promptDepths.get(index), settings));
+        addBudgetStats(
+            stats,
+            await countProcessedMessage(message, promptDepths.get(index), settings),
+        );
     }
 
     return stats;
@@ -165,24 +172,6 @@ function buildPartitionFromSegments(segments) {
     };
 }
 
-async function countSourceMessage(message, depth, settings) {
-    const rawText = String(message.mes || '').trim();
-    const finalText = settings.applyRegexScripts
-        ? await applyRegexToMessage(rawText, Boolean(message.is_user), depth)
-        : rawText;
-    const rawLine = getMessageLine(message, rawText);
-    const finalLine = getMessageLine(message, finalText);
-    const tokens = await countMessageTokens(message, rawLine, finalLine);
-
-    return {
-        rawTokens: tokens.rawTokens,
-        finalTokens: tokens.finalTokens,
-        rawTokensEstimated: tokens.rawTokensEstimated,
-        finalTokensEstimated: tokens.finalTokensEstimated,
-        changed: rawLine !== finalLine,
-    };
-}
-
 function getFinalEndIdx(turnIndex, finalSourceEndIdx) {
     if (
         typeof finalSourceEndIdx === 'number' &&
@@ -207,16 +196,4 @@ function getTargetSourceTokens(settings) {
     const budget = Number(settings.minSummaryBudget);
     const safeBudget = Number.isFinite(budget) ? budget : cap;
     return Math.min(cap, Math.max(MIN_L0_SOURCE_TOKENS, Math.round(safeBudget)));
-}
-
-function getMessageLine(message, text) {
-    const speaker = message.is_user ? 'Player' : 'Assistant';
-    return `${speaker}: ${text}`;
-}
-
-function isPassageCountableMessage(message) {
-    if (!message?.mes || !String(message.mes).trim()) {
-        return false;
-    }
-    return !(message.is_system || message.is_hidden) || message.extra?.sc_ghosted;
 }

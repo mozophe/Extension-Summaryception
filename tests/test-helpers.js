@@ -1,3 +1,4 @@
+import { MEMORY_MODES } from '../src/foundation/constants.js';
 import { vi } from 'vitest';
 
 /**
@@ -6,30 +7,39 @@ import { vi } from 'vitest';
  * so modules can be tested without the browser runtime.
  */
 
+let nextMessageId = 0;
+
 /** Build a stub chat message. */
-export function makeMessage({
-    isUser = false,
-    isSystem = false,
-    isHidden = false,
-    mes = 'Hello, world.',
-    name = 'Assistant',
-    ghosted = false,
-} = {}) {
-    return {
+export function makeMessage(options = {}) {
+    const {
+        isUser = false,
+        isSystem = false,
+        isHidden = false,
+        mes = 'Hello, world.',
+        name = 'Assistant',
+        sendDate,
+    } = options;
+    const scId = Object.hasOwn(options, 'scId') ? options.scId : `message-${nextMessageId++}`;
+    const message = {
+        sc_id: scId,
         is_user: isUser,
         is_system: isSystem,
         is_hidden: isHidden,
         mes,
         name,
-        extra: ghosted ? { sc_ghosted: true } : {},
+        extra: {},
     };
+    if (sendDate !== undefined) {
+        message.send_date = sendDate;
+    }
+    return message;
 }
 
-/** Build repeated chat messages. */
 export function makeMessages(count, options = {}) {
-    return Array.from({ length: count }, (_value, index) =>
-        makeMessage(typeof options === 'function' ? options(index) : options),
-    );
+    return Array.from({ length: count }, (_value, index) => {
+        const messageOptions = typeof options === 'function' ? options(index) : options;
+        return makeMessage({ scId: `message-${index}`, ...messageOptions });
+    });
 }
 
 /** Build repeated long assistant messages for budget-window tests. */
@@ -49,7 +59,7 @@ export function makeSizedChat(turnCount, { userLength = 100, assistantLength = 1
 
 /**
  * Predict a message's token count under the default String-length test tokenizer.
- *  Mirrors the "Player: "/"Assistant: " line format used by the planner modules —
+ *  Mirrors the "Player: "/"Assistant: " line format used by the planner modules;
  *  this is the single coupling point if speaker names ever change.
  */
 export function messageLineTokens(isUser, mesLength) {
@@ -61,14 +71,7 @@ export function makeSummarySettings(overrides = {}) {
     return {
         enabled: true,
         uiMode: 'advanced',
-        easySummarizerContextTokens: 16000,
-        easyMemoryTokenBudget: 10000,
-        easyMemoryMode: 'standard',
-        easyConnectionSource: 'default',
-        easyConnectionProfileId: '',
-        easyMergeConnectionSource: 'inherit',
-        easyMergeConnectionProfileId: '',
-        memoryMode: 'standard',
+        memoryMode: 'balanced',
         customMemoryPosition: 'in_prompt',
         customMemoryRole: 'system',
         customMemoryDepth: 0,
@@ -77,6 +80,7 @@ export function makeSummarySettings(overrides = {}) {
         maxSummaryTurns: 5,
         minSummaryBudget: 6000,
         verbatimTokenBudget: 16000,
+        queuedTokenBudget: 6000,
         memoryTokenBudget: 10000,
         snippetsPerLayer: 24,
         snippetsPerPromotion: 3,
@@ -84,12 +88,45 @@ export function makeSummarySettings(overrides = {}) {
     };
 }
 
+/** Settings preset for provider prefix-cache / stale-advice tests. */
+export function cacheSettings(overrides = {}) {
+    return makeSummarySettings({
+        memoryMode: MEMORY_MODES.PREFIX_CACHE,
+        cacheTtlMinutes: 30,
+        minSummaryTurns: 3,
+        ...overrides,
+    });
+}
+
+/** Settings preset with tight budgets for chat-window planner tests. */
+export function windowSettings(overrides = {}) {
+    return makeSummarySettings({
+        verbatimTokenBudget: 200,
+        queuedTokenBudget: 200,
+        minSummaryBudget: 200,
+        maxL0SourceTokens: 400,
+        minSummaryTurns: 1,
+        ...overrides,
+    });
+}
+
+/** Settings preset that is immediately ready to summarize, per memory mode. */
+export function readySettings(memoryMode) {
+    return makeSummarySettings({
+        memoryMode,
+        verbatimTokenBudget: 100,
+        queuedTokenBudget: 500,
+        minSummaryBudget: 3000,
+        maxL0SourceTokens: 4000,
+        minSummaryTurns: 1,
+    });
+}
+
 /** Build a normalized Summaryception metadata store. */
 export function makeSummaryStore(overrides = {}) {
     return {
         layers: [],
-        summarizedUpTo: -1,
-        ghostedIndices: [],
+        ghostedMessageIds: [],
         mutationEpoch: 0,
         ...overrides,
     };

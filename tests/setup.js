@@ -1,5 +1,7 @@
 import { beforeEach, vi } from 'vitest';
 
+import { installSummaryContext } from './test-helpers.js';
+
 const foundationMocks = vi.hoisted(() => {
     const MODULE_NAME = 'summaryception';
     const LOG_PREFIX = '[Summaryception]';
@@ -32,13 +34,13 @@ const foundationMocks = vi.hoisted(() => {
         saveSettingsDebounced: vi.fn(),
         saveMetadata: vi.fn(),
         saveChat: vi.fn(),
+        reloadCurrentChat: vi.fn(),
         executeSlashCommandsWithOptions: vi.fn(),
         setExtensionPrompt: vi.fn(),
         registerMacro: vi.fn(),
-        unregisterMacro: vi.fn(),
         generateRaw: vi.fn(),
         callTokenCountAsync: vi.fn(),
-        estimateMainPromptTokens: vi.fn(),
+        isDryRunEvent: vi.fn(),
         getRequestHeaders: vi.fn(),
         getPromptManager: vi.fn(),
         getConnectionManagerRequestService: vi.fn(),
@@ -86,6 +88,12 @@ const foundationMocks = vi.hoisted(() => {
                 // Runtime context unavailable in some tests.
             }
         });
+        context.reloadCurrentChat.mockImplementation(async () => {
+            const fn = getContext().reloadCurrentChat;
+            if (typeof fn === 'function') {
+                await fn();
+            }
+        });
         context.executeSlashCommandsWithOptions.mockImplementation(
             async (command, options = {}) => {
                 await getContext().executeSlashCommandsWithOptions(command, options);
@@ -95,22 +103,8 @@ const foundationMocks = vi.hoisted(() => {
             const { position = 0, depth = 0, scan = false, role = 0 } = options;
             getContext().setExtensionPrompt(name, text, position, depth, scan, role);
         });
-        context.registerMacro.mockImplementation(async (name, handler, description = '') => {
-            const fn = getContext().registerMacro;
-            if (typeof fn !== 'function') {
-                return false;
-            }
-            fn(name, () => handler(), description);
-            return true;
-        });
-        context.unregisterMacro.mockImplementation(async (name) => {
-            const fn = getContext().unregisterMacro;
-            if (typeof fn !== 'function') {
-                return false;
-            }
-            fn(name);
-            return true;
-        });
+        context.registerMacro.mockResolvedValue(true);
+
         context.generateRaw.mockImplementation(async (options) => {
             const ctx = getContext();
             if (typeof ctx.generateRaw !== 'function') {
@@ -125,7 +119,9 @@ const foundationMocks = vi.hoisted(() => {
             }
             return await ctx.getTokenCountAsync(text);
         });
-        context.estimateMainPromptTokens.mockImplementation(async () => null);
+        context.isDryRunEvent.mockImplementation(
+            (eventData, dryRunArg) => dryRunArg === true || eventData?.dryRun === true,
+        );
         context.getRequestHeaders.mockImplementation(() => {
             try {
                 const fn = getContext().getRequestHeaders;
@@ -209,7 +205,7 @@ const foundationMocks = vi.hoisted(() => {
         });
         logger.debugVisibleTurns.mockImplementation((chat, store) => {
             logger.trace('=== DEBUG VISIBLE TURNS ===');
-            logger.trace('  store.summarizedUpTo:', store.summarizedUpTo);
+            logger.trace('  store.ghostedMessageIds:', store.ghostedMessageIds);
             logger.trace('  Total chat messages:', chat.length);
             logger.trace('=== END DEBUG ===');
         });
@@ -232,4 +228,5 @@ globalThis.summaryceptionFoundationMocks = foundationMocks;
 
 beforeEach(() => {
     foundationMocks.reset();
+    installSummaryContext();
 });

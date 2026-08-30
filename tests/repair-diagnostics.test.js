@@ -143,6 +143,16 @@ describe('formatRepairDiagnostics', () => {
         expect(output).toContain('</custom_tag>');
     });
 
+    it('appends instructions inside the wrapper before closing it', () => {
+        const diagnostics = buildRepairDiagnostics({ sections: [] });
+        const output = formatRepairDiagnostics(diagnostics, {
+            instructions: ['Rewrite only rejected sections.'],
+        });
+        expect(output).toContain(
+            'Rewrite only rejected sections.\n</summaryception_repair_feedback>',
+        );
+    });
+
     it('emits rejected blocks and repair instructions for failing sections, skipping empty text', () => {
         const diagnostics = buildRepairDiagnostics({
             sections: [

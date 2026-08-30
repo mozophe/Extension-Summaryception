@@ -8,7 +8,7 @@ import { saveChatStore } from '../foundation/state.js';
  * @param {() => void} p.mutate
  * @param {() => Promise<void>} p.persist
  * @param {string} p.rollbackMessage
- * @param {() => void} [p.onRollback]
+ * @param {() => void | Promise<void>} [p.onRollback]
  * @returns {Promise<void>}
  */
 export async function executeLayer0StoreTransaction({
@@ -25,7 +25,7 @@ export async function executeLayer0StoreTransaction({
         await persist();
     } catch (err) {
         restoreLayer0RollbackPoint(store, rollbackPoint);
-        onRollback?.();
+        await onRollback?.();
         error(rollbackMessage, err);
         await saveChatStore();
         throw err;
@@ -35,13 +35,11 @@ export async function executeLayer0StoreTransaction({
 function captureLayer0RollbackPoint(store) {
     return {
         layer0: [...(store.layers[0] || [])],
-        summarizedUpTo: store.summarizedUpTo,
         mutationEpoch: store.mutationEpoch,
     };
 }
 
 function restoreLayer0RollbackPoint(store, rollbackPoint) {
     store.layers[0] = rollbackPoint.layer0;
-    store.summarizedUpTo = rollbackPoint.summarizedUpTo;
     store.mutationEpoch = rollbackPoint.mutationEpoch;
 }

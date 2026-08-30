@@ -1,7 +1,7 @@
 import {
     BATCH_TRIGGER_LIMITS,
+    CACHE_TTL,
     EASY_CONTEXT_LIMITS,
-    EASY_MEMORY_LIMITS,
     L0_SOURCE_LIMITS,
     MASK_USER_ROLE_MODES,
     MEMORY_MODES,
@@ -19,6 +19,8 @@ import {
     saveMetadata,
     saveSettingsDebounced,
 } from './context.js';
+import { resolveScIdsToIndices } from './message-identity.js';
+import { clampInteger, clampToStep } from './numeric.js';
 
 const PROMPT_PRESET_VALUES = Object.freeze(['narrative', 'custom']);
 const PROMPT_SETTING_BINDINGS = Object.freeze([
@@ -93,13 +95,7 @@ export function getSettings() {
  */
 export function getEffectiveSettings() {
     const settings = getSettings();
-    if (settings.uiMode === UI_MODES.ADVANCED) {
-        return settings;
-    }
-    if (settings.uiMode === UI_MODES.OFF) {
-        return { ...settings, enabled: false };
-    }
-    return buildEasyEffectiveSettings(settings);
+    return settings.uiMode === UI_MODES.OFF ? { ...settings, enabled: false } : settings;
 }
 
 /**
@@ -110,8 +106,8 @@ export function saveSettings() {
 }
 
 /**
- * Get the chat-specific store for summary data.
- * @returns {SummaryceptionStore} The chat store with layers, summarizedUpTo, ghostedIndices
+ * Get the chat-specific summary store.
+ * @returns {SummaryceptionStore}
  */
 export function getChatStore() {
     const chatMetadata = getChatMetadata();
@@ -149,25 +145,17 @@ export function bumpSummaryStoreMutationEpoch(store) {
 }
 
 /**
- * Calculate the last summarized index covered by contiguous Layer 0 ranges.
+ * Resolve the highest current chat index owned by a Layer 0 snippet.
+ * @param {ChatMessage[]} chat
  * @param {SummaryceptionStore} store
  * @returns {number}
  */
-export function calculateContiguousSummarizedUpTo(store) {
-    const ranges = (store.layers[0] || [])
-        .map((snippet) => snippet.turnRange)
-        .filter(isValidTurnRange)
-        .sort((a, b) => a[0] - b[0]);
-    let cursor = -1;
-
-    for (const [start, end] of ranges) {
-        if (start > cursor + 1) {
-            break;
-        }
-        cursor = Math.max(cursor, end);
-    }
-
-    return cursor;
+export function getCurrentSummarizedBoundary(chat, store) {
+    const sourceMessageIds = (store?.layers?.[0] || []).flatMap(
+        (snippet) => snippet.sourceMessageIds || [],
+    );
+    const indices = resolveScIdsToIndices(chat, sourceMessageIds);
+    return indices.length > 0 ? indices[indices.length - 1] : -1;
 }
 
 /**
@@ -177,10 +165,9 @@ export function calculateContiguousSummarizedUpTo(store) {
  */
 function normalizeChatStore(store) {
     store.layers = normalizeLayers(store.layers);
-    store.summarizedUpTo = normalizeSummarizedUpTo(store.summarizedUpTo);
-    store.ghostedIndices = normalizeGhostedIndices(store.ghostedIndices);
+    store.ghostedMessageIds = normalizeStringArray(store.ghostedMessageIds);
     store.mutationEpoch = normalizeMutationEpoch(store.mutationEpoch);
-    return store;
+    return /** @type {SummaryceptionStore} */ (store);
 }
 
 /**
@@ -190,20 +177,21 @@ function normalizeChatStore(store) {
  */
 function normalizeMemorySettings(settings) {
     let changed = false;
-    if (!isSettingValue([MEMORY_MODES.STANDARD, MEMORY_MODES.CACHE], settings.memoryMode)) {
+    if (settings.memoryMode === 'append_only') {
+        settings.memoryMode = MEMORY_MODES.PREFIX_CACHE;
+        changed = true;
+    }
+    const validModes = [MEMORY_MODES.BALANCED, MEMORY_MODES.PREFIX_CACHE];
+    if (!isSettingValue(validModes, settings.memoryMode)) {
         settings.memoryMode = defaultSettings.memoryMode;
         changed = true;
     }
-    if (!isSettingValue([MEMORY_MODES.STANDARD, MEMORY_MODES.CACHE], settings.easyMemoryMode)) {
-        settings.easyMemoryMode = defaultSettings.easyMemoryMode;
+    if (!isSettingValue(['default', 'profile'], settings.connectionSource)) {
+        settings.connectionSource = defaultSettings.connectionSource;
         changed = true;
     }
-    if (!isSettingValue(['default', 'profile'], settings.easyConnectionSource)) {
-        settings.easyConnectionSource = defaultSettings.easyConnectionSource;
-        changed = true;
-    }
-    if (!isSettingValue(['inherit', 'profile'], settings.easyMergeConnectionSource)) {
-        settings.easyMergeConnectionSource = defaultSettings.easyMergeConnectionSource;
+    if (!isSettingValue(['inherit', 'profile'], settings.mergeConnectionSource)) {
+        settings.mergeConnectionSource = defaultSettings.mergeConnectionSource;
         changed = true;
     }
     if (!isSettingValue(Object.values(MEMORY_POSITIONS), settings.customMemoryPosition)) {
@@ -229,7 +217,9 @@ function normalizeMemorySettings(settings) {
  * @returns {boolean} Whether settings were changed.
  */
 function normalizeRoleMaskSettings(settings, hadMode) {
-    if (hadMode && isSettingValue(Object.values(MASK_USER_ROLE_MODES), settings.maskUserRoleMode)) {
+    const validMode =
+        hadMode && isSettingValue(Object.values(MASK_USER_ROLE_MODES), settings.maskUserRoleMode);
+    if (validMode) {
         return false;
     }
     settings.maskUserRoleMode = defaultSettings.maskUserRoleMode;
@@ -252,23 +242,11 @@ function isSettingValue(values, value) {
  * @returns {void}
  */
 function normalizeVerbatimWindowSettings(settings) {
-    settings.easySummarizerContextTokens = clampToStep(
-        settings.easySummarizerContextTokens,
-        EASY_CONTEXT_LIMITS.MIN,
-        EASY_CONTEXT_LIMITS.MAX,
-        EASY_CONTEXT_LIMITS.STEP,
-    );
     settings.advancedModelContext = clampToStep(
         settings.advancedModelContext,
         EASY_CONTEXT_LIMITS.MIN,
         EASY_CONTEXT_LIMITS.MAX,
         EASY_CONTEXT_LIMITS.STEP,
-    );
-    settings.easyMemoryTokenBudget = clampToStep(
-        settings.easyMemoryTokenBudget,
-        EASY_MEMORY_LIMITS.MIN,
-        EASY_MEMORY_LIMITS.MAX,
-        EASY_MEMORY_LIMITS.STEP,
     );
     settings.minSummaryTurns = clampInteger(settings.minSummaryTurns, 2, 10);
     settings.maxSummaryTurns = clampInteger(settings.maxSummaryTurns, 3, 20);
@@ -293,9 +271,16 @@ function normalizeVerbatimWindowSettings(settings) {
         BATCH_TRIGGER_LIMITS.STEP,
     );
     settings.verbatimTokenBudget = clampToStep(settings.verbatimTokenBudget, 4000, 64000, 1000);
+    settings.queuedTokenBudget = clampToStep(settings.queuedTokenBudget, 4000, 64000, 1000);
     settings.memoryTokenBudget = clampToStep(settings.memoryTokenBudget, 4000, 32000, 1000);
     settings.snippetsPerLayer = clampInteger(settings.snippetsPerLayer, 20, 40);
     settings.snippetsPerPromotion = clampInteger(settings.snippetsPerPromotion, 3, 4);
+    settings.cacheTtlMinutes = clampToStep(
+        settings.cacheTtlMinutes,
+        CACHE_TTL.MIN_MINUTES,
+        CACHE_TTL.MAX_MINUTES,
+        CACHE_TTL.STEP_MINUTES,
+    );
 }
 
 /**
@@ -349,52 +334,6 @@ function normalizeModeSettings(settings, hadMode) {
     return changed;
 }
 
-function buildEasyEffectiveSettings(settings) {
-    const effective = /** @type {ExtensionSettings} */ ({
-        ...structuredClone(defaultSettings),
-        uiMode: UI_MODES.EASY,
-        enabled: true,
-        easySummarizerContextTokens: settings.easySummarizerContextTokens,
-        easyMemoryTokenBudget: settings.easyMemoryTokenBudget,
-        easyMemoryMode: settings.easyMemoryMode,
-        easyConnectionSource: settings.easyConnectionSource,
-        easyConnectionProfileId: settings.easyConnectionProfileId,
-        easyMergeConnectionSource: settings.easyMergeConnectionSource,
-        easyMergeConnectionProfileId: settings.easyMergeConnectionProfileId,
-        // Modular STATE category toggles must take effect in Easy mode too:
-        // the spread above seeds them from defaultSettings, but an explicit key
-        // set to `undefined` would clobber that, so each falls back to its own
-        // default when the persisted settings omit it.
-        stateCatDateTime: settings.stateCatDateTime ?? defaultSettings.stateCatDateTime,
-        stateCatBonds: settings.stateCatBonds ?? defaultSettings.stateCatBonds,
-        stateCatChekhov: settings.stateCatChekhov ?? defaultSettings.stateCatChekhov,
-        stateCatGmNotes: settings.stateCatGmNotes ?? defaultSettings.stateCatGmNotes,
-        stateCatInventory: settings.stateCatInventory ?? defaultSettings.stateCatInventory,
-        stateCatLocation: settings.stateCatLocation ?? defaultSettings.stateCatLocation,
-    });
-
-    const sourceCap = deriveEasySourceCap(settings.easySummarizerContextTokens);
-    effective.maxL0SourceTokens = sourceCap;
-    effective.minSummaryBudget = sourceCap;
-    effective.memoryMode = settings.easyMemoryMode;
-    effective.verbatimTokenBudget =
-        settings.easyMemoryMode === MEMORY_MODES.CACHE
-            ? 32000
-            : defaultSettings.verbatimTokenBudget;
-    effective.memoryTokenBudget = settings.easyMemoryTokenBudget;
-    effective.connectionSource = settings.easyConnectionSource;
-    effective.connectionProfileId =
-        settings.easyConnectionSource === 'profile' ? settings.easyConnectionProfileId : '';
-    effective.mergeConnectionSource = settings.easyMergeConnectionSource;
-    effective.mergeConnectionProfileId =
-        settings.easyMergeConnectionSource === 'profile'
-            ? settings.easyMergeConnectionProfileId
-            : '';
-
-    copyFallbackRouteSettings(effective, settings);
-    return effective;
-}
-
 function deriveEasySourceCap(contextTokens) {
     const context = clampToStep(
         contextTokens,
@@ -424,15 +363,6 @@ export function deriveAdvancedEngineTuning(settings) {
         700,
         10,
     );
-}
-
-function copyFallbackRouteSettings(effective, settings) {
-    if (settings.fallbackConnectionSource === 'disabled') {
-        return;
-    }
-    effective.fallbackConnectionSource = settings.fallbackConnectionSource;
-    effective.fallbackSummarizerResponseLength = settings.fallbackSummarizerResponseLength;
-    effective.fallbackConnectionProfileId = settings.fallbackConnectionProfileId;
 }
 
 function normalizePromptSettings(settings) {
@@ -469,19 +399,6 @@ function normalizePromptSettings(settings) {
     return changed;
 }
 
-function clampInteger(value, min, max) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) {
-        return min;
-    }
-    return Math.min(max, Math.max(min, Math.round(number)));
-}
-
-function clampToStep(value, min, max, step) {
-    const clamped = clampInteger(value, min, max);
-    return Math.min(max, Math.max(min, Math.round(clamped / step) * step));
-}
-
 /**
  * Normalize layer arrays and drop malformed snippets.
  * @param {unknown} layers
@@ -495,15 +412,14 @@ function normalizeLayers(layers) {
         if (!Array.isArray(layer)) {
             return [];
         }
-        return layer.filter(isValidSnippet);
+        return layer.filter(isValidSnippet).map(normalizeSnippet);
     });
 }
 
 function createDefaultChatStore() {
     return {
         layers: [],
-        summarizedUpTo: -1,
-        ghostedIndices: [],
+        ghostedMessageIds: [],
         mutationEpoch: 0,
     };
 }
@@ -514,10 +430,16 @@ function createDefaultChatStore() {
  * @returns {snippet is SummaryceptionSnippet}
  */
 function isValidSnippet(snippet) {
-    if (!isPlainObject(snippet)) {
-        return false;
-    }
-    return typeof snippet.text === 'string';
+    return (
+        isPlainObject(snippet) &&
+        typeof snippet.text === 'string' &&
+        normalizeStringArray(snippet.sourceMessageIds).length > 0
+    );
+}
+
+function normalizeSnippet(snippet) {
+    snippet.sourceMessageIds = normalizeStringArray(snippet.sourceMessageIds);
+    return snippet;
 }
 
 /**
@@ -525,7 +447,7 @@ function isValidSnippet(snippet) {
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
  */
-function isPlainObject(value) {
+export function isPlainObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         return false;
     }
@@ -534,15 +456,24 @@ function isPlainObject(value) {
 }
 
 /**
- * Normalize the summarized cursor.
- * @param {unknown} value
- * @returns {number}
+ * Normalize a stable message ID array.
+ * @param {unknown} values
+ * @returns {string[]}
  */
-function normalizeSummarizedUpTo(value) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
-        return -1;
+function normalizeStringArray(values) {
+    if (!Array.isArray(values)) {
+        return [];
     }
-    return Math.max(-1, value);
+    const result = [];
+    const seen = new Set();
+    for (const value of values) {
+        if (typeof value !== 'string' || value.trim() === '' || seen.has(value)) {
+            continue;
+        }
+        seen.add(value);
+        result.push(value);
+    }
+    return result;
 }
 
 /**
@@ -555,57 +486,6 @@ function normalizeMutationEpoch(value) {
         return 0;
     }
     return Math.max(0, value);
-}
-
-/**
- * Normalize ghosted message indices.
- * @param {unknown} indices
- * @returns {number[]}
- */
-function normalizeGhostedIndices(indices) {
-    if (!Array.isArray(indices)) {
-        return [];
-    }
-    const result = [];
-    const seen = new Set();
-    for (const value of indices) {
-        const index = normalizeIndex(value);
-        if (index === null || seen.has(index)) {
-            continue;
-        }
-        seen.add(index);
-        result.push(index);
-    }
-    return result;
-}
-
-/**
- * Normalize one stored index.
- * @param {unknown} value
- * @returns {number | null}
- */
-function normalizeIndex(value) {
-    const index = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
-    if (typeof index !== 'number' || !Number.isFinite(index) || !Number.isInteger(index)) {
-        return null;
-    }
-    return index >= 0 ? index : null;
-}
-
-/**
- * Check whether a stored turn range can contribute to cursor coverage.
- * @param {unknown} range
- * @returns {range is [number, number]}
- */
-function isValidTurnRange(range) {
-    return (
-        Array.isArray(range) &&
-        range.length >= 2 &&
-        Number.isInteger(range[0]) &&
-        Number.isInteger(range[1]) &&
-        range[0] >= 0 &&
-        range[1] >= range[0]
-    );
 }
 
 /**

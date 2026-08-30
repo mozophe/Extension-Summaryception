@@ -49,7 +49,7 @@ describe('isRetryableError', () => {
     });
 
     it('classifies an HTTP status from RETRY_CONFIG.retryableStatuses as retryable on every lookup path', () => {
-        // Derive the status from the module's own list — never hardcode the literal.
+        // Derive the status from the module's own list; never hardcode the literal.
         const status = RETRY_CONFIG.retryableStatuses[0];
         expect(Number.isFinite(status)).toBe(true);
         expect(isRetryableError({ status })).toBe(true);
@@ -70,7 +70,7 @@ describe('sleep', () => {
         const marker = Promise.resolve('marker');
         const result = await Promise.race([sleep(0).then(() => 'slept'), marker]);
         // sleep(0) resolves on the microtask queue; we expect it to win or at
-        // least match — assert that sleep() itself returns a thenable.
+        // least match; assert that sleep() itself returns a thenable.
         expect(typeof sleep(0).then).toBe('function');
         expect(['slept', 'marker']).toContain(result);
     });

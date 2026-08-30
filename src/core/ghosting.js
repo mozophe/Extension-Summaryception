@@ -1,4 +1,10 @@
+import { TOAST_TITLE } from '../foundation/constants.js';
 import { executeSlashCommandsWithOptions, getChat } from '../foundation/context.js';
+import {
+    ensureMessageScId,
+    rangesFromSortedIndices,
+    resolveScIdsToIndices,
+} from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
 import { debug, error, info, warn } from '../foundation/logger.js';
 import { persistChatState } from './persist-state.js';
@@ -22,25 +28,6 @@ import { canStartPromptMutation, queuePromptEffect, runPromptEffect } from './su
  */
 export async function repairGhostingForRange(startIdx, endIdx, options = {}) {
     await ghostMessagesInRange(startIdx, endIdx, { kind: 'ghost-repair', ...options });
-}
-
-/**
- * Ghost a single message by index.
- * @param {number} messageIndex - The chat index to ghost
- * @returns {Promise<void>}
- */
-export async function ghostMessage(messageIndex) {
-    await ghostMessagesInRange(messageIndex, messageIndex, { kind: 'ghost-message' });
-}
-
-/**
- * Ghost all eligible messages from index 0 up to and including endIndex.
- * @param {number} endIndex - The highest index to ghost
- * @param {GhostRangeOptions} [options]
- * @returns {Promise<void>}
- */
-export async function ghostMessagesUpTo(endIndex, options = {}) {
-    await ghostMessagesInRange(0, endIndex, { kind: 'ghost-up-to', ...options });
 }
 
 /**
@@ -73,7 +60,7 @@ export async function unghostAllMessages() {
         return;
     }
 
-    const progressToast = createUnhideProgressToast(total);
+    const progressToast = createProgressToast('Unhiding messages', 'Clearing', total);
     await unhideRanges({ chat, store, ranges, progressToast, total });
     toastr.clear(progressToast);
     info(`Unghosted ${total} messages (only Summaryception-hidden ones)`);
@@ -115,9 +102,12 @@ async function ghostMessagesInRangeEffect(startIdx, endIdx, epoch, options) {
     }
 
     const store = getChatStore();
-    const ranges = collectHideRanges(chat, range);
+    const ranges = collectHideRanges(chat, store, range);
     const total = countRangeMessages(ranges);
-    const progressToast = createHideProgressToast(options, total);
+    const progressToast =
+        options.showProgress && total > 0
+            ? createProgressToast('Hiding messages', 'Ghosting', total)
+            : null;
     let processed = 0;
 
     for (const hideRange of ranges) {
@@ -163,13 +153,7 @@ async function applyHideRange({ chat, store, range, epoch, chatSave }) {
         return false;
     }
 
-    try {
-        await executeSlashCommandsWithOptions(`/hide ${formatSlashRange(range)}`, {
-            showOutput: false,
-        });
-    } catch (e) {
-        error(`Failed to hide messages ${formatSlashRange(range)}:`, e);
-    }
+    await executeSlashRangeCommand('hide', range, error);
 
     await persistChatState({ chatSave });
     return true;
@@ -208,13 +192,14 @@ function queueGhostRange(startIdx, endIdx, options) {
 /**
  * Build contiguous ranges of messages that still need ownership or visual hide work.
  * @param {ChatMessage[]} chat
+ * @param {SummaryceptionStore} store
  * @param {[number, number]} range
  * @returns {Array<[number, number]>}
  */
-function collectHideRanges(chat, range) {
+function collectHideRanges(chat, store, range) {
     const indices = [];
     for (let i = range[0]; i <= range[1]; i++) {
-        if (messageNeedsGhosting(chat[i])) {
+        if (messageNeedsGhosting(chat[i], store)) {
             indices.push(i);
         }
     }
@@ -224,23 +209,25 @@ function collectHideRanges(chat, range) {
 /**
  * Check whether a message needs Summaryception ownership or visual hiding.
  * @param {ChatMessage | undefined} msg
+ * @param {SummaryceptionStore} store
  * @returns {boolean}
  */
-function messageNeedsGhosting(msg) {
-    if (!msg || !isGhostableMessage(msg)) {
+function messageNeedsGhosting(msg, store) {
+    if (!msg || !isGhostableMessage(msg, store)) {
         return false;
     }
 
-    const owned = msg.extra?.sc_ghosted === true;
+    const owned = typeof msg.sc_id === 'string' && store.ghostedMessageIds.includes(msg.sc_id);
     return !owned || !isVisuallyHidden(msg);
 }
 
 /**
  * Check whether a message is eligible for Summaryception ghosting.
  * @param {ChatMessage | undefined} msg
+ * @param {SummaryceptionStore} store
  * @returns {boolean}
  */
-function isGhostableMessage(msg) {
+function isGhostableMessage(msg, store) {
     if (!msg) {
         return false;
     }
@@ -248,16 +235,18 @@ function isGhostableMessage(msg) {
     if (!hideNonText && !msg.mes?.trim()) {
         return false;
     }
-    return !isUserHidden(msg);
+    return !isUserHidden(msg, store);
 }
 
 /**
- * Check whether a message is hidden by the user or by non-Summaryception system state.
+ * Check whether a message is hidden outside Summaryception ownership.
  * @param {ChatMessage} msg
+ * @param {SummaryceptionStore} store
  * @returns {boolean}
  */
-function isUserHidden(msg) {
-    return isVisuallyHidden(msg) && msg.extra?.sc_ghosted !== true;
+function isUserHidden(msg, store) {
+    const owned = typeof msg.sc_id === 'string' && store.ghostedMessageIds.includes(msg.sc_id);
+    return isVisuallyHidden(msg) && !owned;
 }
 
 /**
@@ -277,28 +266,14 @@ function isVisuallyHidden(msg) {
  * @returns {void}
  */
 function markGhostedRange(chat, store, range) {
+    const owned = new Set(store.ghostedMessageIds);
     for (let i = range[0]; i <= range[1]; i++) {
-        const msg = chat[i];
-        if (!msg) {
-            continue;
+        const id = ensureMessageScId(chat[i]);
+        if (id) {
+            owned.add(id);
         }
-        msg.extra = msg.extra || {};
-        msg.extra.sc_ghosted = true;
-        addGhostedIndex(store, i);
     }
-    store.ghostedIndices.sort((a, b) => a - b);
-}
-
-/**
- * Track a ghosted index if it is not already present.
- * @param {SummaryceptionStore} store
- * @param {number} index
- * @returns {void}
- */
-function addGhostedIndex(store, index) {
-    if (!store.ghostedIndices.includes(index)) {
-        store.ghostedIndices.push(index);
-    }
+    store.ghostedMessageIds = [...owned];
 }
 
 /**
@@ -309,34 +284,20 @@ function addGhostedIndex(store, index) {
  * @returns {Array<[number, number]>}
  */
 function getOwnedGhostRanges(chat, store, limit) {
-    const indices = collectGhostedIndices(chat, store).filter((idx) => {
-        if (!limit) {
-            return true;
-        }
-        return idx >= limit[0] && idx <= limit[1];
-    });
-    return rangesFromSortedIndices(indices);
+    return rangesFromSortedIndices(collectGhostedMessageIndices(chat, store, limit));
 }
 
 /**
- * Collect indices that metadata or chat flags mark as Summaryception-owned.
+ * Resolve Summaryception-owned message IDs to current chat indices.
  * @param {ChatMessage[]} chat
  * @param {SummaryceptionStore} store
+ * @param {[number, number]} [limit]
  * @returns {number[]}
  */
-function collectGhostedIndices(chat, store) {
-    const result = new Set();
-    for (const idx of store.ghostedIndices || []) {
-        if (idx >= 0 && idx < chat.length) {
-            result.add(idx);
-        }
-    }
-    for (let i = 0; i < chat.length; i++) {
-        if (chat[i]?.extra?.sc_ghosted) {
-            result.add(i);
-        }
-    }
-    return [...result].sort((a, b) => a - b);
+export function collectGhostedMessageIndices(chat, store, limit) {
+    return resolveScIdsToIndices(chat, store.ghostedMessageIds).filter(
+        (index) => !limit || (index >= limit[0] && index <= limit[1]),
+    );
 }
 
 /**
@@ -352,13 +313,7 @@ function collectGhostedIndices(chat, store) {
 async function unhideRanges({ chat, store, ranges, progressToast = null, total = 0 }) {
     let processed = 0;
     for (const range of ranges) {
-        try {
-            await executeSlashCommandsWithOptions(`/unhide ${formatSlashRange(range)}`, {
-                showOutput: false,
-            });
-        } catch (e) {
-            warn(`Failed to unhide messages ${formatSlashRange(range)}:`, e);
-        }
+        await executeSlashRangeCommand('unhide', range, warn);
         clearGhostedRange(chat, store, range);
         processed += getRangeSize(range);
         updateUnhideProgress(progressToast, processed, total);
@@ -374,32 +329,13 @@ async function unhideRanges({ chat, store, ranges, progressToast = null, total =
  * @returns {void}
  */
 function clearGhostedRange(chat, store, range) {
+    const ids = new Set();
     for (let i = range[0]; i <= range[1]; i++) {
-        const msg = chat[i];
-        if (msg?.extra?.sc_ghosted) {
-            delete msg.extra.sc_ghosted;
+        if (typeof chat[i]?.sc_id === 'string') {
+            ids.add(chat[i].sc_id);
         }
     }
-    store.ghostedIndices = store.ghostedIndices.filter((idx) => idx < range[0] || idx > range[1]);
-}
-
-/**
- * Convert sorted indices into contiguous ranges.
- * @param {number[]} indices
- * @returns {Array<[number, number]>}
- */
-function rangesFromSortedIndices(indices) {
-    /** @type {Array<[number, number]>} */
-    const ranges = [];
-    for (const index of indices) {
-        const last = ranges[ranges.length - 1];
-        if (last && index === last[1] + 1) {
-            last[1] = index;
-        } else {
-            ranges.push([index, index]);
-        }
-    }
-    return ranges;
+    store.ghostedMessageIds = store.ghostedMessageIds.filter((id) => !ids.has(id));
 }
 
 /**
@@ -458,16 +394,14 @@ function getGhostEffectKind(startIdx, endIdx, options) {
 }
 
 /**
- * Create a progress toast for manual hide work.
- * @param {GhostRangeOptions} options
+ * Create a long-lived progress toast for ghosting work.
+ * @param {string} label
+ * @param {string} subtitle
  * @param {number} total
  * @returns {unknown}
  */
-function createHideProgressToast(options, total) {
-    if (!options.showProgress || total === 0) {
-        return null;
-    }
-    return toastr.info(`Hiding messages: 0 / ${total}`, 'Summaryception - Ghosting', {
+function createProgressToast(label, subtitle, total) {
+    return toastr.info(`${label}: 0 / ${total}`, `${TOAST_TITLE} - ${subtitle}`, {
         timeOut: 0,
         extendedTimeOut: 0,
         tapToDismiss: false,
@@ -475,16 +409,20 @@ function createHideProgressToast(options, total) {
 }
 
 /**
- * Create a progress toast for clearing Summaryception ghosting.
- * @param {number} total
- * @returns {unknown}
+ * Run a /hide or /unhide slash command for a range without output.
+ * @param {'hide' | 'unhide'} command
+ * @param {[number, number]} range
+ * @param {(message: string, err: unknown) => void} logFailure
+ * @returns {Promise<void>}
  */
-function createUnhideProgressToast(total) {
-    return toastr.info(`Unhiding messages: 0 / ${total}`, 'Summaryception - Clearing', {
-        timeOut: 0,
-        extendedTimeOut: 0,
-        tapToDismiss: false,
-    });
+async function executeSlashRangeCommand(command, range, logFailure) {
+    try {
+        await executeSlashCommandsWithOptions(`/${command} ${formatSlashRange(range)}`, {
+            showOutput: false,
+        });
+    } catch (e) {
+        logFailure(`Failed to ${command} messages ${formatSlashRange(range)}:`, e);
+    }
 }
 
 /**

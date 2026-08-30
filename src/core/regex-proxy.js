@@ -1,7 +1,4 @@
-/**
- * Lazy loader for SillyTavern's regex engine.
- * Uses dynamic import so the extension still loads if ST reorganizes the module.
- */
+/** Lazy loader for SillyTavern's regex engine. */
 import { warn } from '../foundation/logger.js';
 
 /**
@@ -9,115 +6,17 @@ import { warn } from '../foundation/logger.js';
  * @property {(rawString: string, placement: number, options?: object) => string} getRegexedString - ST's regex transformation function
  * @property {{ USER_INPUT: number, AI_OUTPUT: number }} regex_placement - ST's placement enum for message sources
  */
+const REGEX_ENGINE_URL = '/scripts/extensions/regex/engine.js';
 
 /** @type {RegexModule | null} */
 let _regexModule = null;
 let _loadAttempted = false;
 
-const REGEX_ENGINE_CACHE_KEY = 'summaryception_regex_engine_path';
-
-const REGEX_ENGINE_PATHS = [
-    '../../../../regex/engine.js',
-    '../../../regex/engine.js',
-    '/scripts/extensions/regex/engine.js',
-];
-
 async function loadRegexModule() {
-    const cachedPath = getCachedRegexEnginePath();
-    if (cachedPath) {
-        const cachedModule = await tryImportRegexModule(cachedPath);
-        if (cachedModule) {
-            return cachedModule;
-        }
-        clearCachedRegexEnginePath();
-    }
-
-    const failures = [];
-
-    for (const enginePath of REGEX_ENGINE_PATHS) {
-        const mod = await tryImportRegexModule(enginePath, failures);
-        if (mod) {
-            cacheRegexEnginePath(enginePath);
-            return mod;
-        }
-    }
-
-    warn('Regex engine unavailable, using raw text.', failures.join(' | '));
-    return null;
-}
-
-/**
- * Import one candidate regex engine module.
- * @param {string} enginePath
- * @param {string[] | null} [failures]
- * @returns {Promise<RegexModule | null>}
- */
-async function tryImportRegexModule(enginePath, failures = null) {
     try {
-        return /** @type {RegexModule} */ (await import(/* @vite-ignore */ enginePath));
-    } catch (e) {
-        failures?.push(`${enginePath}: ${e?.message || e}`);
-        return null;
-    }
-}
-
-function getCachedRegexEnginePath() {
-    const storage = getLocalStorage();
-    if (!storage) {
-        return null;
-    }
-
-    let cachedPath = null;
-    try {
-        cachedPath = storage.getItem(REGEX_ENGINE_CACHE_KEY);
-    } catch (_e) {
-        return null;
-    }
-
-    if (!cachedPath) {
-        return null;
-    }
-    if (!REGEX_ENGINE_PATHS.includes(cachedPath)) {
-        removeCachedRegexEnginePath(storage);
-        return null;
-    }
-    return cachedPath;
-}
-
-function cacheRegexEnginePath(enginePath) {
-    const storage = getLocalStorage();
-    if (!storage) {
-        return;
-    }
-
-    try {
-        storage.setItem(REGEX_ENGINE_CACHE_KEY, enginePath);
-    } catch (_e) {
-        // Ignore unavailable storage in hardened browser modes.
-    }
-}
-
-function clearCachedRegexEnginePath() {
-    const storage = getLocalStorage();
-    if (!storage) {
-        return;
-    }
-
-    removeCachedRegexEnginePath(storage);
-}
-
-function removeCachedRegexEnginePath(storage) {
-    try {
-        storage.removeItem(REGEX_ENGINE_CACHE_KEY);
-    } catch (_e) {
-        // Ignore unavailable storage in hardened browser modes.
-    }
-}
-
-function getLocalStorage() {
-    try {
-        return globalThis.localStorage || null;
-    } catch (_e) {
+        return /** @type {RegexModule} */ (await import(/* @vite-ignore */ REGEX_ENGINE_URL));
+    } catch (error) {
+        warn('Regex engine unavailable, using raw text.', error?.message || error);
         return null;
     }
 }

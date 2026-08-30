@@ -42,16 +42,17 @@ const ROUTE_IDENTITY_KEYS = Object.freeze({
 
 /**
  * Send a summarization request using the configured connection.
- * @param {SummarizerProviderRequest|ExtensionSettings} requestOrSettings - Request object, or legacy settings argument
- * @param {...unknown} legacyArgs - Legacy positional arguments: systemPrompt, userPrompt, signal, metadata
+ * @param {SummarizerProviderRequest} request
  * @returns {Promise<string>} The generated response text
  * @throws {ConnectionError|Error} If the request fails
  */
-export async function sendSummarizerRequest(requestOrSettings, ...legacyArgs) {
-    const { settings, systemPrompt, userPrompt, signal, metadata } = normalizeProviderRequest(
-        requestOrSettings,
-        legacyArgs,
-    );
+export async function sendSummarizerRequest({
+    settings,
+    systemPrompt,
+    userPrompt,
+    signal,
+    metadata,
+}) {
     const effectiveSettings = resolveSummarizerConnectionSettings(settings, metadata);
     const provider = getConnectionProvider(effectiveSettings.connectionSource);
     return await provider.generate({
@@ -60,27 +61,6 @@ export async function sendSummarizerRequest(requestOrSettings, ...legacyArgs) {
         userPrompt,
         signal,
     });
-}
-
-function normalizeProviderRequest(requestOrSettings, legacyArgs) {
-    if (isProviderRequest(requestOrSettings)) {
-        return requestOrSettings;
-    }
-
-    const [systemPrompt, userPrompt, signal, metadata] = legacyArgs;
-    return {
-        settings: /** @type {ExtensionSettings} */ (requestOrSettings),
-        systemPrompt: /** @type {string} */ (systemPrompt),
-        userPrompt: /** @type {string} */ (userPrompt),
-        signal: /** @type {AbortSignal|undefined} */ (signal),
-        metadata: /** @type {import('./summarizer-usage.js').SummarizerCallMetadata|undefined} */ (
-            metadata
-        ),
-    };
-}
-
-function isProviderRequest(value) {
-    return Boolean(value && typeof value === 'object' && Object.hasOwn(value, 'settings'));
 }
 
 /**

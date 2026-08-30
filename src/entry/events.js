@@ -1,8 +1,11 @@
-import { getChat } from '../foundation/context.js';
-import { debug, info, warn } from '../foundation/logger.js';
+import { getChat, isDryRunEvent } from '../foundation/context.js';
+import { debug, info, isDebugEnabled, warn } from '../foundation/logger.js';
+import { ensureChatScIds } from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
-import { repairIfBranched, repairMissingGhostingForSummaries } from '../core/ghosting-reconcile.js';
+import { repairMissingGhostingForSummaries } from '../core/ghosting-reconcile.js';
 import { maskUserRoleAsAssistantInGenerateData } from '../core/assistant-role-mask.js';
+import { evaluateStaleCacheAdvice, isProviderCacheMode } from '../core/cache-staleness.js';
+import { buildChatWindowPlan } from '../core/chat-window-planner.js';
 import {
     beginForegroundGeneration,
     endForegroundGeneration,
@@ -13,8 +16,110 @@ import {
     resetPromptMutationGuard,
 } from '../core/summarizer.js';
 import { updateInjection } from '../features/injection.js';
-import { repairOrphanedMessages } from '../features/maintenance.js';
+import { persistChatState } from '../core/persist-state.js';
+import { showStaleCacheAdvice } from './ui-dialogs.js';
 import { updateUI } from './ui.js';
+
+let previousPromptSectionHashes = [];
+
+/**
+ * Log one prefix-stability verdict for each final, non-dry-run chat prompt.
+ * @param {...unknown} args - CHAT_COMPLETION_PROMPT_READY event arguments.
+ * @returns {void}
+ */
+export function onChatCompletionPromptReady(...args) {
+    const [eventData, dryRun] = args;
+    if (isDryRunEvent(eventData, dryRun) || !eventData || typeof eventData !== 'object') {
+        return;
+    }
+    const chat = /** @type {{ chat?: unknown }} */ (eventData).chat;
+    if (!Array.isArray(chat)) {
+        return;
+    }
+
+    const nextHashes = chat.map((section) => hashPromptSection(section));
+    const stablePrefixLength = countStablePrefix(previousPromptSectionHashes, nextHashes);
+    const previousLength = previousPromptSectionHashes.length;
+    const prefixBroken = previousLength > 0 && stablePrefixLength < previousLength;
+
+    if (previousLength === 0) {
+        debug(`Prompt prefix baseline: ${nextHashes.length} blocks`);
+    } else if (prefixBroken) {
+        if (isDebugEnabled()) {
+            logBrokenPromptPrefix({
+                stablePrefixLength,
+                previousLength,
+                currentLength: nextHashes.length,
+                block: chat[stablePrefixLength],
+            });
+        }
+    } else {
+        const addedRoles = chat
+            .slice(previousLength)
+            .map((section) => String(section?.role || 'unknown'))
+            .join(', ');
+        const added = nextHashes.length - previousLength;
+        debug(
+            `Prompt prefix OK: ${stablePrefixLength} stable blocks, ${added} added${addedRoles ? ` (${addedRoles})` : ''}`,
+        );
+    }
+
+    previousPromptSectionHashes = nextHashes;
+}
+
+function logBrokenPromptPrefix({ stablePrefixLength, previousLength, currentLength, block }) {
+    const title = `Prompt prefix BROKEN at block ${stablePrefixLength}: previous ${previousLength}, current ${currentLength}`;
+    console.groupCollapsed(`[Summaryception] [DEBUG] ${title}`);
+    try {
+        console.log(
+            JSON.stringify(
+                {
+                    type: 'summaryception.prompt.prefix-broken.v1',
+                    block: stablePrefixLength,
+                    previousLength,
+                    currentLength,
+                    newBlock: block ?? null,
+                },
+                null,
+                2,
+            ),
+        );
+    } finally {
+        console.groupEnd();
+    }
+}
+
+function countStablePrefix(previousHashes, nextHashes) {
+    const limit = Math.min(previousHashes.length, nextHashes.length);
+    let index = 0;
+    while (index < limit && previousHashes[index] === nextHashes[index]) {
+        index++;
+    }
+    return index;
+}
+
+function hashPromptSection(section) {
+    const text = stableSerialize(section);
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index++) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function stableSerialize(value) {
+    if (value === null || typeof value !== 'object') {
+        return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+        return `[${value.map(stableSerialize).join(',')}]`;
+    }
+    return `{${Object.keys(value)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+        .join(',')}}`;
+}
 
 // ─── Event Handlers ──────────────────────────────────────────────────
 
@@ -85,8 +190,7 @@ export function bindPromptFreezeRecoveryEvents() {
  *
  */
 export function onGenerationStarted(...args) {
-    const dryRun = args[2] === true;
-    if (dryRun) {
+    if (isDryRunEvent(args[1], args[2])) {
         debug('Ignoring generation start from SillyTavern dry run.');
         return;
     }
@@ -127,11 +231,13 @@ export function onGenerationEnded() {
 
 /**
  * Rewrite final foreground prompt roles after ST assembles generation data.
- * @param {unknown} generateData - Mutable SillyTavern generation payload.
- * @param {unknown} _dryRun - Whether this is a prompt-inspection dry run.
+ * @param {unknown} dryRun - Whether this is a prompt-inspection dry run.
  * @returns {void}
  */
-export function onGenerateAfterData(generateData, _dryRun) {
+export function onGenerateAfterData(generateData, dryRun) {
+    if (isDryRunEvent(generateData, dryRun)) {
+        return;
+    }
     try {
         maskUserRoleAsAssistantInGenerateData(generateData, getEffectiveSettings());
     } catch (e) {
@@ -160,14 +266,13 @@ function recoverPromptFreeze(reason) {
     });
 }
 
-/**
- * Normalize metadata, repair branch drift, refresh injection, then restore missing ghost flags.
- * @returns {Promise<void>}
- */
+/** Normalize message IDs, refresh injection, then restore missing ghost flags. */
 async function reconcileLoadedChatState() {
+    const chat = getChat();
+    if (ensureChatScIds(chat)) {
+        await persistChatState();
+    }
     getChatStore();
-    await repairIfBranched();
-    await repairOrphanedMessages();
     updateInjection();
     await repairMissingGhostingForSummaries();
 }
@@ -214,4 +319,35 @@ async function drainReconciliationQueue() {
         await reconcileLoadedChatState();
         updateUI();
     } while (reconcileQueued);
+    await checkStaleCacheAdvice();
+}
+
+let staleCacheAdviceKey = '';
+
+/**
+ * Suggest an early Force Summarize when the loaded chat's provider cache is
+ * stale. Shown once per queue state per page session.
+ * @returns {Promise<void>}
+ */
+async function checkStaleCacheAdvice() {
+    try {
+        const settings = getEffectiveSettings();
+        if (!settings.enabled || !isProviderCacheMode(settings) || hasActiveAbortController()) {
+            return;
+        }
+        const chat = getChat();
+        const plan = await buildChatWindowPlan(chat, getChatStore(), settings);
+        const advice = evaluateStaleCacheAdvice({ chat, plan, settings });
+        if (!advice.advise) {
+            return;
+        }
+        const adviceKey = `${chat.length}:${advice.queuedTurns}:${chat.at(-1)?.sc_id ?? ''}`;
+        if (adviceKey === staleCacheAdviceKey) {
+            return;
+        }
+        staleCacheAdviceKey = adviceKey;
+        showStaleCacheAdvice(advice);
+    } catch (e) {
+        warn('Stale-cache advice check failed:', e);
+    }
 }

@@ -1,4 +1,5 @@
 /** @typedef {'idle' | 'layer0' | 'promoting' | 'yielding' | 'paused'} SummarizerQueuePhase */
+import { sleep } from '../foundation/retry.js';
 /** @typedef {'processed' | 'idle' | 'blocked' | 'failed'} SummarizerQueueCycleResult */
 
 /**
@@ -192,7 +193,7 @@ export class SummarizerQueue {
  * @returns {Promise<void>}
  */
 async function defaultYieldCycle() {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sleep(0);
 }
 
 async function defaultAfterDrain() {}

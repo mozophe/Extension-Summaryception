@@ -8,8 +8,8 @@ import { getStreamingProcessor, isSendButtonInStopMode } from '../foundation/con
  * @typedef {object} SummarizationJobSnapshot
  * @property {string} chatId - Best-effort stable chat identity.
  * @property {ChatMessage[]} chatRef - Chat array reference captured before the request.
- * @property {number} summarizedUpTo - Store cursor captured before the request.
- * @property {[number, number]} sourceRange - Source chat index range.
+ * @property {[number, number]} sourceRange - Transient source chat index range.
+ * @property {string[]} sourceMessageIds - Stable IDs for the captured source messages.
  * @property {string} sourceFingerprint - Fingerprint of source messages.
  * @property {number} summaryStoreEpoch - Summary-layer mutation epoch.
  * @property {string} passageText - Request passage text.

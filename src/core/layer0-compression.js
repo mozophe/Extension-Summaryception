@@ -3,25 +3,27 @@ import {
     STATE_SNAPSHOT_MAX_TOKENS,
     STATE_SNAPSHOT_SOFT_TARGET_TOKENS,
 } from '../foundation/prompt-constants.js';
-import { buildRepairDiagnostics, formatRepairDiagnostics } from './repair-diagnostics.js';
+import {
+    buildRepairDiagnostics,
+    countSentences,
+    formatRepairDiagnostics,
+} from './repair-diagnostics.js';
 import {
     insertBeforeTrigger,
     EXECUTION_TRIGGER_L0,
     EXECUTION_TRIGGER_PROMO,
-} from './prompt-parts.js';
+} from '../foundation/prompt-parts.js';
 import {
+    buildSizeConstraintsBlock,
+    buildSizeTargetLine,
     computeSentenceCap,
     LAYER_HARD_MAX_RATIO,
     LAYER_MIN_RATIO,
     LAYER0_REPAIR_RATIO,
-} from './token-budget/structural-constraints.js';
-import { countSentences } from './token-budget/repair-feedback-adapter.js';
-import {
-    buildSizeConstraintsBlock,
-    buildSizeTargetLine,
-} from './token-budget/budget-hint-builder.js';
+} from './token-budget.js';
 
 const MIN_LAYER0_TARGET_TOKENS = 80;
+const MIN_LAYER0_OUTPUT_TOKENS = 50;
 const MAX_LAYER0_TARGET_TOKENS = 700;
 
 /**
@@ -58,7 +60,7 @@ export function getLayer0SummaryTokenBounds(settings = {}) {
     const target = getLayer0SummaryTokenTarget(settings);
     return {
         target,
-        min: Math.floor(target * LAYER_MIN_RATIO.l0),
+        min: MIN_LAYER0_OUTPUT_TOKENS,
         max: Math.round(target * LAYER_HARD_MAX_RATIO.l0),
     };
 }
@@ -112,12 +114,11 @@ export function buildLayer0SizeRepairFeedback({ diagnostics, reason, outputToken
     return formatRepairDiagnostics(resolvedDiagnostics, {
         wrapperTag: 'summaryception_l0_repair_feedback',
         rejectedSectionTagPrefix: 'rejected_',
-    }).replace(
-        '</summaryception_l0_repair_feedback>',
-        'Aim for each section soft target, not merely its hard maximum. Rewrite only the rejected section or sections. Reproduce every preserved section exactly.\n' +
-            'Output exactly one [NARRATIVE] section followed by exactly one [STATE] section.\n' +
-            '</summaryception_l0_repair_feedback>',
-    );
+        instructions: [
+            'Aim for each section soft target, not merely its hard maximum. Rewrite only the rejected section or sections. Reproduce every preserved section exactly.',
+            'Output exactly one [NARRATIVE] section followed by exactly one [STATE] section.',
+        ],
+    });
 }
 
 /**
@@ -265,8 +266,8 @@ const SENTENCE_CAP_WORDS = [
 function fillSentenceCapPlaceholders(prompt, sentenceCap) {
     const word = SENTENCE_CAP_WORDS[sentenceCap] || String(sentenceCap);
     return prompt
-        .replace('{{max_sentences_word}}', word)
-        .replace('{{max_sentences}}', String(sentenceCap));
+        .replaceAll('{{max_sentences_word}}', word)
+        .replaceAll('{{max_sentences}}', String(sentenceCap));
 }
 
 /**

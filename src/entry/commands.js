@@ -1,6 +1,6 @@
-import { getSlashCommand, getSlashCommandParser } from '../foundation/context.js';
+import { getChat, getSlashCommand, getSlashCommandParser } from '../foundation/context.js';
 import { warn } from '../foundation/logger.js';
-import { getChatStore } from '../foundation/state.js';
+import { getChatStore, getCurrentSummarizedBoundary } from '../foundation/state.js';
 import { assembleSummaryBlock } from '../features/injection.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
 
@@ -24,14 +24,15 @@ export function registerSlashCommands() {
                 name: 'sc-status',
                 callback: () => {
                     const store = getChatStore();
+                    const boundary = getCurrentSummarizedBoundary(getChat(), store);
                     const lines = ['**Summaryception Status**'];
-                    lines.push(`Summarized up to index: ${store.summarizedUpTo}`);
-                    if (store.layers) {
-                        for (let i = 0; i < store.layers.length; i++) {
-                            const l = store.layers[i];
-                            if (l && l.length > 0) {
-                                lines.push(`Layer ${i}: ${l.length} snippets`);
-                            }
+                    lines.push(
+                        boundary < 0 ? 'No summaries.' : `Current summarized boundary: ${boundary}`,
+                    );
+                    for (let i = 0; i < store.layers.length; i++) {
+                        const layer = store.layers[i];
+                        if (layer?.length > 0) {
+                            lines.push(`Layer ${i}: ${layer.length} snippets`);
                         }
                     }
                     return lines.join('\n');

@@ -2,6 +2,7 @@
  * Rewrite final chat-completion request roles without touching persisted chat state.
  */
 
+import { isPlainObject } from '../foundation/state.js';
 import { LOG_PREFIX, MASK_USER_ROLE_MODES } from '../foundation/constants.js';
 
 /**
@@ -150,16 +151,4 @@ function getPromptMessages(generateData) {
  */
 function getObjectArray(values) {
     return values.every(isPlainObject) ? values : null;
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        return false;
-    }
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype || proto === null;
 }

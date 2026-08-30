@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseSnippet } from '../src/core/summarizer-state.js';
+import { compileGlobalState, parseSnippet } from '../src/core/summarizer-state.js';
 
 describe('parseSnippet current_date_time weekday normalization', () => {
     it('corrects a hallucinated weekday against the ISO date', () => {
@@ -12,7 +12,7 @@ describe('parseSnippet current_date_time weekday normalization', () => {
     });
 
     it('preserves an already-correct weekday', () => {
-        // July 4 2024 is Thursday — the canonical prompt example, verified correct.
+        // July 4 2024 is Thursday, the canonical prompt example, verified correct.
         const parsed = parseSnippet(
             '[NARRATIVE]\nScene.\n\n[STATE]\ncurrent_date_time: 2024-07-04 16 Thu',
         );
@@ -26,19 +26,11 @@ describe('parseSnippet current_date_time weekday normalization', () => {
         expect(parsed.state.current_date_time).toBe('2024-07-07 06 Sun');
     });
 
-    it('repairs the exact Call #14 regression from the review', () => {
-        // Log: 2024-07-07 slipped to 'Wed' (Jul 7 2024 is Sun).
-        const parsed = parseSnippet(
-            '[NARRATIVE]\nScene.\n\n[STATE]\ncurrent_date_time: 2024-07-07 06 Wed',
-        );
-        expect(parsed.state.current_date_time).toBe('2024-07-07 06 Sun');
-    });
-
     it('drops stray minutes and re-derives the weekday', () => {
         const parsed = parseSnippet(
             '[NARRATIVE]\nScene.\n\n[STATE]\ncurrent_date_time: 2024-07-04 16:32 Wed',
         );
-        // Wrong weekday AND minutes present — hour retained, minutes dropped, weekday fixed.
+        // Wrong weekday AND minutes present; hour retained, minutes dropped, weekday fixed.
         expect(parsed.state.current_date_time).toBe('2024-07-04 16 Thu');
     });
 
@@ -57,11 +49,31 @@ describe('parseSnippet current_date_time weekday normalization', () => {
         expect(parsed.state.current_date_time).toBe('2024-02-30 06 Sat');
     });
 
+    it('reads only the latest Layer 0 state snapshot', () => {
+        const state = compileGlobalState([
+            [
+                { text: '[NARRATIVE]\nOld.\n[STATE]\nlocation: cellar\nbonds: wary' },
+                { text: '[NARRATIVE]\nNow.\n[STATE]\nlocation: rooftop' },
+            ],
+        ]);
+
+        expect(state).toEqual({ location: 'rooftop' });
+    });
+
     it('preserves other state keys alongside the corrected timestamp', () => {
         const parsed = parseSnippet(
             "[NARRATIVE]\nScene.\n\n[STATE]\ncurrent_date_time: 2024-12-03 06 Fri\nlocation: Vova's house",
         );
         expect(parsed.state.current_date_time).toBe('2024-12-03 06 Tue');
         expect(parsed.state.location).toBe("Vova's house");
+    });
+
+    it('keeps headerless key-value lines in narrative instead of guessing state', () => {
+        const parsed = parseSnippet('[NARRATIVE]\nScene.\nlocation: rooftop\nbonds: wary');
+
+        expect(parsed).toEqual({
+            narrative: 'Scene.\nlocation: rooftop\nbonds: wary',
+            state: {},
+        });
     });
 });

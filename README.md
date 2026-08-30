@@ -42,7 +42,7 @@ That sounds abstract until you hit a 2,000 message chat and the model still reme
 
 ## Install
 
-Requirements: SillyTavern 1.16.0 or newer.
+Requirements: the latest stable SillyTavern release.
 
 In SillyTavern:
 
@@ -59,12 +59,23 @@ Set Fast Summarizer to your normal API or a SillyTavern Connection Profile. This
 
 Smart Deep Memory is optional. Use it when you want Layer 1+ merges to use a stronger model than the raw-chat summarizer.
 
-Then pick a memory style:
+Then pick a memory mode. The provider's cache rules decide whether the fancy options save money or merely make the prompt fatter.
 
-- Standard keeps the main prompt smaller and summarizes overflow continuously.
-- Cache Friendly keeps a larger live window and a stable memory prefix for providers with prompt caching discounts.
+### Default
 
-The defaults are intentionally conservative: 22k recent verbatim tokens, 10k injected memory, 200 token Layer 0 targets, and promotion after old memories stack up.
+Use this unless you have a good reason not to. Default keeps recent chat near the 22k verbatim target and summarizes overflow as it arrives. The goal is simple: keep the model inside a useful context range without relying on provider caching.
+
+This mode works everywhere and keeps context size fairly steady. If cached input is not much cheaper than normal input, stop here. You are done.
+
+### Prefix Cache
+
+Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat grow to 32k so more of each request can stay cached.
+
+Suppose the next request keeps the same start but changes the tail. A normal prefix cache can still reuse that unchanged start. Your usual lorebooks work normally; no migration or special outlet is needed.
+
+Pick this mode when cached input is cheaper and your provider supports that kind of partial prefix reuse. The tradeoff is a larger prompt. A summary flush also gives the provider a new prefix to cache.
+
+The defaults are intentionally conservative: 22k recent verbatim tokens, 10k injected memory, 280-token Layer 0 targets, and promotion after old memories stack up.
 
 ## Controls you will actually use
 
@@ -96,8 +107,6 @@ Summaryception can use:
 
 - SillyTavern's active main API.
 - SillyTavern Connection Profiles.
-- Ollama.
-- OpenAI-compatible endpoints.
 
 There are three routes:
 
@@ -105,11 +114,11 @@ There are three routes:
 - Merge for deeper Layer 1+ promotion work.
 - Fallback for retryable failures after the primary route gives up.
 
-OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Streaming responses must finish with `data: [DONE]`; incomplete streams are treated as failed attempts.
+OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Streaming responses must finish with `data: [DONE]`; incomplete streams are treated as failed attempts. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
 
 ## Slash commands
 
-`/sc-status` shows the current summarized index and layer counts.
+`/sc-status` shows the current summarized boundary and layer counts.
 
 `/sc-preview` prints the memory block that would be injected.
 
@@ -117,13 +126,21 @@ OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Streaming r
 
 ## Safety notes
 
-Summaryception is designed to be non-destructive. Summaries live in chat metadata. Settings live in extension settings. Ghosted messages are marked with `extra.sc_ghosted`, so the extension can tell its own hidden messages apart from messages you hid yourself.
+Summaryception is designed to be non-destructive. Summaries live in chat metadata. Settings live in extension settings. Ghosting ownership is stored as stable message IDs in chat metadata, so the extension can tell its own hidden messages apart from messages you hid yourself.
 
 If something looks off, use Clear or `/sc-clear`. That removes Summaryception's memory and ownership flags for the current chat, then unghosts the messages it owns.
 
+## Presets
+
+For default and prefix cache any preset works. I like this one https://rentry.org/freaky-frankenstein-presets 
+
 ## Version history
 
-Switch branches in SillyTavern if you prefer an older major version.
+Older major versions are still available as branches. Open SillyTavern's extension list and use the branch button beside Summaryception.
+
+<img src="img/how_to_switch_branch.png" width="700" alt="Branch button beside Summaryception in SillyTavern's extension list" />
+
+- **v22:** Big code refactor
 
 - **v20:** Stop now pauses. Modular [STATE] experiment
 - **v19:** Changed prompts so less repair needed (second LLM pass).
@@ -143,6 +160,8 @@ Switch branches in SillyTavern if you prefer an older major version.
 
 ## Screenshots
 
+v15, need to redo it
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/f1fda4c0-282e-4bbf-8924-98755fb461e0" width="180" alt="1" />
   <img src="https://github.com/user-attachments/assets/988a1227-7c43-4512-8256-67e8a98a8689" width="180" alt="2" />
@@ -150,6 +169,22 @@ Switch branches in SillyTavern if you prefer an older major version.
   <img src="https://github.com/user-attachments/assets/cd7a255c-4d52-4082-9e62-af6c40798a0a" width="180" alt="4" />
   <img src="https://github.com/user-attachments/assets/88f5de03-4414-4b7d-8b1a-3bfa60b5d3f8" width="180" alt="5" />
 </p>
+
+<img src="img/kimi_connection_profile_1.png" width="900" alt="Kimi K3 setup #1" />
+
+<img src="img/kimi_connection_profile_2.png" width="900" alt="Kimi K3 setup #2" />
+
+## Troubleshooting
+
+### Ext refuses to update
+
+Remove and install it again
+
+### Ext stopped working
+
+v20 -> v21 -> v22 was rough. Some settings could be reset to default or some other bugs. One of examples is instead of indexes, we now assign each message unique ID.
+
+It would be best if you "clear" memories (ui->tools). best way to update extention is when you start new RP. If you want stable work stick with named "vXX" branches.
 
 ## License
 

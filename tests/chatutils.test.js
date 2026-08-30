@@ -5,9 +5,15 @@ import {
     getAssistantTurns,
     getPromptDepthsByChatIndex,
     getVisibleAssistantTurns,
+    isSummarizerConversationMessage,
     iterateChatRange,
 } from '../src/core/chatutils.js';
-import { makeMessage, makeMessages } from './test-helpers.js';
+import {
+    installSummaryContext,
+    makeMessage,
+    makeMessages,
+    makeSummaryStore,
+} from './test-helpers.js';
 
 describe('getAssistantTurns', () => {
     it('collects non-system assistant turns with their indices and preserved text', () => {
@@ -17,6 +23,7 @@ describe('getAssistantTurns', () => {
             makeMessage({ isSystem: true, mes: 'system note' }),
             makeMessage({ mes: 'I am assistant two.' }),
         ];
+        installSummaryContext({ chat });
         const turns = getAssistantTurns(chat);
         expect(turns).toHaveLength(2);
         expect(turns[0].index).toBe(1);
@@ -25,19 +32,17 @@ describe('getAssistantTurns', () => {
         expect(turns[1].mes).toBe('I am assistant two.');
     });
 
-    it('includes ghosted system messages but excludes plain system messages', () => {
-        const ghosted = getAssistantTurns([
-            makeMessage({ isSystem: true, ghosted: true, mes: 'gone' }),
-        ]);
-        expect(ghosted).toHaveLength(1);
-        expect(ghosted[0].mes).toBe('gone');
+    it('excludes hidden and system records from assistant turns', () => {
+        const hidden = makeMessage({ isHidden: true, mes: 'hidden' });
+        const system = makeMessage({ isSystem: true, mes: 'system' });
+        installSummaryContext({ chat: [hidden, system] });
 
-        const plain = getAssistantTurns([makeMessage({ isSystem: true, mes: 'system' })]);
-        expect(plain).toHaveLength(0);
+        expect(getAssistantTurns([hidden, system])).toEqual([]);
     });
 
     it('skips empty/whitespace messages and defaults a missing name', () => {
         // Whitespace-only assistant message is dropped.
+        installSummaryContext({ chat: [] });
         const whitespace = getAssistantTurns([makeMessage({ mes: '   ' })]);
         expect(whitespace).toHaveLength(0);
 
@@ -48,14 +53,34 @@ describe('getAssistantTurns', () => {
     });
 });
 
-describe('getVisibleAssistantTurns', () => {
-    it('returns non-user non-system non-ghosted assistant turns (ghosted ones are excluded here even though getAssistantTurns includes them)', () => {
-        const chat = [
-            makeMessage({ mes: 'plain assistant' }), // kept
-            makeMessage({ ghosted: true, mes: 'ghosted assistant' }), // excluded
-            makeMessage({ isSystem: true, mes: 'system' }), // excluded
-            makeMessage({ isUser: true, mes: 'user' }), // excluded
+describe('isSummarizerConversationMessage', () => {
+    it('includes only visible user and assistant conversation records', () => {
+        const records = [
+            makeMessage({ isUser: true, mes: 'user' }),
+            makeMessage({ mes: 'assistant' }),
+            { ...makeMessage({ mes: 'tool' }), extra: { type: 'tool' } },
+            makeMessage({ isSystem: true, mes: 'system' }),
+            makeMessage({ isHidden: true, mes: 'hidden' }),
+            makeMessage({ mes: '   ' }),
         ];
+
+        expect(records.filter(isSummarizerConversationMessage)).toEqual(records.slice(0, 2));
+    });
+});
+
+describe('getVisibleAssistantTurns', () => {
+    it('returns non-user non-system non-owned assistant turns', () => {
+        const owned = makeMessage({ mes: 'ghosted assistant' });
+        const chat = [
+            makeMessage({ mes: 'plain assistant' }),
+            owned,
+            makeMessage({ isSystem: true, mes: 'system' }),
+            makeMessage({ isUser: true, mes: 'user' }),
+        ];
+        installSummaryContext({
+            chat,
+            metadata: { summaryception: makeSummaryStore({ ghostedMessageIds: [owned.sc_id] }) },
+        });
         const turns = getVisibleAssistantTurns(chat);
         expect(turns).toHaveLength(1);
         expect(turns[0].mes).toBe('plain assistant');
@@ -102,9 +127,9 @@ describe('getPromptDepthsByChatIndex', () => {
     it('skips system messages and assigns depth by distance from the last non-system message', () => {
         const chat = [
             makeMessage({ mes: 'a' }), // index 0, non-system
-            makeMessage({ isSystem: true, mes: 'sys' }), // index 1, system — absent from map
+            makeMessage({ isSystem: true, mes: 'sys' }), // index 1, system; absent from map
             makeMessage({ mes: 'b' }), // index 2
-            makeMessage({ mes: 'c' }), // index 3 — last non-system, depth 0
+            makeMessage({ mes: 'c' }), // index 3, last non-system, depth 0
         ];
         const depths = getPromptDepthsByChatIndex(chat);
         // System index is not a key.

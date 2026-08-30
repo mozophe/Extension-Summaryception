@@ -1,4 +1,5 @@
-import { findLastMessage, getAssistantTurns } from './chatutils.js';
+import { getCurrentSummarizedBoundary } from '../foundation/state.js';
+import { findLastMessage, getAssistantTurns, isSummaryceptionOwnedMessage } from './chatutils.js';
 import { buildLayer0Partitions } from './partition-planner.js';
 
 /**
@@ -21,27 +22,24 @@ import { buildLayer0Partitions } from './partition-planner.js';
  * @returns {Promise<SlopBreakerPlan>}
  */
 export async function getSlopBreakerPlan(chat, store, settings, { targetIndex } = {}) {
-    let resolvedTargetIndex = getSlopBreakerTargetIndex(chat, store.summarizedUpTo);
+    const summarizedBoundary = getCurrentSummarizedBoundary(chat, store);
+    let resolvedTargetIndex = getSlopBreakerTargetIndex(chat, summarizedBoundary);
     if (typeof targetIndex === 'number' && Number.isInteger(targetIndex) && targetIndex >= 0) {
         resolvedTargetIndex = targetIndex;
     }
 
-    if (typeof resolvedTargetIndex !== 'number' || resolvedTargetIndex <= store.summarizedUpTo) {
+    if (typeof resolvedTargetIndex !== 'number' || resolvedTargetIndex <= summarizedBoundary) {
         return buildEmptyPlan(resolvedTargetIndex ?? -1);
     }
 
-    const eligibleTurns = getEligibleAssistantTurns(
-        chat,
-        store.summarizedUpTo,
-        resolvedTargetIndex,
-    );
+    const eligibleTurns = getEligibleAssistantTurns(chat, summarizedBoundary, resolvedTargetIndex);
     if (eligibleTurns.length === 0) {
         return buildEmptyPlan(resolvedTargetIndex);
     }
 
     const partitions = await buildLayer0Partitions({
         chat,
-        sourceStartIdx: store.summarizedUpTo < 0 ? 0 : store.summarizedUpTo + 1,
+        sourceStartIdx: summarizedBoundary < 0 ? 0 : summarizedBoundary + 1,
         assistantTurns: eligibleTurns,
         settings,
         finalSourceEndIdx: resolvedTargetIndex,
@@ -61,34 +59,30 @@ export async function getSlopBreakerPlan(chat, store, settings, { targetIndex } 
 
 /**
  * Determine the fixed endpoint for a Slop Breaker cut.
- * @param {ChatMessage[]} chat
- * @param {number} summarizedUpTo
+ * @param {number} boundaryIndex
  * @returns {number | null}
  */
-function getSlopBreakerTargetIndex(chat, summarizedUpTo) {
+function getSlopBreakerTargetIndex(chat, boundaryIndex) {
     const latest = findLastMessage(chat, chat.length - 1, isCountableConversationMessage);
-    if (!latest || latest.index <= summarizedUpTo) {
+    if (!latest || latest.index <= boundaryIndex) {
         return null;
     }
     if (!latest.message.is_user) {
         return latest.index;
     }
-
-    const previous = findLastMessage(chat, latest.index - 1, isCountableConversationMessage);
-    return previous?.index ?? null;
+    return findLastMessage(chat, latest.index - 1, isCountableConversationMessage)?.index ?? null;
 }
 
 /**
- * Get assistant turns inside the fixed Slop Breaker target range.
  * @param {ChatMessage[]} chat
- * @param {number} summarizedUpTo
+ * @param {number} boundaryIndex
  * @param {number} targetIndex
  * @returns {import('./chatutils.js').AssistantTurn[]}
  */
-function getEligibleAssistantTurns(chat, summarizedUpTo, targetIndex) {
+function getEligibleAssistantTurns(chat, boundaryIndex, targetIndex) {
     return getAssistantTurns(chat).filter(
         (turn) =>
-            turn.index > summarizedUpTo &&
+            turn.index > boundaryIndex &&
             turn.index <= targetIndex &&
             isCountableConversationMessage(chat[turn.index]),
     );
@@ -103,7 +97,7 @@ function isCountableConversationMessage(message) {
     if (!message?.mes || !String(message.mes).trim()) {
         return false;
     }
-    return !(message.is_system || message.is_hidden) || message.extra?.sc_ghosted === true;
+    return !(message.is_system || message.is_hidden) || isSummaryceptionOwnedMessage(message);
 }
 
 /**

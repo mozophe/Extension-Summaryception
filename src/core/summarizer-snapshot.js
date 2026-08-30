@@ -46,11 +46,11 @@ export function fingerprintSourceRange(chat, startIdx, endIdx) {
         const msg = chat[i];
         messages.push([
             i,
+            msg?.sc_id || '',
             msg?.mes || '',
             Boolean(msg?.is_user),
             Boolean(msg?.is_system),
             Boolean(msg?.is_hidden),
-            Boolean(msg?.extra?.sc_ghosted),
         ]);
     }
     return JSON.stringify(messages);
@@ -64,6 +64,21 @@ export function fingerprintSourceRange(chat, startIdx, endIdx) {
 export function getSummaryStoreSnapshotEpoch(store) {
     return getSummaryStoreMutationEpoch(store);
 }
+/**
+ * Build the common basis shared by layer-0 and promotion snapshot capturers.
+ * @param {object} p
+ * @param {ChatMessage[]} p.chatRef - Chat array reference captured for later identity checks
+ * @param {SummaryceptionStore} p.store
+ * @param {object} p.ctx
+ * @returns {{ chatId: string, chatRef: ChatMessage[], summaryStoreEpoch: number }}
+ */
+export function buildSnapshotBasis({ chatRef, store, ctx }) {
+    return {
+        chatId: getChatIdentity(ctx),
+        chatRef,
+        summaryStoreEpoch: getSummaryStoreSnapshotEpoch(store),
+    };
+}
 
 /**
  * Check whether the active chat still matches a captured snapshot.
@@ -75,4 +90,17 @@ export function isSameChatSnapshot(snapshot, ctx) {
     const snap = /** @type {{ chatId?: unknown, chatRef?: unknown }} */ (snapshot);
     const context = /** @type {{ chat?: unknown }} */ (ctx);
     return snap.chatId === getChatIdentity(ctx) && snap.chatRef === context.chat;
+}
+/**
+ * Revalidate that the active chat and summary store still match a captured snapshot.
+ * @param {object} snapshot
+ * @param {object} ctx
+ * @param {SummaryceptionStore} store
+ * @returns {boolean}
+ */
+export function isSnapshotStoreCurrent(snapshot, ctx, store) {
+    if (!isSameChatSnapshot(snapshot, ctx)) {
+        return false;
+    }
+    return getSummaryStoreSnapshotEpoch(store) === snapshot.summaryStoreEpoch;
 }

@@ -1,9 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import {
-    countLayer0SourceBudget,
-    getSourceTokenCount,
-} from '../src/core/token-budget/source-token-counter.js';
+import { countLayer0SourceBudget, getSourceTokenCount } from '../src/core/token-budget.js';
 import { installSummaryContext } from './test-helpers.js';
 
 describe('getSourceTokenCount', () => {

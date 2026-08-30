@@ -4,13 +4,14 @@ import {
     STATE_KEY_CEILING,
     computeSentenceCap,
     computeStateLineCap,
-} from '../src/core/token-budget/structural-constraints.js';
+} from '../src/core/token-budget.js';
 import {
     buildLayer0BudgetHint,
     buildSizeConstraintsBlock,
     buildSizeTargetLine,
-} from '../src/core/token-budget/budget-hint-builder.js';
+} from '../src/core/token-budget.js';
 import { getActiveLineCap } from '../src/foundation/state-categories.js';
+import { defaultSettings } from '../src/foundation/constants.js';
 
 describe('computeSentenceCap', () => {
     const degenerateTargets = [undefined, 0, -5, NaN];
@@ -130,6 +131,7 @@ describe('buildLayer0BudgetHint', () => {
             sourceStateTokens: 0,
             sourceStateKeyCount: 0,
             targetTokens: 250,
+            settings: defaultSettings,
         });
         expect(result).toContain('<summaryception_source_budget>');
         expect(result).toContain('</summaryception_source_budget>');
@@ -145,10 +147,11 @@ describe('buildLayer0BudgetHint', () => {
             sourceStateTokens: 100,
             sourceStateKeyCount: 4,
             targetTokens: 250,
+            settings: defaultSettings,
         });
         expect(result).toContain('Existing [STATE]: 4 keys.');
         // The [STATE] cap line equals computeStateLineCap(4) (cross-check via
-        // the same exported function the builder uses — never a literal).
+        // the same exported function the builder uses; never a literal).
         expect(result).toContain(`at most ${computeStateLineCap(4)} lines`);
     });
 
@@ -168,7 +171,7 @@ describe('buildLayer0BudgetHint', () => {
             settings,
         });
         // With all six categories enabled the raw sum is 36, clamped to the
-        // STATE_KEY_CEILING (12) — the same contract getActiveLineCap encodes.
+        // STATE_KEY_CEILING (12); the same contract getActiveLineCap encodes.
         expect(getActiveLineCap(settings, STATE_KEY_CEILING)).toBe(12);
         expect(result).toContain('at most 12 lines');
         // Must never leak the unclamped 36 figure.

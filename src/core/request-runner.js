@@ -1,4 +1,4 @@
-import { LOG_PREFIX, UI_MODES } from '../foundation/constants.js';
+import { LOG_PREFIX, TOAST_TITLE, UI_MODES } from '../foundation/constants.js';
 import {
     debug,
     error as logError,
@@ -9,6 +9,7 @@ import {
     isTraceEnabled,
     trace,
     warn,
+    serializeError,
 } from '../foundation/logger.js';
 import { RETRY_CONFIG } from '../foundation/retry.js';
 import {
@@ -31,7 +32,7 @@ import {
     recordSuccessfulSummarizerUsage,
 } from './summarizer-pipeline.js';
 import { countTextTokens, formatTokenCount, formatTokenValue } from './token-count.js';
-import { insertBeforeTrigger, EXECUTION_TRIGGER_L0 } from './prompt-parts.js';
+import { insertBeforeTrigger, EXECUTION_TRIGGER_L0 } from '../foundation/prompt-parts.js';
 
 /**
  * Run summarizer provider requests with retry and fallback routing.
@@ -502,7 +503,7 @@ async function getEasyContextGuardFailure({ settings, systemPrompt, prompt, meta
 
     const guardError = buildEasyContextGuardError(guard, metadata);
     warn(guardError.message);
-    toastr.error(guardError.message, 'Summaryception', { timeOut: 10000 });
+    toastr.error(guardError.message, TOAST_TITLE, { timeOut: 10000 });
     return buildAttemptFailure(guardError, false, 'easy-context-guard');
 }
 
@@ -627,11 +628,7 @@ function classifyAttemptError(err, signal) {
         /** @type {Error & { retryable?: boolean, message?: string, status?: number, response?: { status?: number } }} */ (
             err
         );
-    trace('  Caught error on attempt:', {
-        name: error?.name,
-        message: error?.message,
-        retryable: error?.retryable,
-    });
+    trace('  Caught error on attempt:', serializeError(error));
 
     const retryStatus = classifyAttemptRetryStatus(error, signal.aborted);
     if (retryStatus.aborted) {
@@ -778,7 +775,7 @@ async function notifyRetryAndWait(
 
     toastr.warning(
         `API error (${status}). Retrying in ${delaySec}s... (${attempt + 1}/${maxRetries})`,
-        'Summaryception',
+        TOAST_TITLE,
         { timeOut: delay },
     );
 
@@ -801,7 +798,7 @@ async function notifyRouteCycleFailedAndWait({ healthBucket, signal }) {
     );
     toastr.warning(
         `Both summarizer routes failed. Retrying primary in ${delaySec}s...`,
-        'Summaryception',
+        TOAST_TITLE,
         { timeOut: delay },
     );
     await sleepUntilOrAborted(delay, signal);
@@ -829,7 +826,7 @@ function sleepUntilOrAborted(delay, signal) {
  */
 function abortWithToast() {
     debug('Summarization aborted by user.');
-    toastr.warning('Summarization aborted.', 'Summaryception', { timeOut: 3000 });
+    toastr.warning('Summarization aborted.', TOAST_TITLE, { timeOut: 3000 });
     return '';
 }
 
@@ -858,8 +855,8 @@ function failSummarization(lastError, { retriesExhausted = true } = {}) {
     const retryText = retriesExhausted ? ` after ${RETRY_CONFIG.maxRetries} retries` : '';
     logError(`Summarization failed${retryText}:`, lastError);
     toastr.error(
-        `Summarization failed${retryText}${status ? ` (${status})` : ''}. Batch skipped — will retry on next trigger.`,
-        'Summaryception',
+        `Summarization failed${retryText}${status ? ` (${status})` : ''}. Batch skipped; will retry on next trigger.`,
+        TOAST_TITLE,
         { timeOut: 8000 },
     );
     trace('<<< EXITING callSummarizer WITH FAILURE');
@@ -871,7 +868,7 @@ async function checkEasyContextGuard(settings, systemPrompt, prompt, metadata = 
         return { ok: true };
     }
 
-    const limit = Number(settings.easySummarizerContextTokens);
+    const limit = Number(settings.advancedModelContext);
     if (!Number.isFinite(limit) || limit <= 0) {
         return { ok: true };
     }
@@ -1075,17 +1072,5 @@ function buildLlmOutputLog({ label, routeLabel, attempt, status, cleanedResult, 
  * @returns {object|null}
  */
 function serializeAttemptError(error) {
-    if (!error) {
-        return null;
-    }
-    const e =
-        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean, response?: { status?: number } }} */ (
-            error
-        );
-    return {
-        name: e.name || 'Error',
-        message: e.message || String(e),
-        status: e.status || e.statusCode || e.response?.status || null,
-        retryable: typeof e.retryable === 'boolean' ? e.retryable : null,
-    };
+    return error ? serializeError(error) : null;
 }

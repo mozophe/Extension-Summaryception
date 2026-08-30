@@ -1,8 +1,17 @@
 import { getChat } from '../foundation/context.js';
-import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
+import { sleep } from '../foundation/retry.js';
+import {
+    getChatStore,
+    getCurrentSummarizedBoundary,
+    getEffectiveSettings,
+} from '../foundation/state.js';
 import { debug, info, trace } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
-import { maybePromoteLayer, hasPromotionOverflow } from './summarizer-promotion.js';
+import {
+    drainPromotionOverflow,
+    hasPromotionOverflow,
+    maybePromoteLayer,
+} from './summarizer-promotion.js';
 import { flushPendingChatSave } from './persist-state.js';
 import { recoverStalePromptFreeze, shouldStopPromptWork } from './summarizer-commit.js';
 import { formatTokenValue } from './token-count.js';
@@ -12,7 +21,7 @@ import {
     buildForceSummaryRoutePlan,
     buildSlopSummaryRoutePlan,
 } from './summarization-routes.js';
-
+import { prepareSummaryCycle } from './summary-preflight.js';
 export const ELASTIC_STRATEGIES = Object.freeze({
     AUTO: 'AUTO',
     FORCE: 'FORCE',
@@ -42,6 +51,33 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  */
 
 /**
+ * @typedef {object} ManualRunOptions
+ * @property {AbortSignal} [signal] - Abort signal for cancelling the manual run.
+ * @property {(progress: ManualRunProgress) => void} [onStart] - Called with initial progress.
+ * @property {(progress: ManualRunProgress) => void} [onProgress] - Called after batch progress changes.
+ */
+
+/**
+ * @typedef {object} ManualTask
+ * @property {string} kind - Manual strategy identifier.
+ * @property {number} totalBatches - Estimated total batches for the run.
+ * @property {string} label - Short progress label for the active operation.
+ * @property {string} title - User-visible progress title.
+ * @property {number} targetIndex - Summarized boundary the run must reach.
+ * @property {() => Promise<*>} getBatch - Builds the next route plan to commit.
+ * @property {(batch: *) => boolean} isBatchReady - Whether a route plan has work.
+ * @property {(batch: *) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
+ * @property {(outcome: ManualRunOutcome, task: ManualTask) => boolean} isComplete - Whether the run reached its target.
+ */
+
+/**
+ * @typedef {object} ManualRunnerDeps
+ * @property {import('./summarizer-queue.js').SummarizerQueue} queue - Shared summarizer queue.
+ * @property {() => void} refreshUi - Refreshes visible extension UI state.
+ * @property {function(string, function(): Promise<*>): Promise<*>} withUsageRun - Runs work inside a usage accounting scope.
+ */
+
+/**
  * Run one automatic elastic summarization action.
  * @param {import('./summarizer-queue.js').SummarizerQueueContext} queue
  * @param {{ refreshUi?: () => void }} [opts]
@@ -61,30 +97,62 @@ export async function runElasticAutoCycle(queue, { refreshUi } = {}) {
         return 'idle';
     }
 
+    const prepared = await prepareSummaryCycle();
     if (await hasPromotionOverflow(0)) {
         queue.setPhase('promoting');
         const promotionResult = await processPromotionCycle({ overflowKnown: true });
         return promotionResult;
     }
 
-    const routePlan = await buildAutoSummaryRoutePlan(getChat(), getChatStore(), s);
+    const routePlan = await buildAutoSummaryRoutePlan(prepared.chat, prepared.store, s);
     logRoutePlan(routePlan, s);
 
-    if (routePlan.ready) {
-        queue.setPhase(routePlan.phase);
-        return await processRoutePlan(routePlan);
+    if (!routePlan.ready) {
+        return 'idle';
     }
 
-    return 'idle';
+    queue.setPhase(routePlan.phase);
+    return await processRoutePlan(routePlan);
+}
+/**
+ * Yield briefly between automatic work units.
+ * @returns {Promise<void>}
+ */
+export async function yieldWorkerCycle() {
+    await sleep(0);
+}
+
+/**
+ * Run the force-summarize catch-up loop.
+ * The engine builds its own force route plan; callers only pass run options.
+ * @param {ManualRunnerDeps} deps
+ * @param {ManualRunOptions} [options]
+ * @returns {Promise<ManualRunOutcome>}
+ */
+export async function runCatchup(deps, options = {}) {
+    return await deps.withUsageRun('force summarize catch-up', async () => {
+        trace('>>> ENTERING runCatchup');
+        return await runElasticManual(deps, ELASTIC_STRATEGIES.FORCE, options);
+    });
+}
+
+/**
+ * Run Slop Breaker up to a fixed live-context cut.
+ * @param {ManualRunnerDeps} deps
+ * @param {ManualRunOptions} [options]
+ * @returns {Promise<ManualRunOutcome>}
+ */
+export async function runSlopBreaker(deps, options = {}) {
+    return await deps.withUsageRun('slop breaker', async () => {
+        return await runElasticManual(deps, ELASTIC_STRATEGIES.SLOP, options);
+    });
 }
 
 /**
  * Run Force Summarize or Slop Breaker through the shared engine.
- * @param {object} deps
- * @param {import('./summarizer-queue.js').SummarizerQueue} deps.queue
- * @param {() => void} deps.refreshUi
+ * @param {ManualRunnerDeps} deps
  * @param {'FORCE' | 'SLOP'} strategy
- * @param {{ signal?: AbortSignal, onStart?: (progress: ManualRunProgress) => void, onProgress?: (progress: ManualRunProgress) => void }} [options]
+ * @param {ManualRunOptions} [options]
  * @returns {Promise<ManualRunOutcome>}
  */
 export async function runElasticManual(deps, strategy, options = {}) {
@@ -92,12 +160,13 @@ export async function runElasticManual(deps, strategy, options = {}) {
         return createManualRunOutcome({ blocked: true });
     }
 
-    const task = await buildManualTask(strategy, options);
+    const prepared = await prepareSummaryCycle();
+    const task = await buildManualTask(strategy, prepared);
     if (!task) {
         return createManualRunOutcome();
     }
 
-    const outcome = await executeManualTask(deps, task);
+    const outcome = await executeManualTask(deps, task, options);
     const normalized = await normalizeManualMemory(outcome);
     deps.refreshUi();
     return {
@@ -110,7 +179,7 @@ export async function runElasticManual(deps, strategy, options = {}) {
 
 async function processRoutePlan(routePlan) {
     const success = await commitRoutePlan(routePlan, {
-        showToasts: routePlan.commitMode === SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS,
+        showToasts: true,
         catchExceptions: true,
     });
 
@@ -163,22 +232,35 @@ const MANUAL_STRATEGIES = Object.freeze({
     [ELASTIC_STRATEGIES.FORCE]: {
         buildTask: buildForceTask,
         processBatch: processForceBatch,
-        isComplete: () => true,
+        isComplete: (_outcome, task) =>
+            getCurrentSummarizedBoundary(getChat(), getChatStore()) >= task.targetIndex,
     },
     [ELASTIC_STRATEGIES.SLOP]: {
         buildTask: buildSlopTask,
         processBatch: processSlopBatch,
-        isComplete: (_outcome, task) => getChatStore().summarizedUpTo >= task.targetIndex,
+        isComplete: (_outcome, task) =>
+            getCurrentSummarizedBoundary(getChat(), getChatStore()) >= task.targetIndex,
     },
 });
 
-async function buildManualTask(strategy, options) {
+/**
+ * Build the manual task for one strategy.
+ * @param {'FORCE' | 'SLOP'} strategy
+ * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
+ * @returns {Promise<ManualTask | null | undefined>}
+ */
+async function buildManualTask(strategy, prepared) {
     const manualStrategy = MANUAL_STRATEGIES[strategy];
-    return await manualStrategy?.buildTask(options, manualStrategy);
+    return await manualStrategy?.buildTask(manualStrategy, prepared);
 }
 
-async function buildForceTask(options, strategy) {
-    const initialRoutePlan = await getForceRoutePlan();
+/**
+ * @param {*} strategy
+ * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
+ * @returns {Promise<ManualTask | null>}
+ */
+async function buildForceTask(strategy, prepared) {
+    const initialRoutePlan = await getForceRoutePlan(prepared);
     if (!initialRoutePlan.ready) {
         return null;
     }
@@ -188,8 +270,7 @@ async function buildForceTask(options, strategy) {
         totalBatches: initialRoutePlan.totalBatches,
         label: 'Processing',
         title: 'Summaryception Catch-Up',
-        options,
-        targetIndex: initialRoutePlan.rawPlan.tokenBoundaryIndex,
+        targetIndex: initialRoutePlan.rawPlan.queuedEndIdx,
         getBatch: getForceRoutePlan,
         isBatchReady: (batch) => batch?.ready,
         processBatch: strategy.processBatch,
@@ -197,43 +278,61 @@ async function buildForceTask(options, strategy) {
     };
 }
 
-async function buildSlopTask(options, strategy) {
+/**
+ * @param {*} strategy
+ * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
+ * @returns {Promise<ManualTask | null>}
+ */
+async function buildSlopTask(strategy, prepared) {
     const initialRoutePlan = await buildSlopSummaryRoutePlan(
-        getChat(),
-        getChatStore(),
+        prepared.chat,
+        prepared.store,
         getEffectiveSettings(),
     );
-    if (!initialRoutePlan.ready) {
+    const targetIndex = initialRoutePlan.targetIndex;
+    if (!initialRoutePlan.ready || typeof targetIndex !== 'number') {
         return null;
     }
 
-    const targetIndex = initialRoutePlan.targetIndex;
     return {
         kind: ELASTIC_STRATEGIES.SLOP,
         totalBatches: initialRoutePlan.totalBatches,
         label: 'Breaking slop',
         title: 'Summaryception Slop Breaker',
-        options,
         targetIndex,
-        getBatch: async () =>
-            await buildSlopSummaryRoutePlan(getChat(), getChatStore(), getEffectiveSettings(), {
-                targetIndex,
-            }),
+        getBatch: async () => {
+            const cycle = await prepareSummaryCycle();
+            return await buildSlopSummaryRoutePlan(
+                cycle.chat,
+                cycle.store,
+                getEffectiveSettings(),
+                {
+                    targetIndex,
+                },
+            );
+        },
         isBatchReady: (batch) => batch?.ready,
         processBatch: strategy.processBatch,
         isComplete: strategy.isComplete,
     };
 }
 
-async function executeManualTask(deps, task) {
+/**
+ * Drive one manual task batch loop to completion.
+ * @param {ManualRunnerDeps} deps
+ * @param {ManualTask} task
+ * @param {ManualRunOptions} options
+ * @returns {Promise<ManualRunOutcome>}
+ */
+async function executeManualTask(deps, task, options) {
     const outcome = createManualRunOutcome({ totalBatches: task.totalBatches });
     let consecutiveFailures = 0;
 
-    task.options.onStart?.(createProgress(outcome, task));
+    options.onStart?.(createProgress(outcome, task));
     deps.queue.setSummarizing(true);
 
     try {
-        while (!isCancelled(task.options.signal)) {
+        while (!isCancelled(options.signal)) {
             const batch = await task.getBatch();
             if (!task.isBatchReady(batch)) {
                 break;
@@ -247,7 +346,7 @@ async function executeManualTask(deps, task) {
                 break;
             }
 
-            if (shouldStopManualLoop(outcome, result, task.options.signal, deps.queue)) {
+            if (shouldStopManualLoop(outcome, result, options.signal, deps.queue)) {
                 break;
             }
 
@@ -256,11 +355,11 @@ async function executeManualTask(deps, task) {
                 break;
             }
 
-            task.options.onProgress?.(createProgress(outcome, task));
+            options.onProgress?.(createProgress(outcome, task));
             await sleep(200);
         }
 
-        if (isCancelled(task.options.signal)) {
+        if (isCancelled(options.signal)) {
             outcome.cancelled = true;
         }
         return outcome;
@@ -320,17 +419,18 @@ function shouldStopManualLoop(outcome, result, signal, queue) {
 
 async function processForceBatch(plan) {
     trace('Processing force batch via elastic engine');
-    const beforeIndex = getChatStore().summarizedUpTo;
+    const beforeIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     const success = await commitRoutePlan(plan, { catchExceptions: true });
+    const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     return {
         success,
-        committed: success && getChatStore().summarizedUpTo > beforeIndex,
+        committed: success && afterIndex > beforeIndex,
     };
 }
 
 async function processSlopBatch(plan) {
     const success = await commitRoutePlan(plan, { catchExceptions: true });
-    const afterIndex = getChatStore().summarizedUpTo;
+    const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     return {
         success,
         committed: success && afterIndex >= plan.sourceEndIdx,
@@ -338,12 +438,9 @@ async function processSlopBatch(plan) {
     };
 }
 
-async function getForceRoutePlan() {
-    const plan = await buildForceSummaryRoutePlan(
-        getChat(),
-        getChatStore(),
-        getEffectiveSettings(),
-    );
+async function getForceRoutePlan(prepared) {
+    const cycle = prepared || (await prepareSummaryCycle());
+    const plan = await buildForceSummaryRoutePlan(cycle.chat, cycle.store, getEffectiveSettings());
 
     trace(`Current visible turns: ${plan.rawPlan.visibleTurnCount}, plan reason: ${plan.reason}`);
     return plan;
@@ -361,22 +458,7 @@ async function normalizeManualMemory(outcome) {
 }
 
 async function normalizePromotions() {
-    let failures = 0;
-    while (await hasPromotionOverflow(0)) {
-        const promoted = await maybePromoteLayer(0);
-        if (shouldStopPromptWork()) {
-            return 'blocked';
-        }
-        if (promoted) {
-            failures = 0;
-        } else {
-            failures++;
-            if (failures >= 3) {
-                return 'failed';
-            }
-        }
-    }
-    return 'normalized';
+    return await drainPromotionOverflow({ maxFailures: 3, isBlockedAfter: shouldStopPromptWork });
 }
 
 function isManualRunComplete(outcome, task) {
@@ -419,34 +501,11 @@ function isCancelled(signal) {
     return Boolean(signal?.aborted);
 }
 
-async function sleep(ms) {
-    await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function logRoutePlan(routePlan, s) {
-    if (routePlan.commitMode === SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS) {
-        logCachePlan(routePlan.rawPlan);
-        return;
-    }
-    logOverflowPlan(routePlan.rawPlan, s);
-}
-
-function logOverflowPlan(plan, s) {
+    const plan = routePlan.rawPlan;
     debug(
-        `Visible assistant turns: ${plan.visibleTurnCount}, max batch: ${s.maxSummaryTurns}, ` +
-            `verbatim budget: ${formatTokenValue(plan.budgetStats.finalTokens)}/` +
-            `${formatTokenValue(s.verbatimTokenBudget)} tokens, ` +
-            `summary budget: ${formatTokenValue(plan.summaryStats.finalTokens)}/` +
-            `${formatTokenValue(s.minSummaryBudget)} tokens`,
-    );
-}
-
-function logCachePlan(plan) {
-    debug(
-        `Cache mode live tokens: ${formatTokenValue(plan.liveTokens)}/` +
-            `${formatTokenValue(plan.cacheBudget)}, ` +
-            `protected tail: ${formatTokenValue(plan.protectedTailTokens)}, ` +
-            `flush: ${formatTokenValue(plan.estimatedFlushTokens)}, ` +
-            `batch: ${plan.batchTurns.length}`,
+        `Mode: ${s.memoryMode}, recent: ${formatTokenValue(plan.verbatimTokens)}/` +
+            `${formatTokenValue(plan.verbatimBudget)}, queued: ${formatTokenValue(plan.queuedTokens)}/` +
+            `${formatTokenValue(plan.queuedBudget)}, partitions: ${plan.partitions.length}`,
     );
 }

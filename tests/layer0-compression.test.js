@@ -17,12 +17,12 @@ import {
     EXECUTION_TRIGGER_L0,
     EXECUTION_TRIGGER_PROMO,
     buildUserPrompt,
-} from '../src/core/prompt-parts.js';
+} from '../src/foundation/prompt-parts.js';
 import {
     LAYER0_REPAIR_RATIO,
     LAYER_HARD_MAX_RATIO,
     LAYER_MIN_RATIO,
-} from '../src/core/token-budget/structural-constraints.js';
+} from '../src/core/token-budget.js';
 
 function makeLayer0Prompt(triggerLine) {
     return buildUserPrompt({
@@ -49,7 +49,7 @@ describe('isLayer0SizeGuardCall', () => {
         expect(isLayer0SizeGuardCall({ kind })).toBe(true);
     });
 
-    it('is false for promotion — the load-bearing asymmetry vs isLayer0CompressionCall', () => {
+    it('is false for promotion; the load-bearing asymmetry vs isLayer0CompressionCall', () => {
         expect(isLayer0SizeGuardCall({ kind: 'promotion' })).toBe(false);
         // Guard says no; compression says yes for the same metadata.
         expect(isLayer0CompressionCall({ kind: 'promotion' })).toBe(true);
@@ -83,12 +83,12 @@ describe('getLayer0SummaryTokenTarget', () => {
 });
 
 describe('getLayer0SummaryTokenBounds', () => {
-    it('derives min/max from the imported ratios and satisfies min < target < max', () => {
+    it('allows compact narratives down to 50 tokens without changing the hard max', () => {
         const settings = { layer0SummaryTokenTarget: 200 };
         const bounds = getLayer0SummaryTokenBounds(settings);
         const target = getLayer0SummaryTokenTarget(settings);
         expect(bounds.target).toBe(target);
-        expect(bounds.min).toBe(Math.floor(target * LAYER_MIN_RATIO.l0));
+        expect(bounds.min).toBe(50);
         expect(bounds.max).toBe(Math.round(target * LAYER_HARD_MAX_RATIO.l0));
         expect(bounds.min).toBeLessThan(bounds.target);
         expect(bounds.target).toBeLessThan(bounds.max);

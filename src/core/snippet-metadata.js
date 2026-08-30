@@ -1,3 +1,5 @@
+import { getChat } from '../foundation/context.js';
+import { resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { parseSnippet } from './summarizer-state.js';
 
 const UNKNOWN_TIME = 'unknown';
@@ -18,41 +20,43 @@ export function buildSnippetMetadataFromState(state = {}) {
 }
 
 /**
- * Build the metadata envelope for a promoted snippet.
+ * Build persisted metadata for a promoted snippet.
  * @param {Array<object>} snippets
- * @returns {{ sourceRange?: [number, number], currentDateTime?: string }}
+ * @returns {{ sourceMessageIds: string[], currentDateTime?: string }}
  */
 export function buildPromotedSnippetMetadata(snippets = []) {
-    const childMetadata = snippets.map(extractSnippetMetadata);
-    const ranges = [];
-    for (const meta of childMetadata) {
-        if (meta.sourceRange) {
-            ranges.push(meta.sourceRange);
+    const sourceMessageIds = [];
+    const seen = new Set();
+    for (const snippet of snippets) {
+        for (const id of snippet?.sourceMessageIds || []) {
+            if (typeof id === 'string' && id.trim() !== '' && !seen.has(id)) {
+                seen.add(id);
+                sourceMessageIds.push(id);
+            }
         }
     }
-    const envelope = {};
-
-    if (ranges.length > 0) {
-        envelope.sourceRange = [
-            Math.min(...ranges.map((range) => range[0])),
-            Math.max(...ranges.map((range) => range[1])),
-        ];
-    }
-
-    envelope.currentDateTime = lastKnown(childMetadata.map((meta) => meta.currentDateTime));
-    return compactMetadata(envelope);
+    const currentDateTime = lastKnown(
+        snippets.map((snippet) => knownStateValue(snippet?.currentDateTime)),
+    );
+    return /** @type {{ sourceMessageIds: string[], currentDateTime?: string }} */ (
+        compactMetadata({ sourceMessageIds, currentDateTime })
+    );
 }
 
 /**
- * Extract normalized optional chronology metadata from a snippet object.
+ * Extract persisted snippet metadata.
  * @param {object} snippet
- * @returns {{ sourceRange?: [number, number], currentDateTime?: string }}
+ * @returns {{ sourceMessageIds: string[], currentDateTime?: string }}
  */
 export function extractSnippetMetadata(snippet = {}) {
-    return compactMetadata({
-        sourceRange: normalizeRange(snippet.sourceRange),
-        currentDateTime: knownStateValue(snippet.currentDateTime),
-    });
+    return /** @type {{ sourceMessageIds: string[], currentDateTime?: string }} */ (
+        compactMetadata({
+            sourceMessageIds: Array.isArray(snippet.sourceMessageIds)
+                ? [...snippet.sourceMessageIds]
+                : [],
+            currentDateTime: knownStateValue(snippet.currentDateTime),
+        })
+    );
 }
 
 /**
@@ -76,7 +80,7 @@ export function formatAnchoredSnippetNarrative(snippet = {}) {
  */
 export function formatSnippetAnchor(snippet = {}) {
     const meta = extractSnippetMetadata(snippet);
-    const range = meta.sourceRange;
+    const range = resolveSnippetRange(meta.sourceMessageIds);
     if (!range) {
         return '';
     }
@@ -93,7 +97,7 @@ export function formatSnippetAnchor(snippet = {}) {
  */
 export function formatCompactSnippetAnchor(snippet = {}) {
     const meta = extractSnippetMetadata(snippet);
-    const range = meta.sourceRange;
+    const range = resolveSnippetRange(meta.sourceMessageIds);
     if (!range) {
         return '';
     }
@@ -118,22 +122,22 @@ export function stripLeadingSnippetAnchor(text) {
     return cleaned;
 }
 
-function normalizeRange(range) {
-    if (
-        !Array.isArray(range) ||
-        range.length < 2 ||
-        !Number.isInteger(range[0]) ||
-        !Number.isInteger(range[1]) ||
-        range[0] < 0 ||
-        range[1] < range[0]
-    ) {
-        return undefined;
+function resolveSnippetRange(sourceMessageIds) {
+    let chat;
+    try {
+        chat = getChat();
+    } catch (_error) {
+        return null;
     }
-    return [range[0], range[1]];
+    const indices = resolveScIdsToIndices(chat, sourceMessageIds);
+    if (indices.length === 0) {
+        return null;
+    }
+    return [indices[0], indices[indices.length - 1]];
 }
 
 function knownStateValue(value) {
-    const text = String(value ?? '').trim();
+    const text = typeof value === 'string' ? value.trim() : '';
     if (!text || text.toLowerCase() === UNKNOWN_TIME) {
         return undefined;
     }

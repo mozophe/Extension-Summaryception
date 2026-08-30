@@ -12,7 +12,7 @@ function snippetWithState(narrative, stateLines) {
     };
 }
 
-describe('buildMemoryInjectionParts — injectCurrentState', () => {
+describe('buildMemoryInjectionParts with injectCurrentState', () => {
     it('prepends the [CURRENT STATE] block by default', () => {
         const layers = [
             [

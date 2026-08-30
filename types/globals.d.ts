@@ -3,7 +3,12 @@
  * Declared here so TypeScript's checkJs can validate their usage across src/.
  */
 
+declare module '/script.js' {
+    export function substituteParams(text: string): string;
+}
+
 interface ChatMessage {
+    sc_id?: string;
     is_user: boolean;
     is_system: boolean;
     is_hidden?: boolean;
@@ -15,7 +20,6 @@ interface ChatMessage {
 }
 
 interface ChatMessageExtra {
-    sc_ghosted?: boolean;
     sc_token_count?: unknown;
     [key: string]: unknown;
 }
@@ -30,8 +34,7 @@ interface SlashCommand {
 
 interface SummaryceptionSnippet {
     text: string;
-    turnRange?: [number, number];
-    sourceRange?: [number, number];
+    sourceMessageIds: string[];
     currentDateTime?: string;
     promoted?: boolean;
     seedFromLayer?: number;
@@ -39,13 +42,11 @@ interface SummaryceptionSnippet {
     mergedCount?: number;
     timestamp?: number;
     regenerated?: boolean;
-    stateMode?: 'snapshot-v1';
 }
 
 interface SummaryceptionStore {
     layers: SummaryceptionSnippet[][];
-    summarizedUpTo: number;
-    ghostedIndices: number[];
+    ghostedMessageIds: string[];
     mutationEpoch: number;
 }
 
@@ -54,14 +55,8 @@ interface ExtensionSettings {
     autoPaused: boolean;
     configMode: string;
     uiMode: string;
-    easySummarizerContextTokens: number;
-    easyMemoryTokenBudget: number;
-    easyMemoryMode: string;
-    easyConnectionSource: string;
-    easyConnectionProfileId: string;
-    easyMergeConnectionSource: string;
-    easyMergeConnectionProfileId: string;
     memoryMode: string;
+    cacheTtlMinutes: number;
     customMemoryPosition: string;
     customMemoryRole: string;
     customMemoryDepth: number;
@@ -79,6 +74,7 @@ interface ExtensionSettings {
     advancedModelContext: number;
     minSummaryBudget: number;
     verbatimTokenBudget: number;
+    queuedTokenBudget: number;
     memoryTokenBudget: number;
     snippetsPerLayer: number;
     snippetsPerPromotion: number;
@@ -196,7 +192,24 @@ interface SillyTavernStreamingProcessor {
 interface SillyTavernContext {
     chat: ChatMessage[];
     extensionSettings: Record<string, ExtensionSettings>;
+    addOneMessage?: (message: ChatMessage, options?: Record<string, unknown>) => unknown;
+    updateViewMessageIds?: (startIndex?: number | null) => void;
+    deleteMessage?: (
+        index: number,
+        swipeIndex?: number,
+        askConfirmation?: boolean,
+    ) => Promise<unknown>;
+    extensionPrompts?: Record<string, { value?: unknown }>;
     chatMetadata: Record<string, SummaryceptionStore>;
+    maxContext?: number;
+    chatCompletionSettings?: { openai_max_context?: number; openai_max_tokens?: number };
+    loadWorldInfo?: (name: string) => Promise<Record<string, unknown> | null>;
+    saveWorldInfo?: (
+        name: string,
+        data: Record<string, unknown>,
+        immediately?: boolean,
+    ) => Promise<void>;
+    getWorldInfoNames?: () => string[];
     setExtensionPrompt(
         id: string,
         text: string,
@@ -208,8 +221,6 @@ interface SillyTavernContext {
     saveSettingsDebounced(): void;
     saveMetadata(): Promise<void>;
     getRequestHeaders?: () => Record<string, string>;
-    registerMacro?: (name: string, handler: () => string, description?: string) => void;
-    unregisterMacro?: (name: string) => void;
     executeSlashCommandsWithOptions(
         command: string,
         options: Record<string, unknown>,
@@ -225,6 +236,7 @@ interface SillyTavernContext {
     powerUserSettings?: { token_padding?: number };
     promptManager?: SillyTavernPromptManager;
     saveChat?: () => Promise<void>;
+    reloadCurrentChat?: () => Promise<void>;
     ConnectionManagerRequestService?: ConnectionManagerRequestService;
     SlashCommandParser?: SlashCommandParser;
     SlashCommand?: SlashCommand;

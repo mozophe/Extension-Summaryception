@@ -40,21 +40,39 @@ function storeSettingsTab(tabName) {
 }
 
 /**
+ * Activate a button/panel group: mark the target active, hide the rest.
+ * @param {{ buttonClass: string, buttonAttr: string, panelClass: string, panelAttr: string }} group
+ * @param {string} name - Target tab or pane name
+ * @returns {void}
+ */
+function activateTabGroup({ buttonClass, buttonAttr, panelClass, panelAttr }, name) {
+    const targetButton = $(`${buttonClass}[data-${buttonAttr}="${name}"]`);
+    const targetPanel = $(`${panelClass}[data-${panelAttr}="${name}"]`);
+    if (!targetButton.length || !targetPanel.length) {
+        return;
+    }
+
+    $(buttonClass).removeClass('active').attr('aria-selected', 'false');
+    targetButton.addClass('active').attr('aria-selected', 'true');
+    $(panelClass).removeClass('active').attr('hidden', true);
+    targetPanel.addClass('active').removeAttr('hidden');
+}
+
+/**
  * Activate a settings tab and hide the other tab panels.
  * @param {string} tabName
  * @returns {void}
  */
 function activateSettingsTab(tabName) {
-    const targetButton = $(`.sc-tab-button[data-sc-tab="${tabName}"]`);
-    const targetPanel = $(`.sc-tab-panel[data-sc-panel="${tabName}"]`);
-    if (!targetButton.length || !targetPanel.length) {
-        return;
-    }
-
-    $('.sc-tab-button').removeClass('active').attr('aria-selected', 'false');
-    targetButton.addClass('active').attr('aria-selected', 'true');
-    $('.sc-tab-panel').removeClass('active').attr('hidden', true);
-    targetPanel.addClass('active').removeAttr('hidden');
+    activateTabGroup(
+        {
+            buttonClass: '.sc-tab-button',
+            buttonAttr: 'sc-tab',
+            panelClass: '.sc-tab-panel',
+            panelAttr: 'sc-panel',
+        },
+        tabName,
+    );
 }
 
 /**
@@ -63,14 +81,13 @@ function activateSettingsTab(tabName) {
  * @returns {void}
  */
 function activatePromptPane(paneName) {
-    const targetButton = $(`.sc-prompt-segment-button[data-sc-prompt-tab="${paneName}"]`);
-    const targetPanel = $(`.sc-prompt-pane[data-sc-prompt-panel="${paneName}"]`);
-    if (!targetButton.length || !targetPanel.length) {
-        return;
-    }
-
-    $('.sc-prompt-segment-button').removeClass('active').attr('aria-selected', 'false');
-    targetButton.addClass('active').attr('aria-selected', 'true');
-    $('.sc-prompt-pane').removeClass('active').attr('hidden', true);
-    targetPanel.addClass('active').removeAttr('hidden');
+    activateTabGroup(
+        {
+            buttonClass: '.sc-prompt-segment-button',
+            buttonAttr: 'sc-prompt-tab',
+            panelClass: '.sc-prompt-pane',
+            panelAttr: 'sc-prompt-panel',
+        },
+        paneName,
+    );
 }
