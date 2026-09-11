@@ -45,14 +45,22 @@ export async function buildLayer0Partitions({
     const totalTokens = sumSegmentTokens(segments);
     const maxTokens = getMaxL0SourceTokens(settings);
     const targetTokens = getTargetSourceTokens(settings);
+    const maxTurns = getMaxTurnsPerBatch(settings);
 
-    if (totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE)) {
+    if (
+        totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE) &&
+        segments.length <= maxTurns
+    ) {
         return [buildPartitionFromSegments(segments)];
     }
 
-    const partitionCount = Math.max(1, Math.ceil(totalTokens / targetTokens));
+    const partitionCount = Math.max(
+        1,
+        Math.ceil(totalTokens / targetTokens),
+        Math.ceil(segments.length / maxTurns),
+    );
     const softTarget = Math.min(maxTokens, Math.ceil(totalTokens / partitionCount));
-    return buildBalancedPartitions(segments, softTarget, maxTokens);
+    return buildBalancedPartitions(segments, softTarget, maxTokens, maxTurns);
 }
 
 /**
@@ -100,7 +108,7 @@ function sumSegmentTokens(segments) {
     return segments.reduce((total, segment) => total + segment.stats.finalTokens, 0);
 }
 
-function buildBalancedPartitions(segments, softTarget, maxTokens) {
+function buildBalancedPartitions(segments, softTarget, maxTokens, maxTurns) {
     const partitions = [];
     let current = [];
     let currentTokens = 0;
@@ -108,7 +116,14 @@ function buildBalancedPartitions(segments, softTarget, maxTokens) {
     for (const segment of segments) {
         const segmentTokens = segment.stats.finalTokens;
         if (
-            shouldCutBeforeSegment({ current, currentTokens, segmentTokens, softTarget, maxTokens })
+            shouldCutBeforeSegment({
+                current,
+                currentTokens,
+                segmentTokens,
+                softTarget,
+                maxTokens,
+                maxTurns,
+            })
         ) {
             partitions.push(buildPartitionFromSegments(current));
             current = [];
@@ -126,9 +141,19 @@ function buildBalancedPartitions(segments, softTarget, maxTokens) {
     return partitions;
 }
 
-function shouldCutBeforeSegment({ current, currentTokens, segmentTokens, softTarget, maxTokens }) {
+function shouldCutBeforeSegment({
+    current,
+    currentTokens,
+    segmentTokens,
+    softTarget,
+    maxTokens,
+    maxTurns,
+}) {
     if (current.length === 0) {
         return false;
+    }
+    if (current.length >= maxTurns) {
+        return true;
     }
 
     const combinedTokens = currentTokens + segmentTokens;
@@ -183,4 +208,17 @@ function getTargetSourceTokens(settings) {
     const budget = Number(settings.minSummaryBudget);
     const safeBudget = Number.isFinite(budget) ? budget : cap;
     return Math.min(cap, Math.max(MIN_L0_SOURCE_TOKENS, Math.round(safeBudget)));
+}
+
+/**
+ * Max Turns per Batch: hard cap on assistant turns in one Layer 0 partition,
+ * applied alongside the token target (whichever limit is hit first cuts).
+ * @param {ExtensionSettings} settings
+ * @returns {number}
+ */
+function getMaxTurnsPerBatch(settings) {
+    const configured = Math.round(Number(settings.maxSummaryTurns));
+    return Number.isFinite(configured) && configured >= 1
+        ? configured
+        : defaultSettings.maxSummaryTurns;
 }

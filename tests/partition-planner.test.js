@@ -111,6 +111,26 @@ describe('buildLayer0Partitions', () => {
         );
     });
 
+    it('caps each partition at maxSummaryTurns even when tokens fit one call', async () => {
+        const chat = makeSizedChat(7, { userLength: 100, assistantLength: 100 });
+        const partitions = await buildLayer0Partitions({
+            chat,
+            sourceStartIdx: 0,
+            assistantTurns: turnsAt(chat, [1, 3, 5, 7, 9, 11, 13]),
+            settings: makeSummarySettings({
+                maxSummaryTurns: 3,
+                minSummaryBudget: 6000,
+                maxL0SourceTokens: 24000,
+            }),
+        });
+
+        expect(partitions.map((p) => p.turns.length)).toEqual([3, 3, 1]);
+        expect(partitions[0].sourceStartIdx).toBe(0);
+        expect(partitions[1].sourceStartIdx).toBe(partitions[0].sourceEndIdx + 1);
+        expect(partitions[2].sourceStartIdx).toBe(partitions[1].sourceEndIdx + 1);
+        expect(partitions[2].sourceEndIdx).toBe(13);
+    });
+
     it('extends the final segment to finalSourceEndIdx', async () => {
         const chat = [
             ...makeSizedChat(2, { userLength: 500, assistantLength: 2000 }),
