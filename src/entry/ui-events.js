@@ -55,6 +55,7 @@ import {
 } from './ui-dialogs.js';
 import {
     SETTING_SLIDER_SELECTOR,
+    bindDataSettingElements,
     bindDocumentSetting,
     bindSliderSettingPairs,
     readChecked,
@@ -180,44 +181,41 @@ function bindToggleHandlers() {
         }
     });
 
-    /** @type {Array<{ selector: string, key: string, afterSave?: (settings: ReturnType<typeof getSettings>, value: unknown) => void }>} */
-    const toggles = [
-        { selector: '#sc_debug_mode', key: 'debugMode' },
-        { selector: '#sc_trace_mode', key: 'traceMode' },
-        { selector: '#sc_prompt_input_log_mode', key: 'promptInputLogMode' },
-        { selector: '#sc_prompt_output_log_mode', key: 'promptOutputLogMode' },
-        { selector: '#sc_apply_regex_scripts', key: 'applyRegexScripts' },
-        { selector: '#sc_hide_non_text_messages', key: 'hideNonTextMessages' },
-        { selector: '#sc_strip_chinese_ideographs', key: 'stripChineseIdeographs' },
-        {
-            selector: '#sc_inject_current_state',
-            key: 'injectCurrentState',
-            afterSave: () => {
-                updateInjection();
-                syncLLMContextPreview(getEffectiveSettings());
-            },
-        },
-        {
-            selector: '#sc_mask_user_role_as_assistant',
-            key: 'maskUserRoleAsAssistant',
-            afterSave: (_settings, value) => syncRoleMaskModeControl(Boolean(value)),
-        },
-        { selector: '#sc_state_cat_bonds', key: 'stateCatBonds' },
-        { selector: '#sc_state_cat_chekhov', key: 'stateCatChekhov' },
-        { selector: '#sc_state_cat_gm_notes', key: 'stateCatGmNotes' },
-        { selector: '#sc_state_cat_inventory', key: 'stateCatInventory' },
-        { selector: '#sc_state_cat_location', key: 'stateCatLocation' },
-    ];
+    // Plain on/off checkboxes: the key lives in data-sc-setting and the
+    // element kind supplies the boolean reader. Special toggles stay below.
+    const plainToggles = [
+        '#sc_debug_mode',
+        '#sc_trace_mode',
+        '#sc_prompt_input_log_mode',
+        '#sc_prompt_output_log_mode',
+        '#sc_apply_regex_scripts',
+        '#sc_hide_non_text_messages',
+        '#sc_strip_chinese_ideographs',
+        '#sc_state_cat_bonds',
+        '#sc_state_cat_chekhov',
+        '#sc_state_cat_gm_notes',
+        '#sc_state_cat_inventory',
+        '#sc_state_cat_location',
+    ].join(', ');
+    bindDataSettingElements(plainToggles, { eventName: 'change' });
 
-    for (const toggle of toggles) {
-        bindDocumentSetting({
-            eventName: 'change',
-            selector: toggle.selector,
-            key: toggle.key,
-            read: readChecked,
-            afterSave: toggle.afterSave,
-        });
-    }
+    bindDocumentSetting({
+        eventName: 'change',
+        selector: '#sc_inject_current_state',
+        key: 'injectCurrentState',
+        read: readChecked,
+        afterSave: () => {
+            updateInjection();
+            syncLLMContextPreview(getEffectiveSettings());
+        },
+    });
+    bindDocumentSetting({
+        eventName: 'change',
+        selector: '#sc_mask_user_role_as_assistant',
+        key: 'maskUserRoleAsAssistant',
+        read: readChecked,
+        afterSave: (_settings, value) => syncRoleMaskModeControl(Boolean(value)),
+    });
 
     bindDocumentSetting({
         eventName: 'change',
@@ -247,61 +245,27 @@ function bindToggleHandlers() {
 }
 
 function bindCustomPlacementHandlers() {
-    /** @type {Array<{ eventName: string, selector: string, key: string, read: (source: object) => unknown }>} */
-    const customPlacementBindings = [
-        {
-            eventName: 'change',
-            selector: '#sc_easy_connection_source',
-            key: 'connectionSource',
-            read: readString,
-        },
-        {
-            eventName: 'change',
-            selector: '#sc_easy_connection_profile',
-            key: 'connectionProfileId',
-            read: readString,
-        },
-        {
-            eventName: 'change',
-            selector: '#sc_easy_merge_connection_source',
-            key: 'mergeConnectionSource',
-            read: readString,
-        },
-        {
-            eventName: 'change',
-            selector: '#sc_easy_merge_connection_profile',
-            key: 'mergeConnectionProfileId',
-            read: readString,
-        },
-        {
-            eventName: 'change',
-            selector: '#sc_custom_memory_position',
-            key: 'customMemoryPosition',
-            read: readString,
-        },
-        {
-            eventName: 'change',
-            selector: '#sc_custom_memory_role',
-            key: 'customMemoryRole',
-            read: readString,
-        },
-        {
-            eventName: 'input change',
-            selector: '#sc_custom_memory_depth',
-            key: 'customMemoryDepth',
-            read: ($element) => clampInteger($element.val(), 0, 10000),
-        },
-    ];
-
-    for (const binding of customPlacementBindings) {
-        bindDocumentSetting({
-            ...binding,
-            afterSave: refreshEffectiveSettings,
-        });
-    }
+    // Position and role are plain selects: key and fixed option values live in
+    // settings.html, so the engine reads and writes them identically.
+    bindDataSettingElements('#sc_custom_memory_position, #sc_custom_memory_role', {
+        eventName: 'change',
+        afterSave: refreshEffectiveSettings,
+    });
+    // Depth clamps to 0..10000 and saves on both input and change, so it stays
+    // hand-bound: the engine has no clamped reader or dual-event binding.
+    bindDocumentSetting({
+        eventName: 'input change',
+        selector: '#sc_custom_memory_depth',
+        key: 'customMemoryDepth',
+        read: ($element) => clampInteger($element.val(), 0, 10000),
+        afterSave: refreshEffectiveSettings,
+    });
 }
 
-function refreshEffectiveSettings() {
+/**
+ *
+ */
+export function refreshEffectiveSettings() {
     updateInjection();
     updateUI();
 }
@@ -312,26 +276,6 @@ function requestAutoSummaryRefresh(reason) {
             warn(`Auto summarization request after ${reason} failed:`, e);
         })
         .finally(updateUI);
-}
-
-/**
- * Bind the strip patterns input handler.
- * @returns {void}
- */
-function bindInputHelpers() {
-    bindDocumentSetting({
-        eventName: 'change',
-        selector: '#sc_strip_patterns',
-        key: 'stripPatterns',
-        read: readStripPatterns,
-    });
-}
-
-function readStripPatterns($element) {
-    return readString($element)
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
 }
 
 /**
@@ -346,8 +290,6 @@ function bindSliderHandlers() {
             syncLLMContextPreview(getEffectiveSettings());
         },
     });
-
-    bindInputHelpers();
 }
 
 function enforceRetentionConstraints(changedKey) {
@@ -372,17 +314,14 @@ function enforceRetentionConstraints(changedKey) {
  * @returns {void}
  */
 function bindTextareaHandlers() {
-    /** @type {Array<{ id: string, key: 'injectionTemplate' }>} */
-    const textareas = [{ id: '#sc_injection_template', key: 'injectionTemplate' }];
-
-    for (const ta of textareas) {
-        bindDocumentSetting({
-            eventName: 'change',
-            selector: ta.id,
-            key: ta.key,
-            read: readString,
-        });
-    }
+    // Strip patterns: key and "lines" type are declared in settings.html.
+    bindDataSettingElements('#sc_strip_patterns', { eventName: 'change' });
+    bindDocumentSetting({
+        eventName: 'change',
+        selector: '#sc_injection_template',
+        key: 'injectionTemplate',
+        read: readString,
+    });
 }
 
 /**
@@ -448,11 +387,19 @@ async function onForceSummarize() {
     await executeForceSummarize($(this));
 }
 
+const MANUAL_RUN_BUSY_HTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>';
+
 /**
- * Build the shared abort/progress wiring for a manual summarization run.
- * @returns {{ options: object, clearProgressToast: () => void }}
+ * Shared manual-run driver: busy button, abort/progress wiring, outcome
+ * report, injection refresh, reload, and UI update. `run` receives the
+ * engine options carrying the abort signal; returning undefined skips the
+ * outcome report (nothing ran).
+ * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
+ * @param {string} idleHtml Button html restored after the run.
+ * @param {{ run: (options: object) => Promise<object | undefined>, report: (outcome: object) => void }} ops
+ * @returns {Promise<void>}
  */
-function makeManualRunOptions() {
+async function runManualSummarization($button, idleHtml, { run, report }) {
     const controller = new AbortController();
     let progressToast = null;
     const options = {
@@ -465,10 +412,23 @@ function makeManualRunOptions() {
         },
         onProgress: (progress) => updateManualProgressToast(progressToast, progress),
     };
-    return {
-        options,
-        clearProgressToast: () => clearManualProgressToast(progressToast),
-    };
+    if ($button) {
+        $button.prop('disabled', true).html(MANUAL_RUN_BUSY_HTML);
+    }
+    try {
+        const outcome = await run(options);
+        if (outcome !== undefined) {
+            report(outcome);
+            updateInjection();
+            reloadAfterManualRun(outcome);
+        }
+    } finally {
+        clearManualProgressToast(progressToast);
+        if ($button) {
+            $button.prop('disabled', false).html(idleHtml);
+        }
+        updateUI();
+    }
 }
 
 /**
@@ -490,26 +450,6 @@ function guardManualRun(s) {
 }
 
 /**
- * Disable a button with busy html while `fn` runs. Restore the idle html after.
- * @param {object | null} $button jQuery-wrapped button, or null to skip.
- * @param {{ busy: string, idle: string }} html Busy and idle button html.
- * @param {() => Promise<void>} fn Work to run while the button is busy.
- * @returns {Promise<void>}
- */
-async function withBusyButton($button, { busy, idle }, fn) {
-    if ($button) {
-        $button.prop('disabled', true).html(busy);
-    }
-    try {
-        await fn();
-    } finally {
-        if ($button) {
-            $button.prop('disabled', false).html(idle);
-        }
-    }
-}
-
-/**
  * Run Force Summarize from a panel button or the stale-cache advice toast.
  * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
  * @returns {Promise<void>}
@@ -519,14 +459,11 @@ async function executeForceSummarize($button) {
     if (!guardManualRun(s)) {
         return;
     }
-    try {
-        await withBusyButton(
-            $button,
-            {
-                busy: '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>',
-                idle: '<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>',
-            },
-            async () => {
+    await runManualSummarization(
+        $button,
+        '<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>',
+        {
+            run: async (options) => {
                 const plan = await buildForceSummaryRoutePlan(getChat(), getChatStore(), s);
 
                 if (!plan.ready) {
@@ -539,19 +476,11 @@ async function executeForceSummarize($button) {
                     timeOut: 2000,
                 });
 
-                const manual = makeManualRunOptions();
-                const outcome = await runManualWithProgress(
-                    () => runCatchup(manual.options),
-                    manual.clearProgressToast,
-                );
-                showCatchupOutcome(outcome);
-                updateInjection();
-                reloadAfterManualRun(outcome);
+                return runCatchup(options);
             },
-        );
-    } finally {
-        updateUI();
-    }
+            report: showCatchupOutcome,
+        },
+    );
 }
 
 /**
@@ -573,27 +502,14 @@ async function onSlopBreaker() {
         return;
     }
 
-    try {
-        await withBusyButton(
-            $(this),
-            {
-                busy: '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>',
-                idle: '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
-            },
-            async () => {
-                const manual = makeManualRunOptions();
-                const outcome = await runManualWithProgress(
-                    () => runSlopBreaker(manual.options),
-                    manual.clearProgressToast,
-                );
-                showSlopBreakerOutcome(outcome);
-                updateInjection();
-                reloadAfterManualRun(outcome);
-            },
-        );
-    } finally {
-        updateUI();
-    }
+    await runManualSummarization(
+        $(this),
+        '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
+        {
+            run: (options) => runSlopBreaker(options),
+            report: showSlopBreakerOutcome,
+        },
+    );
 }
 
 function showManualCacheWarning(settings) {
@@ -605,20 +521,6 @@ function showManualCacheWarning(settings) {
         TOAST_TITLE,
         { timeOut: 5000 },
     );
-}
-
-/**
- * Clear progress UI even if a manual run throws.
- * @param {() => Promise<object>} run
- * @param {() => void} cleanup
- * @returns {Promise<object>}
- */
-async function runManualWithProgress(run, cleanup) {
-    try {
-        return await run();
-    } finally {
-        cleanup();
-    }
 }
 
 /**
@@ -722,13 +624,6 @@ function onResetDefaults() {
 
     const s = getSettings();
     const preservedMemoryMode = s.memoryMode;
-    const preservedCustomMemoryPosition = s.customMemoryPosition;
-    const preservedCustomMemoryRole = s.customMemoryRole;
-    const preservedCustomMemoryDepth = s.customMemoryDepth;
-    s.memoryMode = preservedMemoryMode;
-    s.customMemoryPosition = preservedCustomMemoryPosition;
-    s.customMemoryRole = preservedCustomMemoryRole;
-    s.customMemoryDepth = preservedCustomMemoryDepth;
     s.minSummaryTurns = defaultSettings.minSummaryTurns;
     s.maxSummaryTurns = defaultSettings.maxSummaryTurns;
     s.maxL0SourceTokens = defaultSettings.maxL0SourceTokens;
@@ -892,16 +787,14 @@ function bindPromptPresetSelect(field) {
 }
 
 function bindPromptTextarea(field) {
-    for (const eventName of ['input', 'change']) {
-        $(document).on(eventName, field.textarea, function () {
-            const s = getSettings();
-            const currentText = $(this).val();
-            s[field.settingKey] = currentText;
+    $(document).on('input change', field.textarea, function () {
+        const s = getSettings();
+        const currentText = $(this).val();
+        s[field.settingKey] = currentText;
 
-            switchPromptFieldToCustom(field, s);
-            saveSettings();
-        });
-    }
+        switchPromptFieldToCustom(field, s);
+        saveSettings();
+    });
 }
 
 function switchPromptFieldToCustom(field, settings) {
