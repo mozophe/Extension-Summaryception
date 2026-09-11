@@ -422,6 +422,9 @@ async function runManualSummarization($button, idleHtml, { run, report }) {
             updateInjection();
             reloadAfterManualRun(outcome);
         }
+    } catch (e) {
+        error('Manual summarization failed:', e);
+        toastr.error(`Summarization failed: ${e?.message || e}`, TOAST_TITLE, { timeOut: 10000 });
     } finally {
         clearManualProgressToast(progressToast);
         if ($button) {
