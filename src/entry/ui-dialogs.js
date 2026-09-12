@@ -38,8 +38,12 @@ export function showCatchupOutcome(outcome) {
             { timeOut: 5000 },
         );
     } else if (outcome.blocked) {
+        const hint =
+            outcome.blockReason === 'no-progress'
+                ? 'a batch made no progress. Click Force Summarize again to continue.'
+                : 'try again after generation finishes.';
         toastr.warning(
-            `Catch-up paused at ${outcome.completed}/${outcome.totalBatches}. Try again after generation finishes.`,
+            `Catch-up paused at ${outcome.completed}/${outcome.totalBatches}: ${hint}`,
             TOAST_TITLE,
             { timeOut: 5000 },
         );

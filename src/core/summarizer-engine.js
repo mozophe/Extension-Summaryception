@@ -33,6 +33,7 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @typedef {object} ManualRunOutcome
  * @property {boolean} cancelled - Whether the manual run was cancelled.
  * @property {boolean} blocked - Whether the prompt guard blocked completion.
+ * @property {string} blockReason - Why the run stopped early ('' when not blocked).
  * @property {number} completed - Number of committed batches.
  * @property {number} failed - Number of failed batches.
  * @property {number} totalBatches - Estimated total batches for the run.
@@ -157,7 +158,7 @@ export async function runSlopBreaker(deps, options = {}) {
  */
 export async function runElasticManual(deps, strategy, options = {}) {
     if (!(await prepareManualRun(deps, `manual ${strategy.toLowerCase()}`))) {
-        return createManualRunOutcome({ blocked: true });
+        return createManualRunOutcome({ blocked: true, blockReason: 'prompt-guard' });
     }
 
     const prepared = await prepareSummaryCycle();
@@ -172,6 +173,7 @@ export async function runElasticManual(deps, strategy, options = {}) {
     return {
         ...outcome,
         blocked: outcome.blocked || normalized === 'blocked',
+        blockReason: outcome.blockReason || (normalized === 'blocked' ? 'prompt-guard' : ''),
         fullyCommitted: isManualRunComplete(outcome, task) && normalized === 'normalized',
         shouldReload: isManualRunComplete(outcome, task) && normalized === 'normalized',
     };
@@ -335,6 +337,9 @@ async function executeManualTask(deps, task, options) {
         while (!isCancelled(options.signal)) {
             const batch = await task.getBatch();
             if (!task.isBatchReady(batch)) {
+                debug(
+                    `Manual loop end: no eligible batch left (reason=${batch?.reason ?? 'none'})`,
+                );
                 break;
             }
 
@@ -377,6 +382,7 @@ async function normalizeAfterCommittedResult(outcome, result) {
     const normalized = await normalizePromotions();
     if (normalized === 'blocked') {
         outcome.blocked = true;
+        outcome.blockReason = 'promotion-guard';
     } else if (normalized === 'failed') {
         outcome.failed++;
     }
@@ -398,9 +404,11 @@ function updateManualOutcome({ outcome, result }) {
         outcome.completed++;
         if (shouldStopPromptWork()) {
             outcome.blocked = true;
+            outcome.blockReason = 'prompt-guard';
         }
     } else if (result.success) {
         outcome.blocked = true;
+        outcome.blockReason = 'no-progress';
     } else {
         outcome.failed++;
     }
@@ -408,6 +416,10 @@ function updateManualOutcome({ outcome, result }) {
 
 function shouldStopManualLoop(outcome, result, signal, queue) {
     if (result.done || outcome.blocked) {
+        debug(
+            `Manual loop end: ${result.done ? 'target reached' : `blocked (${outcome.blockReason || 'unknown'})`}` +
+                ` after ${outcome.completed} batch(es)`,
+        );
         return true;
     }
     if (isCancelled(signal) || !queue.getIsSummarizing()) {
@@ -477,6 +489,7 @@ function createManualRunOutcome(overrides = {}) {
     return {
         cancelled: false,
         blocked: false,
+        blockReason: '',
         completed: 0,
         failed: 0,
         totalBatches: 0,
