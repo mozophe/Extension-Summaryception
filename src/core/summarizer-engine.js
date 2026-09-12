@@ -348,6 +348,7 @@ async function executeManualTask(deps, task, options) {
             consecutiveFailures = result.success && result.committed ? 0 : consecutiveFailures;
 
             if ((await normalizeAfterCommittedResult(outcome, result)) === 'failed') {
+                debug(`Manual loop end: promotion failed after ${outcome.completed} batch(es)`);
                 break;
             }
 

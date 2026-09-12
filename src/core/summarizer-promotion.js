@@ -115,9 +115,22 @@ async function getNextPromotionCandidate(startLayer, settings) {
         if (quota.layerIndex < startLayer) {
             continue;
         }
-        if (isLayerOverLimit(quota, settings)) {
-            return quota;
+        if (!isLayerOverLimit(quota, settings)) {
+            continue;
         }
+        // A layer the retention floor will refuse to merge is not a candidate; reporting it
+        // as overflow makes drainPromotionOverflow spin until it gives up as 'failed'.
+        const refused = await wouldViolateLayer0RetentionFloor({
+            layerIndex: quota.layerIndex,
+            layers: store.layers,
+            mergeCount: getEffectivePromotionBatchSize(settings),
+            settings,
+            quota: quota.quota,
+        });
+        if (refused) {
+            continue;
+        }
+        return quota;
     }
     return null;
 }
