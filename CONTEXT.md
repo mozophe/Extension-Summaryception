@@ -14,6 +14,9 @@ One summary text unit inside a layer, owned by the store and carrying stable mes
 **Promotion**:
 Moving merged older snippets from a layer into the next deeper layer.
 
+**Promotion Drain**:
+The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the stop guard trips, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
+
 **Ghosting**:
 Hiding summarized turns from model context through the host command while keeping them visible in chat.
 

@@ -21,9 +21,7 @@ vi.mock('../src/core/summarization-routes.js', async (importOriginal) => ({
 vi.mock('../src/core/summarizer-batch.js', () => batchMocks);
 vi.mock('../src/foundation/state.js', () => stateMocks);
 vi.mock('../src/core/summarizer-promotion.js', () => ({
-    hasPromotionOverflow: vi.fn(async () => false),
-    maybePromoteLayer: vi.fn(async () => true),
-    drainPromotionOverflow: vi.fn(async () => 'normalized'),
+    drainPromotionOverflow: vi.fn(async () => ({ status: 'completed', attempts: 0 })),
 }));
 vi.mock('../src/core/persist-state.js', () => ({
     flushPendingChatSave: vi.fn(async () => {}),

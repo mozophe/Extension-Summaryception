@@ -7,11 +7,7 @@ import {
 } from '../foundation/state.js';
 import { debug, info, trace } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
-import {
-    drainPromotionOverflow,
-    hasPromotionOverflow,
-    maybePromoteLayer,
-} from './summarizer-promotion.js';
+import { drainPromotionOverflow } from './summarizer-promotion.js';
 import { flushPendingChatSave } from './persist-state.js';
 import { recoverStalePromptFreeze, shouldStopPromptWork } from './summarizer-commit.js';
 import { formatTokenValue } from './token-count.js';
@@ -98,10 +94,10 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
     }
 
     const prepared = await prepareSummaryCycle();
-    if (await hasPromotionOverflow(0)) {
-        queue.setPhase('promoting');
-        const promotionResult = await processPromotionCycle(notify);
-        return promotionResult;
+    queue.setPhase('promoting');
+    const promotion = await drainPromotionOverflow({ maxConsecutiveFailures: 1, notify });
+    if (promotion.status !== 'completed' || promotion.attempts > 0) {
+        return promotion.status === 'completed' ? 'processed' : promotion.status;
     }
 
     const routePlan = await buildAutoSummaryRoutePlan(prepared.chat, prepared.store, s);
@@ -167,13 +163,13 @@ export async function runElasticManual(deps, strategy, options = {}) {
     }
 
     const outcome = await executeManualTask(deps, task, options);
-    const normalized = await normalizeManualMemory(outcome, options.notify);
+    const promotionStatus = await normalizeManualMemory(outcome, options.notify);
     deps.refreshUi();
     return {
         ...outcome,
-        blocked: outcome.blocked || normalized === 'blocked',
-        fullyCommitted: isManualRunComplete(outcome, task) && normalized === 'normalized',
-        shouldReload: isManualRunComplete(outcome, task) && normalized === 'normalized',
+        blocked: outcome.blocked || promotionStatus === 'blocked',
+        fullyCommitted: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
+        shouldReload: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
     };
 }
 
@@ -212,17 +208,6 @@ async function commitRoutePlan(routePlan, options = {}, notify) {
         );
     }
     return await summarizeBatchFromTurns(routePlan.batchTurns, options, notify);
-}
-
-async function processPromotionCycle(notify) {
-    const promoted = await maybePromoteLayer(0, notify);
-    if (shouldStopPromptWork()) {
-        return 'blocked';
-    }
-    if (promoted) {
-        return 'processed';
-    }
-    return 'failed';
 }
 
 const isManualTargetReached = (_outcome, task) =>
@@ -374,13 +359,13 @@ async function normalizeAfterCommittedResult(outcome, result, notify) {
         return 'skipped';
     }
 
-    const normalized = await normalizePromotions(notify);
-    if (normalized === 'blocked') {
+    const promotion = await normalizePromotions(notify);
+    if (promotion.status === 'blocked') {
         outcome.blocked = true;
-    } else if (normalized === 'failed') {
+    } else if (promotion.status === 'failed') {
         outcome.failed++;
     }
-    return normalized;
+    return promotion.status;
 }
 
 function updateConsecutiveFailures(outcome, result, consecutiveFailures) {
@@ -454,15 +439,11 @@ async function normalizeManualMemory(outcome, notify) {
         info('Manual promotion deferred; prompt mutation guard is active.');
         return 'blocked';
     }
-    return await normalizePromotions(notify);
+    return (await normalizePromotions(notify)).status;
 }
 
 async function normalizePromotions(notify) {
-    return await drainPromotionOverflow({
-        maxFailures: 3,
-        isBlockedAfter: shouldStopPromptWork,
-        notify,
-    });
+    return await drainPromotionOverflow({ maxConsecutiveFailures: 3, notify });
 }
 
 function isManualRunComplete(outcome, task) {

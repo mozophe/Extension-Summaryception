@@ -26,7 +26,7 @@ import {
 import { buildRepairDiagnostics } from './repair-diagnostics.js';
 import {
     commitWhenSafe,
-    isPromptMutationFrozen,
+    shouldStopPromptWork,
     updateCommittedInjection,
 } from './summarizer-commit.js';
 import { buildSnapshotBasis, isSnapshotStoreCurrent } from './summarizer-snapshot.js';
@@ -41,18 +41,13 @@ const DEEP_LAYER_BUDGET_RATIO = 0.2;
 const LAYER0_PROMOTION_RETENTION_FLOOR_RATIO = 0.4;
 
 /**
- * Promote the shallowest over-limit layer at or after the requested layer.
- * @param {number} layerIndex - First layer to evaluate
- * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
- * @returns {Promise<boolean>} True when promotion work applied or queued.
+ * Attempt one promotion for an already-computed over-limit candidate.
+ * @param {{ layerIndex: number, quota: number, tokens: number, count: number }} candidate - Over-limit layer quota from getNextPromotionCandidate.
+ * @param {ExtensionSettings} s - Effective settings.
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the drain; runs without one stay silent.
+ * @returns {Promise<boolean>} Whether the promotion merged and committed.
  */
-export async function maybePromoteLayer(layerIndex = 0, notify) {
-    const s = getEffectiveSettings();
-    const candidate = await getNextPromotionCandidate(layerIndex, s);
-    if (!candidate) {
-        return false;
-    }
-
+async function attemptPromotion(candidate, s, notify) {
     if (!canPromoteLayer(candidate.layerIndex)) {
         debug(`Internal layer depth cap (${INTERNAL_MAX_LAYER_DEPTH}) reached.`);
         return false;
@@ -66,15 +61,6 @@ export async function maybePromoteLayer(layerIndex = 0, notify) {
         layerCount: candidate.count,
         notify,
     });
-}
-
-/**
- * Check whether any promotable layer exceeds its dynamic quota or memory count.
- * @param {number} startLayer
- * @returns {Promise<boolean>}
- */
-export async function hasPromotionOverflow(startLayer = 0) {
-    return Boolean(await getNextPromotionCandidate(startLayer, getEffectiveSettings()));
 }
 
 /**
@@ -235,7 +221,7 @@ async function mergeLayerSnippets({ layerIndex, s, quota, layerTokens, layerCoun
         return false;
     }
 
-    return await commitValidatedPromotion({ prepared, promotedSnippet, notify });
+    return await commitValidatedPromotion({ prepared, promotedSnippet });
 }
 
 async function prepareLayerPromotion({ layerIndex, settings, quota, layerTokens, layerCount }) {
@@ -336,7 +322,7 @@ async function generateValidatedPromotion(prepared, notify) {
     return await buildValidatedPromotionSnippet({ prepared, narrative: metaOutcome.text, notify });
 }
 
-async function commitValidatedPromotion({ prepared, promotedSnippet, notify }) {
+async function commitValidatedPromotion({ prepared, promotedSnippet }) {
     const result = await commitWhenSafe({
         kind: 'promotion-merge',
         snapshot: prepared.snapshot,
@@ -348,14 +334,6 @@ async function commitValidatedPromotion({ prepared, promotedSnippet, notify }) {
             }),
     });
 
-    if (result === 'applied') {
-        await drainPromotionOverflow({
-            maxFailures: 1,
-            isBlockedBefore: isPromptMutationFrozen,
-            isBlockedAfter: isPromptMutationFrozen,
-            notify,
-        });
-    }
     return result !== 'stale';
 }
 
@@ -678,38 +656,39 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
 }
 
 /**
- * Drain promotion overflow until layers fit, a guard blocks, or consecutive
- * failed promotions reach `maxFailures`.
+ * Drain promotion overflow: the single loop that owns overflow clearing.
+ * Repeatedly promotes the shallowest over-limit layer until layers fit, the
+ * prompt-mutation stop guard trips, or consecutive failed promotions reach
+ * `maxConsecutiveFailures`.
  * @param {object} [options]
- * @param {number} [options.maxFailures] - Consecutive failed promotions tolerated before stopping.
- * @param {() => boolean} [options.isBlockedBefore] - Guard checked before each promotion attempt.
- * @param {() => boolean} [options.isBlockedAfter] - Guard checked after each promotion attempt.
+ * @param {number} [options.maxConsecutiveFailures] - Consecutive failed promotions tolerated before stopping.
  * @param {import('./notify.js').NotifyAdapter} [options.notify] - Notify adapter threaded from the engine; runs without one stay silent.
- * @returns {Promise<'normalized'|'blocked'|'failed'>}
+ * @returns {Promise<{ status: 'completed'|'blocked'|'failed', attempts: number }>} Run Outcome status and the number of promotions attempted.
  */
-export async function drainPromotionOverflow({
-    maxFailures = Infinity,
-    isBlockedBefore = () => false,
-    isBlockedAfter = () => false,
-    notify,
-} = {}) {
+export async function drainPromotionOverflow({ maxConsecutiveFailures = Infinity, notify } = {}) {
+    const s = getEffectiveSettings();
     let failures = 0;
-    while (await hasPromotionOverflow(0)) {
-        if (isBlockedBefore()) {
-            return 'blocked';
+    let attempts = 0;
+    for (;;) {
+        const candidate = await getNextPromotionCandidate(0, s);
+        if (!candidate) {
+            return { status: 'completed', attempts };
         }
-        const promoted = await maybePromoteLayer(0, notify);
-        if (isBlockedAfter()) {
-            return 'blocked';
+        if (shouldStopPromptWork()) {
+            return { status: 'blocked', attempts };
+        }
+        const promoted = await attemptPromotion(candidate, s, notify);
+        attempts++;
+        if (shouldStopPromptWork()) {
+            return { status: 'blocked', attempts };
         }
         if (promoted) {
             failures = 0;
-        } else {
-            failures++;
-            if (failures >= maxFailures) {
-                return 'failed';
-            }
+            continue;
+        }
+        failures++;
+        if (failures >= maxConsecutiveFailures) {
+            return { status: 'failed', attempts };
         }
     }
-    return 'normalized';
 }

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const callSummarizer = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/summarizer-request.js', () => ({ callSummarizer }));
 
-import { maybePromoteLayer } from '../src/core/summarizer-promotion.js';
+import { drainPromotionOverflow } from '../src/core/summarizer-promotion.js';
 import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
 import {
     installBrowserRuntimeStub,
@@ -45,7 +45,12 @@ describe('summarizer promotion notify events', () => {
         installOverflowingStore();
         callSummarizer.mockResolvedValue({ status: 'failed' });
 
-        await expect(maybePromoteLayer(0, recorder)).resolves.toBe(false);
+        await expect(
+            drainPromotionOverflow({ maxConsecutiveFailures: 1, notify: recorder }),
+        ).resolves.toEqual({
+            status: 'failed',
+            attempts: 1,
+        });
 
         expect(toastr.info).not.toHaveBeenCalled();
         expect(recorder.events).toEqual([
@@ -63,7 +68,10 @@ describe('summarizer promotion notify events', () => {
         installOverflowingStore();
         callSummarizer.mockResolvedValue({ status: 'failed' });
 
-        await expect(maybePromoteLayer(0)).resolves.toBe(false);
+        await expect(drainPromotionOverflow({ maxConsecutiveFailures: 1 })).resolves.toEqual({
+            status: 'failed',
+            attempts: 1,
+        });
 
         expect(callSummarizer).toHaveBeenCalledTimes(1);
         expect(globalThis.toastr).toBeUndefined();

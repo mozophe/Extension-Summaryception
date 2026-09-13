@@ -17,7 +17,6 @@ import {
 } from './summarizer-commit.js';
 
 export { callSummarizer, hasActiveAbortController } from './summarizer-request.js';
-export { maybePromoteLayer } from './summarizer-promotion.js';
 export { recoverStalePromptFreeze, resetPromptMutationGuard } from './summarizer-commit.js';
 
 /** @typedef {import('./summarizer-engine.js').ManualRunOptions} ManualRunOptions */

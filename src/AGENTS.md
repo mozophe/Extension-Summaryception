@@ -19,6 +19,9 @@
 - State is a bounded snapshot. Only the newest state reaches the prompt.
 - Deeper layers merge older snippets after a layer exceeds its limit.
 - A promotion overflow drain stops after a fixed number of consecutive promotion failures. The failure counter resets on success.
+- One drain driver owns Promotion overflow clearing; commit applies one merge and never re-drains.
+- The drain checks the stop guard before and after every attempt.
+- Auto cycles tolerate one consecutive promotion failure; manual runs tolerate three.
 - Promotion uses the final state snapshot in the promoted span.
 - State compaction is deterministic and runs once per assembly.
 - State category budgets apply independently. Date and time remain unchanged.
