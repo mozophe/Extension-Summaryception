@@ -1,5 +1,5 @@
 import { NOTIFY_EVENTS, defaultSettings } from '../foundation/constants.js';
-import { getNotifyAdapter } from './notify.js';
+import { silentAdapter } from './notify.js';
 import { warn, isTraceEnabled, trace } from '../foundation/logger.js';
 import { getEffectiveSettings, getPlayerName } from '../foundation/state.js';
 import { appendLayer0PromptConstraints } from './layer0-compression.js';
@@ -78,16 +78,22 @@ export async function buildSummarizerPipelineInput({
  * @param {string} rawResult - Raw provider output
  * @param {ExtensionSettings} settings - Active settings
  * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata - Call metadata
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for the language-mix rejection; defaults to the silent adapter
  * @returns {Promise<{ status: 'success', text: string, error: null, repairFeedback: '' } | { status: 'empty' | 'cn-rejected' | 'integrity-rejected' | 'size-rejected', text: string, error: Error & { retryable?: boolean }, repairFeedback: string }>}
  */
-export async function processSummarizerResponse(rawResult, settings, metadata = {}) {
+export async function processSummarizerResponse(
+    rawResult,
+    settings,
+    metadata = {},
+    notify = silentAdapter,
+) {
     const cleanedResult = cleanSummarizerOutput((rawResult || '').trim(), {
         stripStructuralMarkers: false,
     });
     const chinesePolicyResult = applyChineseOutputPolicy(cleanedResult, settings);
 
     if (chinesePolicyResult.error) {
-        notifyLanguageMixRejection(chinesePolicyResult.percent);
+        notifyLanguageMixRejection(chinesePolicyResult.percent, notify);
         return {
             status: 'cn-rejected',
             text: '',
@@ -319,14 +325,15 @@ function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metad
 /**
  * Emit the structured language-mix event without coupling prompts.js to UI side effects.
  * @param {string | null} percent
+ * @param {import('./notify.js').NotifyAdapter} notify - Notify adapter threaded from the response processing
  * @returns {void}
  */
-function notifyLanguageMixRejection(percent) {
+function notifyLanguageMixRejection(percent, notify) {
     const displayPercent = percent || '?';
     warn(
         `Summarizer response rejected: CN ideographs were ${displayPercent}% of visible characters.`,
     );
-    getNotifyAdapter().transient({
+    notify.transient({
         kind: NOTIFY_EVENTS.LANGUAGE_MIX_RETRY,
         percent: displayPercent,
     });

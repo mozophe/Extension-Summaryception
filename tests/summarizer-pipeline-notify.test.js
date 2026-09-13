@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import { processSummarizerResponse } from '../src/core/summarizer-pipeline.js';
 import {
     installBrowserRuntimeStub,
@@ -16,19 +15,17 @@ import {
  */
 describe('summarizer pipeline notify events', () => {
     afterEach(() => {
-        setNotifyAdapter(null);
         delete globalThis.toastr;
     });
 
     it('emits a structured language-mix event when the CN policy rejects a response', async () => {
         const { toastr } = installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
-
         const result = await processSummarizerResponse(
             '这是一段用于测试的中文摘要文本',
             makeSummarySettings({ stripChineseIdeographs: true }),
             { kind: 'layer0' },
+            recorder,
         );
 
         expect(result.status).toBe('cn-rejected');

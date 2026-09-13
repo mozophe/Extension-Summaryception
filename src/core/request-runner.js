@@ -2,7 +2,7 @@ import { NOTIFY_EVENTS } from '../foundation/constants.js';
 import { debug, error as logError, info, trace } from '../foundation/logger.js';
 import { RETRY_CONFIG } from '../foundation/retry.js';
 import { resolveFallbackSummarizerConnectionSettings } from './connectionutil.js';
-import { getNotifyAdapter } from './notify.js';
+import { silentAdapter } from './notify.js';
 import {
     computeAttemptTimeoutMs,
     getPrimaryHealthBucket,
@@ -91,9 +91,18 @@ export class RequestRunner {
      * @param {string} p.repairPrompt - Fully substituted Layer 0 repair prompt
      * @param {AbortSignal} p.signal - Abort signal
      * @param {import('./summarizer-usage.js').SummarizerCallMetadata} p.metadata - Call metadata
+     * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter for mid-run notices; defaults to the silent adapter
      * @returns {Promise<RunOutcome>} Structured outcome; `completed` carries the summary text.
      */
-    async run({ settings, systemPrompt, prompt, repairPrompt, signal, metadata }) {
+    async run({
+        settings,
+        systemPrompt,
+        prompt,
+        repairPrompt,
+        signal,
+        metadata,
+        notify = silentAdapter,
+    }) {
         // Shared, read-only context for every route cycle and attempt of this request.
         const series = {
             settings,
@@ -102,13 +111,14 @@ export class RequestRunner {
             repairPrompt,
             signal,
             metadata,
+            notify,
             healthBucket: getPrimaryHealthBucket(metadata),
             fallbackSettings: resolveFallbackSummarizerConnectionSettings(settings, metadata),
         };
 
         while (true) {
             if (series.signal.aborted) {
-                return abortRun();
+                return abortRun(series.notify);
             }
 
             const cycle = await this.runRouteCycle(series);
@@ -124,7 +134,11 @@ export class RequestRunner {
     async runRouteCycle(series) {
         const primary = await this.runPrimaryAttemptSeries(series);
 
-        const resolvedPrimary = this.resolvePrimaryRouteResult(primary, series.healthBucket);
+        const resolvedPrimary = this.resolvePrimaryRouteResult(
+            primary,
+            series.healthBucket,
+            series.notify,
+        );
         if (resolvedPrimary) {
             return resolvedPrimary;
         }
@@ -135,18 +149,24 @@ export class RequestRunner {
 
         if (!primary.retryable) {
             return buildRouteCycleResult(
-                failSummarization(primary.error, {
-                    retriesExhausted: false,
-                    attempts: primary.status === 'failed' ? primary.attempts : 0,
-                }),
+                failSummarization(
+                    primary.error,
+                    {
+                        retriesExhausted: false,
+                        attempts: primary.status === 'failed' ? primary.attempts : 0,
+                    },
+                    series.notify,
+                ),
             );
         }
 
         this.primaryRetryExhaustedBuckets.delete(series.healthBucket);
         return buildRouteCycleResult(
-            failSummarization(primary.error, {
-                attempts: primary.status === 'failed' ? primary.attempts : 0,
-            }),
+            failSummarization(
+                primary.error,
+                { attempts: primary.status === 'failed' ? primary.attempts : 0 },
+                series.notify,
+            ),
         );
     }
 
@@ -164,20 +184,24 @@ export class RequestRunner {
         });
     }
 
-    resolvePrimaryRouteResult(primary, healthBucket) {
+    resolvePrimaryRouteResult(primary, healthBucket, notify) {
         if (primary.status === 'success') {
             this.primaryRetryExhaustedBuckets.delete(healthBucket);
             return buildRouteCycleResult(buildCompletedOutcome(primary.result));
         }
         if (primary.status === 'aborted') {
-            return buildRouteCycleResult(abortRun());
+            return buildRouteCycleResult(abortRun(notify));
         }
         if (!primary.retryable && !primary.hardFailover) {
             return buildRouteCycleResult(
-                failSummarization(primary.error, {
-                    retriesExhausted: false,
-                    attempts: primary.attempts,
-                }),
+                failSummarization(
+                    primary.error,
+                    {
+                        retriesExhausted: false,
+                        attempts: primary.attempts,
+                    },
+                    notify,
+                ),
             );
         }
 
@@ -199,12 +223,13 @@ export class RequestRunner {
             return buildRouteCycleResult(buildCompletedOutcome(fallback.result));
         }
         if (fallback.status === 'aborted') {
-            return buildRouteCycleResult(abortRun());
+            return buildRouteCycleResult(abortRun(series.notify));
         }
 
         await notifyRouteCycleFailedAndWait({
             healthBucket: series.healthBucket,
             signal: series.signal,
+            notify: series.notify,
         });
         this.primaryRetryExhaustedBuckets.delete(series.healthBucket);
         return { status: /** @type {'retry'} */ ('retry'), result: null };
@@ -271,7 +296,13 @@ export class RequestRunner {
                 repairFeedback = attemptResult.repairFeedback || '';
             }
 
-            await notifyRetryAndWait(lastError, attempt, series.signal, maxRetries);
+            await notifyRetryAndWait({
+                lastError,
+                attempt,
+                signal: series.signal,
+                maxRetries,
+                notify: series.notify,
+            });
         }
         return buildSeriesFailureResult({
             error: lastError,
@@ -320,6 +351,7 @@ export class RequestRunner {
                 signal: series.signal,
                 attempt,
                 metadata,
+                notify: series.notify,
                 routeLabel,
                 maxRetries,
                 timeoutMs,
@@ -432,11 +464,12 @@ function logRetryStopReason(reason, maxRetries) {
 /**
  * Emit the abort event and return the aborted outcome. Stopping a run is not
  * a failure; entry renders the notice from this structured event (ADR-0004).
+ * @param {import('./notify.js').NotifyAdapter} notify - Notify adapter threaded from the request series
  * @returns {RunOutcome} The aborted outcome
  */
-function abortRun() {
+function abortRun(notify) {
     debug('Summarization aborted by user.');
-    getNotifyAdapter().transient({ kind: NOTIFY_EVENTS.RUN_ABORTED });
+    notify.transient({ kind: NOTIFY_EVENTS.RUN_ABORTED });
     return buildAbortedOutcome();
 }
 
@@ -453,9 +486,14 @@ function abortRun() {
  * branch emits nothing: the attempt layer already emitted the guard event.
  * @param {SummarizerFailureError} lastError
  * @param {{ retriesExhausted?: boolean, attempts?: number }} [options]
+ * @param {import('./notify.js').NotifyAdapter} notify - Notify adapter threaded from the request series
  * @returns {RunOutcome} The blocked or failed outcome
  */
-function failSummarization(lastError, { retriesExhausted = true, attempts = 0 } = {}) {
+function failSummarization(
+    lastError,
+    { retriesExhausted = true, attempts = 0 } = {},
+    notify = silentAdapter,
+) {
     if (lastError?.easyContextGuard) {
         logError('Summarization blocked by Easy context guard:', lastError);
         trace('<<< EXITING callSummarizer WITH EASY CONTEXT GUARD');
@@ -465,7 +503,7 @@ function failSummarization(lastError, { retriesExhausted = true, attempts = 0 } 
     const status = lastError?.status || lastError?.response?.status || '';
     const retryText = retriesExhausted ? ` after ${attempts} attempts` : '';
     logError(`Summarization failed${retryText}:`, lastError);
-    getNotifyAdapter().transient({
+    notify.transient({
         kind: NOTIFY_EVENTS.RUN_FAILED,
         retriesExhausted,
         attempts,

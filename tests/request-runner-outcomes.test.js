@@ -10,7 +10,6 @@ const attemptMocks = vi.hoisted(() => ({
 vi.mock('../src/core/request-attempt.js', () => attemptMocks);
 
 import { RequestRunner } from '../src/core/request-runner.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import { RETRY_CONFIG } from '../src/foundation/retry.js';
 import {
     installBrowserRuntimeStub,
@@ -24,12 +23,11 @@ describe('RequestRunner.run outcomes', () => {
         for (const mock of Object.values(attemptMocks)) {
             mock.mockReset();
         }
-        setNotifyAdapter(null);
         delete globalThis.toastr;
         delete globalThis.$;
     });
 
-    function makeRequest({ signal } = {}) {
+    function makeRequest({ signal, notify } = {}) {
         return {
             settings: makeSummarySettings(),
             systemPrompt: 'system',
@@ -37,6 +35,7 @@ describe('RequestRunner.run outcomes', () => {
             repairPrompt: 'repair',
             signal: signal ?? new AbortController().signal,
             metadata: { kind: 'layer0' },
+            notify,
         };
     }
 
@@ -57,12 +56,13 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns aborted for an already-aborted signal without attempting', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installBrowserRuntimeStub();
         const controller = new AbortController();
         controller.abort();
 
-        const outcome = await new RequestRunner().run(makeRequest({ signal: controller.signal }));
+        const outcome = await new RequestRunner().run(
+            makeRequest({ signal: controller.signal, notify: recorder }),
+        );
 
         expect(outcome).toEqual({ status: 'aborted' });
         expect(attemptMocks.runSingleAttempt).not.toHaveBeenCalled();
@@ -71,7 +71,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns blocked when the Easy context guard rejects the request', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
@@ -81,7 +80,7 @@ describe('RequestRunner.run outcomes', () => {
             hardFailover: false,
         });
 
-        const outcome = await new RequestRunner().run(makeRequest());
+        const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
 
         expect(outcome).toEqual({ status: 'blocked' });
         expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
@@ -90,7 +89,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns failed on a non-retryable error without the guard', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
@@ -100,7 +98,7 @@ describe('RequestRunner.run outcomes', () => {
             hardFailover: false,
         });
 
-        const outcome = await new RequestRunner().run(makeRequest());
+        const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
 
         expect(outcome).toEqual({ status: 'failed', attempts: 1 });
         expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
@@ -117,7 +115,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns failed after exhausting retries for retryable errors', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
@@ -127,7 +124,7 @@ describe('RequestRunner.run outcomes', () => {
             hardFailover: false,
         });
 
-        const outcome = await new RequestRunner().run(makeRequest());
+        const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
 
         expect(outcome).toEqual({ status: 'failed', attempts: RETRY_CONFIG.maxRetries + 1 });
         expect(attemptMocks.runSingleAttempt).toHaveBeenCalledTimes(RETRY_CONFIG.maxRetries + 1);

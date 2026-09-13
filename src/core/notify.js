@@ -1,8 +1,8 @@
 /**
  * Notify adapter seam (ADR-0004): core modules emit structured events, entry
- * renders every user-facing notice. The adapter is registered once at the
- * composition root (same pattern as the UI-updater setter); unregistered runs
- * fall back to a silent adapter.
+ * renders every user-facing notice. The adapter is created once at the
+ * composition root and reaches core only through explicit arguments; callers
+ * without one fall back to a silent adapter.
  */
 
 /**
@@ -45,8 +45,8 @@
  * @property {(handle: unknown, event?: Record<string, unknown>) => void} clear - Close a handle, optionally with a terminal event.
  */
 
-/** @type {NotifyAdapter} */
-const silentAdapter = {
+/** Default adapter used when a caller does not thread one in: drops every event. */
+export const silentAdapter = {
     transient() {},
     progress() {
         return null;
@@ -54,23 +54,3 @@ const silentAdapter = {
     update() {},
     clear() {},
 };
-
-/** @type {NotifyAdapter} */
-let notifyAdapter = silentAdapter;
-
-/**
- * Register the notify adapter used by all core modules.
- * @param {NotifyAdapter | null | undefined} adapter - Toastr-backed adapter from entry, or a falsy value to reset.
- * @returns {void}
- */
-export function setNotifyAdapter(adapter) {
-    notifyAdapter = adapter || silentAdapter;
-}
-
-/**
- * Get the registered notify adapter, or the silent fallback when none is registered.
- * @returns {NotifyAdapter}
- */
-export function getNotifyAdapter() {
-    return notifyAdapter;
-}

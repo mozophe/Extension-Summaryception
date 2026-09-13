@@ -1,5 +1,6 @@
 import { debug, trace } from '../foundation/logger.js';
 import { getEffectiveSettings } from '../foundation/state.js';
+import { silentAdapter } from './notify.js';
 import { RequestRunner } from './request-runner.js';
 import { buildSummarizerPipelineInput, traceSummarizerInputTokens } from './summarizer-pipeline.js';
 
@@ -30,9 +31,10 @@ export function abortCurrentSummarizerRequest() {
  * @param {string} storyTxt - The story text to summarize
  * @param {string} contextStr - The accumulated context string
  * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata] - Call metadata for debug usage logs
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for mid-run notices; defaults to the silent adapter
  * @returns {Promise<import('./request-runner.js').RunOutcome>} Run Outcome; `completed` carries the summary text
  */
-export async function callSummarizer(storyTxt, contextStr, metadata = {}) {
+export async function callSummarizer(storyTxt, contextStr, metadata = {}, notify = silentAdapter) {
     trace('>>> ENTERING callSummarizer');
     await traceSummarizerInputTokens(storyTxt, contextStr);
 
@@ -55,6 +57,7 @@ export async function callSummarizer(storyTxt, contextStr, metadata = {}) {
         return await requestRunner.run({
             ...request,
             signal: currentAbortController.signal,
+            notify,
         });
     } finally {
         currentAbortController = null;

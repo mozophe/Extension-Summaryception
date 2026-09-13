@@ -327,12 +327,13 @@ async function generateValidatedPromotion(prepared, notify) {
         prepared.storyTxt,
         prepared.contextStr,
         prepared.promotionMetadata,
+        notify,
     );
     if (metaOutcome.status !== 'completed') {
         return null;
     }
 
-    return await buildValidatedPromotionSnippet({ prepared, narrative: metaOutcome.text });
+    return await buildValidatedPromotionSnippet({ prepared, narrative: metaOutcome.text, notify });
 }
 
 async function commitValidatedPromotion({ prepared, promotedSnippet, notify }) {
@@ -358,7 +359,7 @@ async function commitValidatedPromotion({ prepared, promotedSnippet, notify }) {
     return result !== 'stale';
 }
 
-async function buildValidatedPromotionSnippet({ prepared, narrative }) {
+async function buildValidatedPromotionSnippet({ prepared, narrative, notify }) {
     const {
         layerIndex,
         mergeCount,
@@ -396,19 +397,24 @@ async function buildValidatedPromotionSnippet({ prepared, narrative }) {
         return null;
     }
 
-    const repairOutcome = await callSummarizer(storyTxt, contextStr, {
-        ...metadata,
-        promotionRepair: {
-            reason: firstValidation.reason,
-            outputTokens: firstValidation.outputTokens.count,
-            targetTokens: firstValidation.targetTokens,
-            hardMaxTokens: firstValidation.hardMaxTokens,
-            requiredMaxTokens: firstValidation.requiredMaxTokens,
-            sourceTokens: firstValidation.sourceTokens.count,
-            rejectedSummary: firstCandidate.text,
-            diagnostics: firstValidation.diagnostics,
+    const repairOutcome = await callSummarizer(
+        storyTxt,
+        contextStr,
+        {
+            ...metadata,
+            promotionRepair: {
+                reason: firstValidation.reason,
+                outputTokens: firstValidation.outputTokens.count,
+                targetTokens: firstValidation.targetTokens,
+                hardMaxTokens: firstValidation.hardMaxTokens,
+                requiredMaxTokens: firstValidation.requiredMaxTokens,
+                sourceTokens: firstValidation.sourceTokens.count,
+                rejectedSummary: firstCandidate.text,
+                diagnostics: firstValidation.diagnostics,
+            },
         },
-    });
+        notify,
+    );
     if (repairOutcome.status !== 'completed') {
         return null;
     }

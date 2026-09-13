@@ -7,7 +7,6 @@ import {
 } from '../foundation/state.js';
 import { debug, info, trace } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
-import { getNotifyAdapter } from './notify.js';
 import {
     drainPromotionOverflow,
     hasPromotionOverflow,
@@ -56,8 +55,8 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @property {AbortSignal} [signal] - Abort signal for cancelling the manual run.
  * @property {(progress: ManualRunProgress) => void} [onStart] - Called with initial progress.
  * @property {(progress: ManualRunProgress) => void} [onProgress] - Called after batch progress changes.
+ * @property {import('./notify.js').NotifyAdapter} [notify] - Adapter for progress notices; absent runs stay silent.
  */
-
 /**
  * @typedef {object} ManualTask
  * @property {string} kind - Manual strategy identifier.
@@ -67,7 +66,7 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @property {number} targetIndex - Summarized boundary the run must reach.
  * @property {() => Promise<*>} getBatch - Builds the next route plan to commit.
  * @property {(batch: *) => boolean} isBatchReady - Whether a route plan has work.
- * @property {(batch: *) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
+ * @property {(batch: *, notify?: import('./notify.js').NotifyAdapter) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
  * @property {(outcome: ManualRunOutcome, task: ManualTask) => boolean} isComplete - Whether the run reached its target.
  */
 
@@ -81,10 +80,10 @@ export const ELASTIC_STRATEGIES = Object.freeze({
 /**
  * Run one automatic elastic summarization action.
  * @param {import('./summarizer-queue.js').SummarizerQueueContext} queue
- * @param {{ refreshUi?: () => void }} [opts]
+ * @param {{ refreshUi?: () => void, notify?: import('./notify.js').NotifyAdapter }} [opts]
  * @returns {Promise<'processed' | 'idle' | 'blocked' | 'failed'>}
  */
-export async function runElasticAutoCycle(queue, { refreshUi } = {}) {
+export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
     await recoverStalePromptFreeze('auto worker', { refreshUi });
 
     if (shouldStopPromptWork()) {
@@ -101,7 +100,7 @@ export async function runElasticAutoCycle(queue, { refreshUi } = {}) {
     const prepared = await prepareSummaryCycle();
     if (await hasPromotionOverflow(0)) {
         queue.setPhase('promoting');
-        const promotionResult = await processPromotionCycle();
+        const promotionResult = await processPromotionCycle(notify);
         return promotionResult;
     }
 
@@ -113,7 +112,7 @@ export async function runElasticAutoCycle(queue, { refreshUi } = {}) {
     }
 
     queue.setPhase(routePlan.phase);
-    return await processRoutePlan(routePlan);
+    return await processRoutePlan(routePlan, notify);
 }
 /**
  * Yield briefly between automatic work units.
@@ -168,7 +167,7 @@ export async function runElasticManual(deps, strategy, options = {}) {
     }
 
     const outcome = await executeManualTask(deps, task, options);
-    const normalized = await normalizeManualMemory(outcome);
+    const normalized = await normalizeManualMemory(outcome, options.notify);
     deps.refreshUi();
     return {
         ...outcome,
@@ -178,8 +177,8 @@ export async function runElasticManual(deps, strategy, options = {}) {
     };
 }
 
-async function processRoutePlan(routePlan) {
-    const success = await commitRoutePlan(routePlan, { catchExceptions: true }, getNotifyAdapter());
+async function processRoutePlan(routePlan, notify) {
+    const success = await commitRoutePlan(routePlan, { catchExceptions: true }, notify);
 
     if (!success) {
         debug('Route batch failed, stopping summarization cycle to avoid retry loop.');
@@ -215,8 +214,8 @@ async function commitRoutePlan(routePlan, options = {}, notify) {
     return await summarizeBatchFromTurns(routePlan.batchTurns, options, notify);
 }
 
-async function processPromotionCycle() {
-    const promoted = await maybePromoteLayer(0, getNotifyAdapter());
+async function processPromotionCycle(notify) {
+    const promoted = await maybePromoteLayer(0, notify);
     if (shouldStopPromptWork()) {
         return 'blocked';
     }
@@ -337,11 +336,13 @@ async function executeManualTask(deps, task, options) {
                 break;
             }
 
-            const result = await task.processBatch(batch);
+            const result = await task.processBatch(batch, options.notify);
             updateManualOutcome({ outcome, result });
             consecutiveFailures = result.success && result.committed ? 0 : consecutiveFailures;
 
-            if ((await normalizeAfterCommittedResult(outcome, result)) === 'failed') {
+            if (
+                (await normalizeAfterCommittedResult(outcome, result, options.notify)) === 'failed'
+            ) {
                 break;
             }
 
@@ -368,12 +369,12 @@ async function executeManualTask(deps, task, options) {
     }
 }
 
-async function normalizeAfterCommittedResult(outcome, result) {
+async function normalizeAfterCommittedResult(outcome, result, notify) {
     if (!result.success || !result.committed || outcome.blocked) {
         return 'skipped';
     }
 
-    const normalized = await normalizePromotions();
+    const normalized = await normalizePromotions(notify);
     if (normalized === 'blocked') {
         outcome.blocked = true;
     } else if (normalized === 'failed') {
@@ -416,10 +417,10 @@ function shouldStopManualLoop(outcome, result, signal, queue) {
     return false;
 }
 
-async function processForceBatch(plan) {
+async function processForceBatch(plan, notify) {
     trace('Processing force batch via elastic engine');
     const beforeIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    const success = await commitRoutePlan(plan, { catchExceptions: true });
+    const success = await commitRoutePlan(plan, { catchExceptions: true }, notify);
     const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     return {
         success,
@@ -427,8 +428,8 @@ async function processForceBatch(plan) {
     };
 }
 
-async function processSlopBatch(plan) {
-    const success = await commitRoutePlan(plan, { catchExceptions: true });
+async function processSlopBatch(plan, notify) {
+    const success = await commitRoutePlan(plan, { catchExceptions: true }, notify);
     const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     return {
         success,
@@ -445,7 +446,7 @@ async function getForceRoutePlan(prepared) {
     return plan;
 }
 
-async function normalizeManualMemory(outcome) {
+async function normalizeManualMemory(outcome, notify) {
     if (outcome.cancelled || outcome.blocked || outcome.completed === 0 || outcome.failed > 0) {
         return 'skipped';
     }
@@ -453,14 +454,14 @@ async function normalizeManualMemory(outcome) {
         info('Manual promotion deferred; prompt mutation guard is active.');
         return 'blocked';
     }
-    return await normalizePromotions();
+    return await normalizePromotions(notify);
 }
 
-async function normalizePromotions() {
+async function normalizePromotions(notify) {
     return await drainPromotionOverflow({
         maxFailures: 3,
         isBlockedAfter: shouldStopPromptWork,
-        notify: getNotifyAdapter(),
+        notify,
     });
 }
 

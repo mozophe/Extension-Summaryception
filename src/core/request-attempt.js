@@ -26,7 +26,6 @@ import {
 import { countTextTokens, formatTokenCount, formatTokenValue } from './token-count.js';
 import { insertBeforeTrigger, EXECUTION_TRIGGER_L0 } from '../foundation/prompt-parts.js';
 import { describePromptLogCall } from './request-attempt-log.js';
-import { getNotifyAdapter } from './notify.js';
 
 /**
  * Append repair feedback before the L0 execution trigger.
@@ -45,6 +44,16 @@ export function appendRepairFeedback(prompt, repairFeedback) {
 /**
  * Run one summarizer request attempt through guard, send, and result processing.
  * @param {object} params - Attempt inputs for the route state machine.
+ * @param {ExtensionSettings} params.settings - Active settings.
+ * @param {string} params.systemPrompt - Fully substituted system prompt.
+ * @param {string} params.prompt - Fully substituted user prompt.
+ * @param {AbortSignal} params.signal - Abort signal for the request.
+ * @param {number} params.attempt - Zero-based attempt index.
+ * @param {import('./summarizer-usage.js').SummarizerCallMetadata} params.metadata - Call metadata for usage logs.
+ * @param {import('./notify.js').NotifyAdapter} params.notify - Notify adapter for mid-run notices.
+ * @param {string} params.routeLabel - Route label for structured logs.
+ * @param {number} params.maxRetries - Retry budget for this route.
+ * @param {number} params.timeoutMs - Attempt timeout in milliseconds.
  * @returns {Promise<object>} Attempt outcome with status, result, error, and retry flags.
  */
 export async function runSingleAttempt(params) {
@@ -63,7 +72,7 @@ export async function runSingleAttempt(params) {
     return await processAttemptResult({ ...params, rawResult });
 }
 
-async function getEasyContextGuardFailure({ settings, systemPrompt, prompt, metadata }) {
+async function getEasyContextGuardFailure({ settings, systemPrompt, prompt, metadata, notify }) {
     const guard = await checkEasyContextGuard(settings, systemPrompt, prompt, metadata);
     if (guard.ok) {
         return null;
@@ -71,7 +80,7 @@ async function getEasyContextGuardFailure({ settings, systemPrompt, prompt, meta
 
     const guardError = buildEasyContextGuardError(guard, metadata);
     warn(guardError.message);
-    getNotifyAdapter().transient({
+    notify.transient({
         kind: NOTIFY_EVENTS.EASY_GUARD_BLOCKED,
         label: guard.label,
         tokens: guard.tokens.count,
@@ -100,8 +109,15 @@ async function sendAttemptRequest({ settings, systemPrompt, prompt, signal, meta
     }
 }
 
-async function processAttemptResult({ rawResult, settings, systemPrompt, prompt, metadata }) {
-    const processed = await processSummarizerResponse(rawResult, settings, metadata);
+async function processAttemptResult({
+    rawResult,
+    settings,
+    systemPrompt,
+    prompt,
+    metadata,
+    notify,
+}) {
+    const processed = await processSummarizerResponse(rawResult, settings, metadata, notify);
     if (processed.status !== 'success') {
         logProcessedAttemptFailure(processed.status);
         return {
@@ -288,29 +304,27 @@ function createAttemptAbortContext(userSignal, timeoutMs) {
  * @param {(line: string) => void} p.log - Structured log emitter (warn/info)
  * @param {string} p.logLine - Structured log message
  * @param {import('./notify.js').NotifyTransientEvent} p.event - Structured notify event
- * @param {AbortSignal} p.signal
+ * @param {AbortSignal} p.signal - Signal that cuts the wait short.
+ * @param {import('./notify.js').NotifyAdapter} p.notify - Notify adapter threaded from the request series
  * @returns {Promise<void>}
  */
-async function emitRetryEventAndWait({ delay, log, logLine, event, signal }) {
+async function emitRetryEventAndWait({ delay, log, logLine, event, signal, notify }) {
     log(logLine);
-    getNotifyAdapter().transient(event);
+    notify.transient(event);
     await sleepOrAbort(delay, signal);
 }
 
 /**
  * Notify the user about a retry attempt and wait the computed delay.
- * @param {Error} lastError - The error that triggered the retry
- * @param {number} attempt - Zero-based attempt index
- * @param {AbortSignal} signal
- * @param {number} maxRetries - Maximum retry count for this route
+ * @param {object} p
+ * @param {Error & { status?: number, response?: { status?: number } }} p.lastError - The error that triggered the retry.
+ * @param {number} p.attempt - Zero-based attempt index.
+ * @param {AbortSignal} p.signal - Signal that cuts the wait short.
+ * @param {number} p.maxRetries - Maximum retry count for this route.
+ * @param {import('./notify.js').NotifyAdapter} p.notify - Notify adapter threaded from the request series.
  * @returns {Promise<void>}
  */
-export async function notifyRetryAndWait(
-    /** @type {Error & { status?: number, response?: { status?: number } }} */ lastError,
-    attempt,
-    signal,
-    maxRetries,
-) {
+export async function notifyRetryAndWait({ lastError, attempt, signal, maxRetries, notify }) {
     const delay = computeRetryDelay(lastError, attempt);
     const delaySec = (delay / 1000).toFixed(1);
     const status = lastError?.status || lastError?.response?.status || '?';
@@ -325,6 +339,7 @@ export async function notifyRetryAndWait(
             maxRetries,
         },
         signal,
+        notify,
     });
 }
 
@@ -333,9 +348,10 @@ export async function notifyRetryAndWait(
  * @param {object} p
  * @param {string} p.healthBucket
  * @param {AbortSignal} p.signal
+ * @param {import('./notify.js').NotifyAdapter} p.notify - Notify adapter threaded from the request series
  * @returns {Promise<void>}
  */
-export async function notifyRouteCycleFailedAndWait({ healthBucket, signal }) {
+export async function notifyRouteCycleFailedAndWait({ healthBucket, signal, notify }) {
     const delay = computeRetryDelay(new Error('Both routes failed'), ROUTE_CYCLE_RETRY_ATTEMPT);
     const delaySec = (delay / 1000).toFixed(1);
     await emitRetryEventAndWait({
@@ -349,6 +365,7 @@ export async function notifyRouteCycleFailedAndWait({ healthBucket, signal }) {
             delayMs: delay,
         },
         signal,
+        notify,
     });
 }
 

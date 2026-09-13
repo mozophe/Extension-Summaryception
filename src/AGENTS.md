@@ -30,7 +30,7 @@
 - Resolve identifiers to current chat indexes only for host commands and planning.
 - Do not infer ownership from old array positions.
 - Hide summarized turns through the host command.
-- Ghosting receives the notify adapter through its options. Core never reads the global adapter (ADR-0004).
+- Ghosting receives the notify adapter through its options. The notify adapter enters core only through explicit arguments; entry wiring creates and distributes the instance.
 - Unhide only store-owned messages.
 - Clear unhides the chat and removes extension-owned chat data.
 - Standard placements use the host extension prompt.

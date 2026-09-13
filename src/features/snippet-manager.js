@@ -110,9 +110,10 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
  * Regenerate one Layer 0 snippet from its source turns.
  * @param {number} layerIndex
  * @param {number} snippetIndex
+ * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices; absent runs stay silent.
  * @returns {Promise<RegenerateSnippetResult>}
  */
-export async function regenerateSnippetAt(layerIndex, snippetIndex) {
+export async function regenerateSnippetAt(layerIndex, snippetIndex, notify) {
     const target = resolveRegenerationTarget(getChatStore(), getChat(), layerIndex, snippetIndex);
     if (target.status !== 'ready') {
         return target;
@@ -121,7 +122,7 @@ export async function regenerateSnippetAt(layerIndex, snippetIndex) {
     setSummarizing(true);
     try {
         return await withUsageRun('snippet regeneration', async () => {
-            return await regenerateSnippetWithTarget(target);
+            return await regenerateSnippetWithTarget(target, notify);
         });
     } finally {
         setSummarizing(false);
@@ -131,9 +132,10 @@ export async function regenerateSnippetAt(layerIndex, snippetIndex) {
 /**
  * Run the summarizer for a validated regeneration target.
  * @param {RegenerationTarget} target
+ * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices.
  * @returns {Promise<RegenerationRunResult>}
  */
-async function regenerateSnippetWithTarget(target) {
+async function regenerateSnippetWithTarget(target, notify) {
     const chat = getChat();
     const [rangeStart, rangeEnd] = target.range;
     const passage = await buildPassageFromRangeWithStats(chat, rangeStart, rangeEnd);
@@ -141,11 +143,16 @@ async function regenerateSnippetWithTarget(target) {
         return { status: 'empty-source' };
     }
 
-    const outcome = await callSummarizer(passage.text, target.context, {
-        kind: 'regenerate',
-        sourceRange: target.range,
-        regexStats: passage.stats,
-    });
+    const outcome = await callSummarizer(
+        passage.text,
+        target.context,
+        {
+            kind: 'regenerate',
+            sourceRange: target.range,
+            regexStats: passage.stats,
+        },
+        notify,
+    );
 
     if (outcome.status !== 'completed') {
         return { status: outcome.status };

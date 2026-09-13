@@ -5,7 +5,6 @@ vi.mock('../src/core/summarizer-request.js', () => ({ callSummarizer }));
 
 import { maybePromoteLayer } from '../src/core/summarizer-promotion.js';
 import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import {
     installBrowserRuntimeStub,
     installSummaryContext,
@@ -22,7 +21,6 @@ describe('summarizer promotion notify events', () => {
     afterEach(() => {
         vi.restoreAllMocks();
         callSummarizer.mockReset();
-        setNotifyAdapter(null);
         delete globalThis.toastr;
     });
 
@@ -44,7 +42,6 @@ describe('summarizer promotion notify events', () => {
     it('emits one structured promotion-started event and never calls toastr', async () => {
         const { toastr } = installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installOverflowingStore();
         callSummarizer.mockResolvedValue({ status: 'failed' });
 
@@ -63,7 +60,6 @@ describe('summarizer promotion notify events', () => {
     });
 
     it('stays silent without an adapter', async () => {
-        setNotifyAdapter(null);
         installOverflowingStore();
         callSummarizer.mockResolvedValue({ status: 'failed' });
 

@@ -12,8 +12,7 @@ import { LOG_PREFIX } from './src/foundation/constants.js';
 import { getContext } from './src/foundation/context.js';
 import { getSettings } from './src/foundation/state.js';
 import { initSnippetBrowser } from './src/entry/ui-snippets.js';
-import { setInjectionUpdater, setUiUpdater } from './src/core/summarizer.js';
-import { setNotifyAdapter } from './src/core/notify.js';
+import { setInjectionUpdater, setNotify, setUiUpdater } from './src/core/summarizer.js';
 import { createToastrNotifyAdapter } from './src/entry/ui-dialogs.js';
 import { setUiRefresher } from './src/features/persist.js';
 import { updateUI } from './src/entry/ui.js';
@@ -48,9 +47,10 @@ import { registerSlashCommands } from './src/entry/commands.js';
     getSettings();
     setUiUpdater(updateUI);
     setInjectionUpdater(updateInjection, reassertInjectionSnapshot);
-    setNotifyAdapter(createToastrNotifyAdapter());
+    const notify = createToastrNotifyAdapter();
+    setNotify(notify);
     setUiRefresher(updateUI);
-    initSnippetBrowser(updateUI);
+    initSnippetBrowser(updateUI, notify);
 
     const html = await renderExtensionTemplateAsync(
         'third-party/Extension-Summaryception',
@@ -60,7 +60,7 @@ import { registerSlashCommands } from './src/entry/commands.js';
     $('#extensions_settings2').append(html);
 
     initSettingsHelp();
-    bindUIEvents();
+    bindUIEvents(notify);
     bindPromptFreezeRecoveryEvents();
     initSettingsTabs();
     initConnectionUI();

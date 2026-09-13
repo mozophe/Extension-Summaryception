@@ -30,7 +30,6 @@ import {
     getChatStore,
 } from '../foundation/state.js';
 import { ghostMessagesInRange, unghostAllMessages } from '../core/ghosting.js';
-import { getNotifyAdapter } from '../core/notify.js';
 import {
     abortSummarization,
     getIsSummarizing,
@@ -67,6 +66,7 @@ import {
     syncRoleMaskModeControl,
 } from './ui-bind.js';
 
+let notifyAdapter = null;
 // UI-specific metadata for each shared prompt pair, keyed by presetKey. The
 // (presetKey, settingKey) pairs themselves live in PROMPT_SETTING_KEYS.
 const PROMPT_FIELD_UI = {
@@ -123,9 +123,11 @@ export function saveAndRefreshUi() {
 
 /**
  * Bind document event handlers for the Summaryception UI.
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
  * @returns {void}
  */
-export function bindUIEvents() {
+export function bindUIEvents(notify) {
+    notifyAdapter = notify;
     bindModeHandlers();
     bindToggleHandlers();
     bindSliderHandlers();
@@ -403,6 +405,7 @@ async function runManualSummarization($button, idleHtml, { run, report }) {
     let progressToast = null;
     const options = {
         signal: controller.signal,
+        notify: notifyAdapter,
         onStart: (progress) => {
             progressToast = createManualProgressToast({
                 ...progress,
@@ -567,7 +570,7 @@ function triggerImport() {
             }
 
             const store = getChatStore();
-            await unghostAllMessages({ notify: getNotifyAdapter() });
+            await unghostAllMessages({ notify: notifyAdapter });
             store.layers = data.layers;
             store.ghostedMessageIds = data.ghostedMessageIds;
             bumpSummaryStoreMutationEpoch(store);
@@ -575,7 +578,7 @@ function triggerImport() {
             for (const [start, end] of rangesFromSortedIndices(indices)) {
                 await ghostMessagesInRange(start, end, {
                     showProgress: true,
-                    notify: getNotifyAdapter(),
+                    notify: notifyAdapter,
                 });
             }
 

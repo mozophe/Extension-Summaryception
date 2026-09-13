@@ -11,15 +11,18 @@ import { showBusySummaryToast } from './ui-dialogs.js';
 import { ensureChild } from './ui-dom.js';
 
 let uiRefresher = null;
+let notifyAdapter = null;
 
 /**
  * Register the callback used to re-render the full UI after snippet mutations.
  * Registered by index.js to avoid a circular import with ui.js.
  * @param {() => void} callback
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for regeneration notices.
  * @returns {void}
  */
-export function initSnippetBrowser(callback) {
+export function initSnippetBrowser(callback, notify) {
     uiRefresher = callback;
+    notifyAdapter = notify;
 }
 
 function refreshUI() {
@@ -434,7 +437,11 @@ function handleRegenerationTargetStatus(target) {
 async function runSnippetRegeneration(btn, position) {
     btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
     try {
-        const result = await regenerateSnippetAt(position.layerIdx, position.snippetIdx);
+        const result = await regenerateSnippetAt(
+            position.layerIdx,
+            position.snippetIdx,
+            notifyAdapter,
+        );
         handleRegenerationResult(result);
     } finally {
         btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-rotate-right');

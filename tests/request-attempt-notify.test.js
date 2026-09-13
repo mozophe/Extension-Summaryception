@@ -11,7 +11,6 @@ vi.mock('../src/core/connectionutil.js', async (importOriginal) => {
 
 import { NOTIFY_EVENTS, UI_MODES } from '../src/foundation/constants.js';
 import { RETRY_CONFIG } from '../src/foundation/retry.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import {
     notifyRetryAndWait,
     notifyRouteCycleFailedAndWait,
@@ -31,7 +30,6 @@ import {
 describe('request attempt notify events', () => {
     afterEach(() => {
         vi.useRealTimers();
-        setNotifyAdapter(null);
         vi.restoreAllMocks();
         for (const mock of Object.values(connectionMocks)) {
             mock.mockReset();
@@ -58,8 +56,8 @@ describe('request attempt notify events', () => {
     it('emits a structured guard event when the Easy context guard blocks', async () => {
         const { toastr } = installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const params = makeAttemptParams({
+            notify: recorder,
             settings: makeSummarySettings({ uiMode: UI_MODES.EASY, advancedModelContext: 10 }),
             prompt: 'x'.repeat(4000),
         });
@@ -83,12 +81,17 @@ describe('request attempt notify events', () => {
     it('emits the retry event before waiting and abort cuts the wait short', async () => {
         installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         vi.useFakeTimers();
         const controller = new AbortController();
         const error = Object.assign(new Error('rate limited'), { retryAfter: 60, status: 429 });
 
-        const waiting = notifyRetryAndWait(error, 0, controller.signal, RETRY_CONFIG.maxRetries);
+        const waiting = notifyRetryAndWait({
+            lastError: error,
+            attempt: 0,
+            signal: controller.signal,
+            maxRetries: RETRY_CONFIG.maxRetries,
+            notify: recorder,
+        });
 
         expect(recorder.events).toEqual([
             {
@@ -109,13 +112,13 @@ describe('request attempt notify events', () => {
     it('emits the route-cycle event and abort cuts that wait short too', async () => {
         installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         vi.useFakeTimers();
         const controller = new AbortController();
 
         const waiting = notifyRouteCycleFailedAndWait({
             healthBucket: 'layer0',
             signal: controller.signal,
+            notify: recorder,
         });
 
         const [event] = recorder.events;

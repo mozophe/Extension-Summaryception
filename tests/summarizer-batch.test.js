@@ -7,7 +7,6 @@ import {
     summarizeAtomicLayer0Partitions,
     summarizeBatchFromTurns,
 } from '../src/core/summarizer-batch.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import {
     installSummaryContext,
     makeMessage,
@@ -30,7 +29,6 @@ describe('Layer 0 deferred cleanup commit', () => {
 
     it('notifies one batch progress lifecycle and closes it with success', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const chat = buildChat();
         installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
         let progressOpenAtRequest = false;
@@ -60,7 +58,6 @@ describe('Layer 0 deferred cleanup commit', () => {
 
     it('closes the batch progress with an aborted terminal when the request is aborted', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const chat = buildChat();
         installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
         callSummarizer.mockResolvedValue({ status: 'aborted' });
@@ -81,7 +78,6 @@ describe('Layer 0 deferred cleanup commit', () => {
         'closes the batch progress with a warning terminal when the request is %s',
         async (status) => {
             const recorder = makeNotifyRecorder();
-            setNotifyAdapter(recorder);
             const chat = buildChat();
             installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
             callSummarizer.mockResolvedValue({ status });
@@ -98,7 +94,6 @@ describe('Layer 0 deferred cleanup commit', () => {
 
     it('emits no progress events when the passage never validates', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const chat = [
             makeMessage({ isUser: true, scId: 'user-id', mes: '' }),
             makeMessage({ scId: 'assistant-id', mes: '' }),
@@ -206,7 +201,6 @@ describe('Layer 0 atomic multi-partition progress', () => {
 
     it('closes the shared progress exactly once when a later partition fails validation', async () => {
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const chat = [
             makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
             makeMessage({ scId: 'assistant-id', mes: 'First assistant scene.' }),

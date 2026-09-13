@@ -1,3 +1,4 @@
+import { silentAdapter } from './notify.js';
 import { abortCurrentSummarizerRequest } from './summarizer-request.js';
 import { SummarizerQueue } from './summarizer-queue.js';
 import { withUsageRun } from './summarizer-usage.js';
@@ -23,9 +24,12 @@ export { recoverStalePromptFreeze, resetPromptMutationGuard } from './summarizer
 /** @typedef {import('./summarizer-engine.js').ManualRunOutcome} ManualRunOutcome */
 
 let uiUpdater = null;
+/** @type {import('./notify.js').NotifyAdapter} */
+let notifyAdapter = silentAdapter;
 
 const summarizerQueue = new SummarizerQueue({
-    drainOneCycle: (queue) => runElasticAutoCycle(queue, { refreshUi: refreshUI }),
+    drainOneCycle: (queue) =>
+        runElasticAutoCycle(queue, { refreshUi: refreshUI, notify: notifyAdapter }),
     abort: abortCurrentSummarizerRequest,
     refreshUi: refreshUI,
     withUsageRun,
@@ -54,6 +58,15 @@ export function hasFrozenPromptMutations() {
  */
 export function setUiUpdater(callback) {
     uiUpdater = callback;
+}
+
+/**
+ * Register the notify adapter used by automatic summarization cycles.
+ * @param {import('./notify.js').NotifyAdapter | null | undefined} adapter - Toastr-backed adapter from entry, or a falsy value to reset to silent.
+ * @returns {void}
+ */
+export function setNotify(adapter) {
+    notifyAdapter = adapter || silentAdapter;
 }
 
 /**

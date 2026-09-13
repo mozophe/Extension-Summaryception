@@ -304,13 +304,18 @@ async function runLayer0Summarization({
 
     let outcome;
     try {
-        outcome = await callSummarizer(snapshot.passageText, snapshot.contextText, {
-            kind: 'layer0',
-            sourceRange: snapshot.sourceRange,
-            regexStats: snapshot.passageStats,
-            sourceState: snapshot.sourceState,
-            ...metadata,
-        });
+        outcome = await callSummarizer(
+            snapshot.passageText,
+            snapshot.contextText,
+            {
+                kind: 'layer0',
+                sourceRange: snapshot.sourceRange,
+                regexStats: snapshot.passageStats,
+                sourceState: snapshot.sourceState,
+                ...metadata,
+            },
+            notify,
+        );
     } catch (err) {
         failClosed();
         throw err;
