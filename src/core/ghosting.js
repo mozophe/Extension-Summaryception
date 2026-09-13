@@ -1,5 +1,4 @@
 import { GHOST_PROGRESS } from '../foundation/constants.js';
-import { getNotifyAdapter } from './notify.js';
 import { executeSlashCommandsWithOptions, getChat } from '../foundation/context.js';
 import {
     ensureMessageScId,
@@ -18,6 +17,7 @@ import { canStartPromptMutation, queuePromptEffect, runPromptEffect } from './su
  * @property {boolean} [showProgress] - Open a notify progress handle for manual work.
  * @property {string} [kind] - Prompt-effect queue label.
  * @property {'immediate' | 'deferred'} [chatSave] - Chat-file persistence mode.
+ * @property {import('./notify.js').NotifyAdapter} [notify] - Adapter for progress events; when absent the work runs silent.
  */
 
 /**
@@ -49,9 +49,10 @@ export async function ghostMessagesInRange(startIdx, endIdx, options = {}) {
 
 /**
  * Unghost all messages that Summaryception ghosted.
+ * @param {GhostRangeOptions} [options] - Carries the notify adapter; without one the work runs silent.
  * @returns {Promise<void>}
  */
-export async function unghostAllMessages() {
+export async function unghostAllMessages(options = {}) {
     const chat = getChat();
     const store = getChatStore();
     const ranges = getOwnedGhostRanges(chat, store);
@@ -61,10 +62,10 @@ export async function unghostAllMessages() {
         return;
     }
 
-    const notify = getNotifyAdapter();
-    const progress = notify.progress({ label: GHOST_PROGRESS.UNHIDE, total });
-    await unhideRanges({ chat, store, ranges, progress });
-    notify.clear(progress);
+    const notify = options.notify;
+    const progress = notify ? notify.progress({ label: GHOST_PROGRESS.UNHIDE, total }) : null;
+    await unhideRanges({ chat, store, ranges, progress, notify });
+    notify?.clear(progress, { kind: GHOST_PROGRESS.UNHIDDEN });
     info(`Unghosted ${total} messages (only Summaryception-hidden ones)`);
 }
 
@@ -72,9 +73,9 @@ export async function unghostAllMessages() {
  * Unghost Summaryception-owned messages in a specific chat range.
  * @param {number} startIdx
  * @param {number} endIdx
- * @returns {Promise<void>}
+ * @param {GhostRangeOptions} [options] - Carries the notify adapter
  */
-export async function unghostMessagesInRange(startIdx, endIdx) {
+export async function unghostMessagesInRange(startIdx, endIdx, options = {}) {
     const chat = getChat();
     const store = getChatStore();
     const range = normalizeRange(startIdx, endIdx, chat.length);
@@ -84,7 +85,7 @@ export async function unghostMessagesInRange(startIdx, endIdx) {
     }
 
     const ranges = getOwnedGhostRanges(chat, store, range);
-    await unhideRanges({ chat, store, ranges });
+    await unhideRanges({ chat, store, ranges, notify: options.notify });
 }
 
 /**
@@ -106,9 +107,9 @@ async function ghostMessagesInRangeEffect(startIdx, endIdx, epoch, options) {
     const store = getChatStore();
     const ranges = collectHideRanges(chat, store, range);
     const total = countRangeMessages(ranges);
-    const notify = getNotifyAdapter();
+    const notify = options.notify;
     const progress =
-        options.showProgress && total > 0
+        options.showProgress && total > 0 && notify
             ? notify.progress({ label: GHOST_PROGRESS.HIDE, total })
             : null;
     let processed = 0;
@@ -131,12 +132,12 @@ async function ghostMessagesInRangeEffect(startIdx, endIdx, epoch, options) {
         }
 
         processed += getRangeSize(hideRange);
-        if (progress) {
+        if (notify && progress) {
             notify.update(progress, { processed });
         }
     }
 
-    if (progress) {
+    if (notify && progress) {
         notify.clear(progress);
     }
     return true;
@@ -176,7 +177,7 @@ async function applyHideRange({ chat, store, range, epoch, chatSave }) {
  */
 function queueRemainingGhosting(nextStart, endIdx, options, progress) {
     if (progress) {
-        getNotifyAdapter().clear(progress);
+        options.notify?.clear(progress);
     }
     queueGhostRange(nextStart, endIdx, options);
     return false;
@@ -316,16 +317,18 @@ export function collectGhostedMessageIndices(chat, store, limit) {
  * @param {SummaryceptionStore} p.store
  * @param {Array<[number, number]>} p.ranges
  * @param {unknown} [p.progress]
+ * @param {import('./notify.js').NotifyAdapter} [p.notify] - Adapter for progress updates
  * @returns {Promise<void>}
  */
-async function unhideRanges({ chat, store, ranges, progress = null }) {
-    const notify = getNotifyAdapter();
+async function unhideRanges({ chat, store, ranges, progress = null, notify }) {
     let processed = 0;
     for (const range of ranges) {
         await executeSlashRangeCommand('unhide', range, warn);
         clearGhostedRange(chat, store, range);
         processed += getRangeSize(range);
-        notify.update(progress, { processed });
+        if (notify && progress) {
+            notify.update(progress, { processed });
+        }
         await persistChatState();
     }
 }

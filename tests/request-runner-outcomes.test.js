@@ -102,14 +102,14 @@ describe('RequestRunner.run outcomes', () => {
 
         const outcome = await new RequestRunner().run(makeRequest());
 
-        expect(outcome).toEqual({ status: 'failed' });
+        expect(outcome).toEqual({ status: 'failed', attempts: 1 });
         expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
         expect(recorder.events).toEqual([
             {
                 type: 'transient',
                 kind: 'run-failed',
                 retriesExhausted: false,
-                maxRetries: RETRY_CONFIG.maxRetries,
+                attempts: 1,
                 status: null,
             },
         ]);
@@ -129,14 +129,14 @@ describe('RequestRunner.run outcomes', () => {
 
         const outcome = await new RequestRunner().run(makeRequest());
 
-        expect(outcome).toEqual({ status: 'failed' });
+        expect(outcome).toEqual({ status: 'failed', attempts: RETRY_CONFIG.maxRetries + 1 });
         expect(attemptMocks.runSingleAttempt).toHaveBeenCalledTimes(RETRY_CONFIG.maxRetries + 1);
         expect(recorder.events).toEqual([
             {
                 type: 'transient',
                 kind: 'run-failed',
                 retriesExhausted: true,
-                maxRetries: RETRY_CONFIG.maxRetries,
+                attempts: RETRY_CONFIG.maxRetries + 1,
                 status: null,
             },
         ]);

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import { repairMissingGhostingForSummaries } from '../src/core/ghosting-reconcile.js';
 import { ghostMessagesInRange, unghostAllMessages } from '../src/core/ghosting.js';
-import { setNotifyAdapter } from '../src/core/notify.js';
 import { resetCommitStateForTests } from '../src/core/summarizer-commit.js';
 import {
     makeMessage,
@@ -136,10 +135,9 @@ describe('ghosting notify adapter events', () => {
     it('emits structured hide progress events for manual range ghosting', async () => {
         resetCommitStateForTests();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installSummaryContext({ chat: makeMessages(4) });
 
-        await ghostMessagesInRange(0, 3, { showProgress: true });
+        await ghostMessagesInRange(0, 3, { showProgress: true, notify: recorder });
 
         const progress = recorder.events.filter((event) => event.type === 'progress');
         expect(progress).toHaveLength(1);
@@ -153,13 +151,12 @@ describe('ghosting notify adapter events', () => {
         expect(clears[0].handle).toBe(progress[0].handle);
     });
 
-    it('emits no progress events for background ghosting', async () => {
+    it('opens no progress handle for background ghosting even with an injected adapter', async () => {
         resetCommitStateForTests();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         installSummaryContext({ chat: makeMessages(4) });
 
-        await ghostMessagesInRange(0, 3);
+        await ghostMessagesInRange(0, 3, { notify: recorder });
 
         expect(recorder.events.filter((event) => event.type === 'progress')).toHaveLength(0);
         expect(recorder.events.filter((event) => event.type === 'update')).toHaveLength(0);
@@ -169,7 +166,6 @@ describe('ghosting notify adapter events', () => {
     it('emits unhide progress events per range without core-side throttling', async () => {
         resetCommitStateForTests();
         const recorder = makeNotifyRecorder();
-        setNotifyAdapter(recorder);
         const chat = [
             makeMessage({ scId: 'message-0', isHidden: true }),
             makeMessage({ scId: 'message-1' }),
@@ -182,7 +178,7 @@ describe('ghosting notify adapter events', () => {
             },
         });
 
-        await unghostAllMessages();
+        await unghostAllMessages({ notify: recorder });
 
         const progress = recorder.events.filter((event) => event.type === 'progress');
         expect(progress).toHaveLength(1);
@@ -192,5 +188,7 @@ describe('ghosting notify adapter events', () => {
         expect(updates.map((event) => event.processed)).toEqual([1, 2]);
         const clears = recorder.events.filter((event) => event.type === 'clear');
         expect(clears).toHaveLength(1);
+        expect(clears[0].handle).toBe(progress[0].handle);
+        expect(clears[0].event).toEqual({ kind: 'ghost-unhidden' });
     });
 });

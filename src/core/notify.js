@@ -22,7 +22,8 @@
  * @typedef {object} NotifyTransientEvent
  * @property {string} kind - Stable event kind from NOTIFY_EVENTS.
  * @property {boolean} [retriesExhausted] - Whether retries ran out (run-failed).
- * @property {number} [maxRetries] - Route retry budget (run-failed, retry-wait).
+ * @property {number} [maxRetries] - Route retry budget (retry-wait).
+ * @property {number} [attempts] - Attempts actually made (run-failed).
  * @property {number | null} [status] - HTTP status, when known (run-failed).
  * @property {string} [label] - Stable call label (easy-guard-blocked).
  * @property {number} [tokens] - Request token count (easy-guard-blocked).

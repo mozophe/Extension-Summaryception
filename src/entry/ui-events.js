@@ -30,6 +30,7 @@ import {
     getChatStore,
 } from '../foundation/state.js';
 import { ghostMessagesInRange, unghostAllMessages } from '../core/ghosting.js';
+import { getNotifyAdapter } from '../core/notify.js';
 import {
     abortSummarization,
     getIsSummarizing,
@@ -566,13 +567,16 @@ function triggerImport() {
             }
 
             const store = getChatStore();
-            await unghostAllMessages();
+            await unghostAllMessages({ notify: getNotifyAdapter() });
             store.layers = data.layers;
             store.ghostedMessageIds = data.ghostedMessageIds;
             bumpSummaryStoreMutationEpoch(store);
             const indices = resolveScIdsToIndices(getChat(), store.ghostedMessageIds);
             for (const [start, end] of rangesFromSortedIndices(indices)) {
-                await ghostMessagesInRange(start, end, { showProgress: true });
+                await ghostMessagesInRange(start, end, {
+                    showProgress: true,
+                    notify: getNotifyAdapter(),
+                });
             }
 
             await persistAndRefresh({ ui: true });

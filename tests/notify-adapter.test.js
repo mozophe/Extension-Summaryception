@@ -164,7 +164,7 @@ describe('toastr notify adapter mapping', () => {
         adapter.transient({
             kind: 'run-failed',
             retriesExhausted: true,
-            maxRetries: 3,
+            attempts: 3,
             status: 500,
         });
 

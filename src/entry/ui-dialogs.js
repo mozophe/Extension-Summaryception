@@ -251,8 +251,12 @@ const DEFAULT_PROGRESS_VIEW = { subtitle: 'Working', text: 'Working', everyN: 1 
 const NOTIFY_TERMINAL_VIEWS = {
     [BATCH_PROGRESS.UPDATED]: () =>
         toastr.success('Conversation memory updated.', TOAST_TITLE, { timeOut: 3000 }),
+    [BATCH_PROGRESS.ABORTED]: () =>
+        toastr.warning('Conversation memory update stopped.', TOAST_TITLE, { timeOut: 3000 }),
     [BATCH_PROGRESS.FAILED]: () =>
         toastr.warning('Conversation memory was not updated.', TOAST_TITLE, { timeOut: 3000 }),
+    [GHOST_PROGRESS.UNHIDDEN]: () =>
+        toastr.success('Chat restored.', TOAST_TITLE, { timeOut: 3000 }),
 };
 
 /**
@@ -273,7 +277,7 @@ const NOTIFY_TRANSIENT_VIEWS = {
     [NOTIFY_EVENTS.RUN_FAILED]: (event) =>
         toastr.error(
             `Summarization failed` +
-                `${event.retriesExhausted ? ` after ${event.maxRetries} retries` : ''}` +
+                `${event.retriesExhausted ? ` after ${event.attempts} attempts` : ''}` +
                 `${event.status ? ` (${event.status})` : ''}. Batch skipped; will retry on next trigger.`,
             TOAST_TITLE,
             { timeOut: 8000 },

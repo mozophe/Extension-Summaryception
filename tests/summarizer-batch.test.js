@@ -58,7 +58,7 @@ describe('Layer 0 deferred cleanup commit', () => {
         expect(clears[0].event).toEqual({ kind: 'batch-memory-updated' });
     });
 
-    it('closes the batch progress with a warning terminal when the request yields no summary', async () => {
+    it('closes the batch progress with an aborted terminal when the request is aborted', async () => {
         const recorder = makeNotifyRecorder();
         setNotifyAdapter(recorder);
         const chat = buildChat();
@@ -74,8 +74,27 @@ describe('Layer 0 deferred cleanup commit', () => {
         const clears = recorder.events.filter((event) => event.type === 'clear');
         expect(clears).toHaveLength(1);
         expect(clears[0].handle).toBe(progress[0].handle);
-        expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
     });
+
+    it.each([['blocked'], ['failed']])(
+        'closes the batch progress with a warning terminal when the request is %s',
+        async (status) => {
+            const recorder = makeNotifyRecorder();
+            setNotifyAdapter(recorder);
+            const chat = buildChat();
+            installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+            callSummarizer.mockResolvedValue({ status });
+
+            await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toBe(
+                false,
+            );
+
+            const clears = recorder.events.filter((event) => event.type === 'clear');
+            expect(clears).toHaveLength(1);
+            expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+        },
+    );
 
     it('emits no progress events when the passage never validates', async () => {
         const recorder = makeNotifyRecorder();
@@ -220,7 +239,7 @@ describe('Layer 0 atomic multi-partition progress', () => {
         const clears = recorder.events.filter((event) => event.type === 'clear');
         expect(clears).toHaveLength(1);
         expect(clears[0].handle).toBe(progress[0].handle);
-        expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
     });
 });
 

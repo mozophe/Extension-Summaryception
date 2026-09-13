@@ -15,21 +15,27 @@ export const LOG_PREFIX = '[Summaryception]';
 export const TOAST_TITLE = 'Summaryception';
 
 /**
- * Stable progress labels emitted on the notify adapter (ADR-0004); the entry
- * adapter maps them to on-screen text. Core carries these ids, never prose.
- * @type {{ HIDE: string, UNHIDE: string }}
+ * Stable ghosting progress labels and terminal clear kinds emitted on the
+ * notify adapter (ADR-0004); the entry adapter maps them to on-screen text.
+ * Core carries these ids, never prose.
+ * @type {{ HIDE: string, UNHIDE: string, UNHIDDEN: string }}
  */
-export const GHOST_PROGRESS = { HIDE: 'ghost-hide', UNHIDE: 'ghost-unhide' };
+export const GHOST_PROGRESS = Object.freeze({
+    HIDE: 'ghost-hide',
+    UNHIDE: 'ghost-unhide',
+    UNHIDDEN: 'ghost-unhidden',
+});
 
 /**
  * Stable batch progress label and terminal clear kinds emitted on the notify
  * adapter (ADR-0004); the entry adapter maps them to on-screen text. Core
  * carries these ids, never prose.
- * @type {{ MEMORY: string, UPDATED: string, FAILED: string }}
+ * @type {{ MEMORY: string, UPDATED: string, ABORTED: string, FAILED: string }}
  */
 export const BATCH_PROGRESS = Object.freeze({
     MEMORY: 'batch-memory',
     UPDATED: 'batch-memory-updated',
+    ABORTED: 'batch-memory-aborted',
     FAILED: 'batch-memory-failed',
 });
 

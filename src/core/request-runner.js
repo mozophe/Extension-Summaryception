@@ -29,6 +29,7 @@ import {
  * @typedef {object} RunOutcome
  * @property {'completed' | 'aborted' | 'blocked' | 'failed'} status - Terminal request status.
  * @property {string} [text] - Summary text; present only when status is 'completed'.
+ * @property {number} [attempts] - Attempts actually made; present only when status is 'failed'.
  */
 
 function buildCompletedOutcome(text) {
@@ -43,8 +44,8 @@ function buildBlockedOutcome() {
     return { status: /** @type {'blocked'} */ ('blocked') };
 }
 
-function buildFailedOutcome() {
-    return { status: /** @type {'failed'} */ ('failed') };
+function buildFailedOutcome(attempts) {
+    return { status: /** @type {'failed'} */ ('failed'), attempts };
 }
 
 function buildRouteCycleResult(result) {
@@ -136,12 +137,17 @@ export class RequestRunner {
             return buildRouteCycleResult(
                 failSummarization(primary.error, {
                     retriesExhausted: false,
+                    attempts: primary.status === 'failed' ? primary.attempts : 0,
                 }),
             );
         }
 
         this.primaryRetryExhaustedBuckets.delete(series.healthBucket);
-        return buildRouteCycleResult(failSummarization(primary.error));
+        return buildRouteCycleResult(
+            failSummarization(primary.error, {
+                attempts: primary.status === 'failed' ? primary.attempts : 0,
+            }),
+        );
     }
 
     async runPrimaryAttemptSeries(series) {
@@ -170,6 +176,7 @@ export class RequestRunner {
             return buildRouteCycleResult(
                 failSummarization(primary.error, {
                     retriesExhausted: false,
+                    attempts: primary.attempts,
                 }),
             );
         }
@@ -210,12 +217,13 @@ export class RequestRunner {
      * @param {string} attemptState.routeLabel - Human-readable route label for trace logs
      * @param {number} attemptState.maxRetries - Maximum retry count for this route
      * @param {import('./summarizer-usage.js').SummarizerCallMetadata} attemptState.metadata - Route metadata
-     * @returns {Promise<{ status: 'success', result: string, error: Error, retryable: false, retriesExhausted: false, hardFailover: false } | { status: 'failed', result: string, error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean } | { status: 'aborted', result: string, error: Error, retryable: false, retriesExhausted: false, hardFailover: false }>}
+     * @returns {Promise<{ status: 'success', result: string, error: Error, retryable: false, retriesExhausted: false, hardFailover: false } | { status: 'failed', result: string, error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean, attempts: number } | { status: 'aborted', result: string, error: Error, retryable: false, retriesExhausted: false, hardFailover: false }>}
      */
     async runAttemptSeries(series, attemptState) {
         const { maxRetries } = attemptState;
         /** @type {Error & { status?: number, response?: { status?: number } }} */
         let lastError = new Error('no error');
+        let attempts = 0;
         let useRepairPrompt = false;
         let repairFeedback = '';
 
@@ -223,14 +231,13 @@ export class RequestRunner {
             if (series.signal.aborted) {
                 return buildSeriesAbortResult(lastError);
             }
-
+            attempts++;
             const attemptResult = await this.executePreparedAttempt(series, {
                 ...attemptState,
                 attempt,
                 useRepairPrompt,
                 repairFeedback,
             });
-
             if (attemptResult.success) {
                 return buildSeriesSuccessResult(attemptResult);
             }
@@ -255,6 +262,7 @@ export class RequestRunner {
                     retryable: attemptResult.shouldRetry,
                     retriesExhausted: attemptResult.shouldRetry && attempt >= maxRetries,
                     hardFailover: attemptResult.hardFailover,
+                    attempts,
                 });
             }
 
@@ -265,12 +273,12 @@ export class RequestRunner {
 
             await notifyRetryAndWait(lastError, attempt, series.signal, maxRetries);
         }
-
         return buildSeriesFailureResult({
             error: lastError,
             retryable: true,
             retriesExhausted: true,
             hardFailover: false,
+            attempts,
         });
     }
 
@@ -372,10 +380,10 @@ function buildSeriesSuccessResult(attemptResult) {
 
 /**
  * Build the failure outcome of one route's attempt series.
- * @param {{ error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean }} fields
- * @returns {{ status: 'failed', result: string, error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean }}
+ * @param {{ error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean, attempts: number }} fields
+ * @returns {{ status: 'failed', result: string, error: Error, retryable: boolean, retriesExhausted: boolean, hardFailover: boolean, attempts: number }}
  */
-function buildSeriesFailureResult({ error, retryable, retriesExhausted, hardFailover }) {
+function buildSeriesFailureResult({ error, retryable, retriesExhausted, hardFailover, attempts }) {
     return {
         status: /** @type {'failed'} */ ('failed'),
         result: '',
@@ -383,6 +391,7 @@ function buildSeriesFailureResult({ error, retryable, retriesExhausted, hardFail
         retryable,
         retriesExhausted,
         hardFailover,
+        attempts,
     };
 }
 
@@ -443,10 +452,10 @@ function abortRun() {
  * Emit the terminal failure event and return the outcome. The guard-block
  * branch emits nothing: the attempt layer already emitted the guard event.
  * @param {SummarizerFailureError} lastError
- * @param {{ retriesExhausted?: boolean }} [options]
+ * @param {{ retriesExhausted?: boolean, attempts?: number }} [options]
  * @returns {RunOutcome} The blocked or failed outcome
  */
-function failSummarization(lastError, { retriesExhausted = true } = {}) {
+function failSummarization(lastError, { retriesExhausted = true, attempts = 0 } = {}) {
     if (lastError?.easyContextGuard) {
         logError('Summarization blocked by Easy context guard:', lastError);
         trace('<<< EXITING callSummarizer WITH EASY CONTEXT GUARD');
@@ -454,14 +463,14 @@ function failSummarization(lastError, { retriesExhausted = true } = {}) {
     }
 
     const status = lastError?.status || lastError?.response?.status || '';
-    const retryText = retriesExhausted ? ` after ${RETRY_CONFIG.maxRetries} retries` : '';
+    const retryText = retriesExhausted ? ` after ${attempts} attempts` : '';
     logError(`Summarization failed${retryText}:`, lastError);
     getNotifyAdapter().transient({
         kind: NOTIFY_EVENTS.RUN_FAILED,
         retriesExhausted,
-        maxRetries: RETRY_CONFIG.maxRetries,
+        attempts,
         status: status || null,
     });
     trace('<<< EXITING callSummarizer WITH FAILURE');
-    return buildFailedOutcome();
+    return buildFailedOutcome(attempts);
 }

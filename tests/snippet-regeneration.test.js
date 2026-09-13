@@ -48,11 +48,21 @@ describe('snippet regeneration request outcomes', () => {
         expect(store.mutationEpoch).toBe(1);
     });
 
-    it('fails without mutating the store when the outcome is aborted', async () => {
+    it('returns aborted without mutating the store when the outcome is aborted', async () => {
         const { store, snippet } = installReadyTarget();
         summarizerMocks.callSummarizer.mockResolvedValue({ status: 'aborted' });
 
-        await expect(regenerateSnippetAt(0, 0)).resolves.toEqual({ status: 'failed' });
+        await expect(regenerateSnippetAt(0, 0)).resolves.toEqual({ status: 'aborted' });
+
+        expect(snippet.text).toBe('old summary');
+        expect(store.mutationEpoch).toBe(0);
+    });
+
+    it('returns blocked without mutating the store when the outcome is blocked', async () => {
+        const { store, snippet } = installReadyTarget();
+        summarizerMocks.callSummarizer.mockResolvedValue({ status: 'blocked' });
+
+        await expect(regenerateSnippetAt(0, 0)).resolves.toEqual({ status: 'blocked' });
 
         expect(snippet.text).toBe('old summary');
         expect(store.mutationEpoch).toBe(0);

@@ -13,8 +13,8 @@ import { refreshExtensionState } from './persist.js';
 /**
  * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context: string }} RegenerationTarget
  * @typedef {{ status: 'missing' } | { status: 'unsupported' } | { status: 'busy' }} RegenerationUnavailable
- * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'empty-source' } | { status: 'unsupported' } | { status: 'failed' }} RegenerationRunResult
- * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' | 'empty-source' | 'failed' }} RegenerateSnippetResult
+ * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'empty-source' } | { status: 'unsupported' } | { status: 'failed' } | { status: 'aborted' } | { status: 'blocked' }} RegenerationRunResult
+ * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' | 'empty-source' | 'failed' | 'aborted' | 'blocked' }} RegenerateSnippetResult
  */
 
 /**
@@ -147,10 +147,10 @@ async function regenerateSnippetWithTarget(target) {
         regexStats: passage.stats,
     });
 
-    const newSummary = outcome.status === 'completed' ? outcome.text : '';
-    if (!newSummary) {
-        return { status: 'failed' };
+    if (outcome.status !== 'completed') {
+        return { status: outcome.status };
     }
+    const newSummary = /** @type {string} */ (outcome.text);
     const integrityResult = validateSummarizerOutputIntegrity(newSummary, {
         kind: 'regenerate',
         sourceRange: target.range,

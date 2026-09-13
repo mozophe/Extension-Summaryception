@@ -453,6 +453,10 @@ function handleRegenerationResult(result) {
     }
     if (result.status === 'empty-source') {
         toastr.error('Source turns are empty - cannot regenerate.', TOAST_TITLE);
+    } else if (result.status === 'aborted') {
+        toastr.warning('Regeneration stopped - original snippet kept.', TOAST_TITLE);
+    } else if (result.status === 'blocked') {
+        toastr.warning('Regeneration blocked - original snippet kept.', TOAST_TITLE);
     } else if (result.status === 'failed') {
         toastr.error('Regeneration failed - original snippet kept.', TOAST_TITLE);
     } else if (result.status === 'busy') {

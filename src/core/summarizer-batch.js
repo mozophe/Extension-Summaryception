@@ -53,7 +53,7 @@ export async function summarizeBatchFromTurns(
     trace('  eligibleTurns after filtering:', eligibleTurns.length);
 
     if (eligibleTurns.length === 0) {
-        await repairGhosting(visibleTurns, summarizedBoundary);
+        await repairGhosting(visibleTurns, summarizedBoundary, notify);
         return false;
     }
     return await summarizeBatchCore({
@@ -86,15 +86,16 @@ export async function summarizeAtomicLayer0Partitions(
  * Repair ghosting for turns already marked as summarized.
  * @param {import('./chatutils.js').AssistantTurn[]} visibleTurns
  * @param {number} boundaryIndex
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter threaded to ghosting progress events
  * @returns {Promise<void>}
  */
-async function repairGhosting(visibleTurns, boundaryIndex) {
+async function repairGhosting(visibleTurns, boundaryIndex, notify) {
     info('All visible turns are already summarized; repairing ghosting...');
     const turnsToGhost = visibleTurns.filter((t) => t.index <= boundaryIndex);
     if (turnsToGhost.length > 0) {
         const first = turnsToGhost[0].index;
         const last = turnsToGhost[turnsToGhost.length - 1].index;
-        await repairGhostingForRange(first, last, { chatSave: 'deferred' });
+        await repairGhostingForRange(first, last, { chatSave: 'deferred', notify });
     }
     await persistChatState({ chatSave: 'deferred' });
     trace('<<< EXITING summarizeBatchFromTurns - REPAIRED GHOSTING');
@@ -160,18 +161,18 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
     let progressSettled = false;
     // Same settled-flag guard as commitLayer0Job: runLayer0Summarization's
     // internal close and this core's own failure closes both route through
-    // here, so the shared handle emits FAILED exactly once.
-    const settleProgressFailed = (handle) => {
+    // here, so the shared handle closes exactly once with the terminal kind.
+    const settleProgressClosed = (handle, kind = BATCH_PROGRESS.FAILED) => {
         if (progressSettled) {
             return;
         }
         progressSettled = true;
-        closeBatchProgress(notify, handle, BATCH_PROGRESS.FAILED);
+        closeBatchProgress(notify, handle, kind);
     };
 
     for (const partition of usablePartitions) {
         if (getSummaryStoreMutationEpoch(store) !== baseMutationEpoch) {
-            settleProgressFailed(progress);
+            settleProgressClosed(progress);
             return false;
         }
 
@@ -185,10 +186,10 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
             notify,
             progress,
             total: usablePartitions.length,
-            settle: settleProgressFailed,
+            settle: settleProgressClosed,
         });
         if (!job) {
-            settleProgressFailed(progress);
+            settleProgressClosed(progress);
             return false;
         }
 
@@ -204,7 +205,7 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
         snapshot: snapshots[0],
         progress,
         notify,
-        commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets }),
+        commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }),
     });
 }
 
@@ -260,7 +261,7 @@ async function summarizeSafely(catchExceptions, source, run) {
  * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
  * @param {unknown} p.progress - Shared batch progress handle; null before the first validation
  * @param {number} p.total - Total partitions in the batch
- * @param {((handle: unknown) => void) | undefined} [p.settle] - Failure close routed to the atomic caller's settled guard so the shared handle closes exactly once
+ * @param {((handle: unknown, kind?: string) => void) | undefined} [p.settle] - Terminal close routed to the atomic caller's settled guard so the shared handle closes exactly once
  * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, progress: unknown} | null>}
  */
 async function runLayer0Summarization({
@@ -293,12 +294,12 @@ async function runLayer0Summarization({
 
     // Route the close through the atomic caller's settled guard when one is
     // installed; direct callers close their own handle here.
-    const failClosed = () => {
+    const failClosed = (kind = BATCH_PROGRESS.FAILED) => {
         if (settle) {
-            settle(progress);
+            settle(progress, kind);
             return;
         }
-        closeBatchProgress(notify, progress, BATCH_PROGRESS.FAILED);
+        closeBatchProgress(notify, progress, kind);
     };
 
     let outcome;
@@ -313,6 +314,10 @@ async function runLayer0Summarization({
     } catch (err) {
         failClosed();
         throw err;
+    }
+    if (outcome.status === 'aborted') {
+        failClosed(BATCH_PROGRESS.ABORTED);
+        return null;
     }
     const summary = outcome.status === 'completed' ? outcome.text : '';
     if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
@@ -395,7 +400,7 @@ async function performBatchSummary({ chat, store, passageStart, endIdx, notify }
         snapshot: job.snapshot,
         progress: job.progress,
         notify,
-        commit: () => commitLayer0Snippet({ snapshot: job.snapshot, summary: job.summary }),
+        commit: () => commitLayer0Snippet({ snapshot: job.snapshot, summary: job.summary, notify }),
     });
 }
 
@@ -460,9 +465,10 @@ async function captureLayer0Snapshot({ chat, store, passageStart, endIdx, contex
  * @param {object} p
  * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot
  * @param {string} p.summary - The LLM-generated summary text
+ * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter threaded to ghosting
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Snippet({ snapshot, summary }) {
+async function commitLayer0Snippet({ snapshot, summary, notify }) {
     if (!isLayer0SnapshotValid(snapshot)) {
         return false;
     }
@@ -473,10 +479,10 @@ async function commitLayer0Snippet({ snapshot, summary }) {
     if (!isLayer0SummarySafe(summary, snapshot)) {
         return false;
     }
-
     await executeLayer0Commit({
         store,
         sourceMessageIds: snapshot.sourceMessageIds,
+        notify,
         rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
         onRollback: () => {
             debug('Layer 0 commit rolled back: post-save persistence failed.');
@@ -491,7 +497,7 @@ async function commitLayer0Snippet({ snapshot, summary }) {
     return true;
 }
 
-async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets }) {
+async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }) {
     if (snapshots.length === 0 || pendingSnippets.length !== snapshots.length) {
         return false;
     }
@@ -506,6 +512,7 @@ async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets }) {
     await executeLayer0Commit({
         store,
         sourceMessageIds,
+        notify,
         rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
         onRollback: () => {
             debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
@@ -524,6 +531,7 @@ async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets }) {
 async function executeLayer0Commit({
     store,
     sourceMessageIds,
+    notify,
     mutate,
     rollbackMessage,
     onRollback,
@@ -541,18 +549,21 @@ async function executeLayer0Commit({
         persist: async () => {
             await saveChatStore();
             await updateCommittedInjection({ logMemoryStatus: true });
-            await ghostSourceMessageIds(sourceMessageIds);
+            await ghostSourceMessageIds(sourceMessageIds, notify);
             await persistChatState({ chatSave: 'deferred' });
         },
     });
 }
 
-async function ghostSourceMessageIds(sourceMessageIds) {
+async function ghostSourceMessageIds(sourceMessageIds, notify) {
     const indices = resolveScIdsToIndices(getChat(), sourceMessageIds);
     if (indices.length === 0) {
         return;
     }
-    await ghostMessagesInRange(indices[0], indices[indices.length - 1], { chatSave: 'deferred' });
+    await ghostMessagesInRange(indices[0], indices[indices.length - 1], {
+        chatSave: 'deferred',
+        notify,
+    });
 }
 
 function buildLayer0Snippet(snapshot, summary) {
