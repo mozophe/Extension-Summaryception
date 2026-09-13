@@ -216,7 +216,7 @@ async function commitRoutePlan(routePlan, options = {}, notify) {
 }
 
 async function processPromotionCycle() {
-    const promoted = await maybePromoteLayer(0);
+    const promoted = await maybePromoteLayer(0, getNotifyAdapter());
     if (shouldStopPromptWork()) {
         return 'blocked';
     }
@@ -457,7 +457,11 @@ async function normalizeManualMemory(outcome) {
 }
 
 async function normalizePromotions() {
-    return await drainPromotionOverflow({ maxFailures: 3, isBlockedAfter: shouldStopPromptWork });
+    return await drainPromotionOverflow({
+        maxFailures: 3,
+        isBlockedAfter: shouldStopPromptWork,
+        notify: getNotifyAdapter(),
+    });
 }
 
 function isManualRunComplete(outcome, task) {

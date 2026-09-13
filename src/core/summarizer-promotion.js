@@ -1,4 +1,4 @@
-import { INTERNAL_MAX_LAYER_DEPTH, TOAST_TITLE } from '../foundation/constants.js';
+import { INTERNAL_MAX_LAYER_DEPTH, NOTIFY_EVENTS } from '../foundation/constants.js';
 import { getContext } from '../foundation/context.js';
 import {
     bumpSummaryStoreMutationEpoch,
@@ -43,9 +43,10 @@ const LAYER0_PROMOTION_RETENTION_FLOOR_RATIO = 0.4;
 /**
  * Promote the shallowest over-limit layer at or after the requested layer.
  * @param {number} layerIndex - First layer to evaluate
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
  * @returns {Promise<boolean>} True when promotion work applied or queued.
  */
-export async function maybePromoteLayer(layerIndex = 0) {
+export async function maybePromoteLayer(layerIndex = 0, notify) {
     const s = getEffectiveSettings();
     const candidate = await getNextPromotionCandidate(layerIndex, s);
     if (!candidate) {
@@ -63,6 +64,7 @@ export async function maybePromoteLayer(layerIndex = 0) {
         quota: candidate.quota,
         layerTokens: candidate.tokens,
         layerCount: candidate.count,
+        notify,
     });
 }
 
@@ -213,9 +215,10 @@ function getEffectivePromotionBatchSize(settings) {
  * @param {number} p.quota
  * @param {number} p.layerTokens
  * @param {number} p.layerCount
+ * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter; runs without one stay silent.
  * @returns {Promise<boolean>}
  */
-async function mergeLayerSnippets({ layerIndex, s, quota, layerTokens, layerCount }) {
+async function mergeLayerSnippets({ layerIndex, s, quota, layerTokens, layerCount, notify }) {
     const prepared = await prepareLayerPromotion({
         layerIndex,
         settings: s,
@@ -227,12 +230,12 @@ async function mergeLayerSnippets({ layerIndex, s, quota, layerTokens, layerCoun
         return false;
     }
 
-    const promotedSnippet = await generateValidatedPromotion(prepared);
+    const promotedSnippet = await generateValidatedPromotion(prepared, notify);
     if (!promotedSnippet) {
         return false;
     }
 
-    return await commitValidatedPromotion({ prepared, promotedSnippet });
+    return await commitValidatedPromotion({ prepared, promotedSnippet, notify });
 }
 
 async function prepareLayerPromotion({ layerIndex, settings, quota, layerTokens, layerCount }) {
@@ -308,13 +311,13 @@ async function prepareLayerPromotion({ layerIndex, settings, quota, layerTokens,
     };
 }
 
-async function generateValidatedPromotion(prepared) {
-    toastr.info(
-        `Promoting ${prepared.toMerge.length} memories: Layer ${prepared.layerIndex} -> ` +
-            `Layer ${prepared.layerIndex + 1}`,
-        TOAST_TITLE,
-        { timeOut: 3000, progressBar: true },
-    );
+async function generateValidatedPromotion(prepared, notify) {
+    notify?.transient({
+        kind: NOTIFY_EVENTS.PROMOTION_STARTED,
+        mergedCount: prepared.toMerge.length,
+        fromLayer: prepared.layerIndex,
+        toLayer: prepared.layerIndex + 1,
+    });
 
     if (!prepared.storyTxt) {
         return null;
@@ -332,7 +335,7 @@ async function generateValidatedPromotion(prepared) {
     return await buildValidatedPromotionSnippet({ prepared, narrative: metaOutcome.text });
 }
 
-async function commitValidatedPromotion({ prepared, promotedSnippet }) {
+async function commitValidatedPromotion({ prepared, promotedSnippet, notify }) {
     const result = await commitWhenSafe({
         kind: 'promotion-merge',
         snapshot: prepared.snapshot,
@@ -349,6 +352,7 @@ async function commitValidatedPromotion({ prepared, promotedSnippet }) {
             maxFailures: 1,
             isBlockedBefore: isPromptMutationFrozen,
             isBlockedAfter: isPromptMutationFrozen,
+            notify,
         });
     }
     return result !== 'stale';
@@ -674,19 +678,21 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
  * @param {number} [options.maxFailures] - Consecutive failed promotions tolerated before stopping.
  * @param {() => boolean} [options.isBlockedBefore] - Guard checked before each promotion attempt.
  * @param {() => boolean} [options.isBlockedAfter] - Guard checked after each promotion attempt.
+ * @param {import('./notify.js').NotifyAdapter} [options.notify] - Notify adapter threaded from the engine; runs without one stay silent.
  * @returns {Promise<'normalized'|'blocked'|'failed'>}
  */
 export async function drainPromotionOverflow({
     maxFailures = Infinity,
     isBlockedBefore = () => false,
     isBlockedAfter = () => false,
+    notify,
 } = {}) {
     let failures = 0;
     while (await hasPromotionOverflow(0)) {
         if (isBlockedBefore()) {
             return 'blocked';
         }
-        const promoted = await maybePromoteLayer(0);
+        const promoted = await maybePromoteLayer(0, notify);
         if (isBlockedAfter()) {
             return 'blocked';
         }

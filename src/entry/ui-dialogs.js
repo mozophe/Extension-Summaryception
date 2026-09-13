@@ -303,6 +303,13 @@ const NOTIFY_TRANSIENT_VIEWS = {
             TOAST_TITLE,
             { timeOut: RETRY_NOTICE_MS },
         ),
+    [NOTIFY_EVENTS.PROMOTION_STARTED]: (event) =>
+        toastr.info(
+            `Promoting ${event.mergedCount} memories: Layer ${event.fromLayer} -> ` +
+                `Layer ${event.toLayer}`,
+            TOAST_TITLE,
+            { timeOut: 3000, progressBar: true },
+        ),
 };
 
 /**

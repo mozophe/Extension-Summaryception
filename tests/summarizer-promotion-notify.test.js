@@ -1,0 +1,75 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const callSummarizer = vi.hoisted(() => vi.fn());
+vi.mock('../src/core/summarizer-request.js', () => ({ callSummarizer }));
+
+import { maybePromoteLayer } from '../src/core/summarizer-promotion.js';
+import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
+import { setNotifyAdapter } from '../src/core/notify.js';
+import {
+    installBrowserRuntimeStub,
+    installSummaryContext,
+    makeNotifyRecorder,
+    makeSummarySettings,
+    makeSummaryStore,
+} from './test-helpers.js';
+
+/**
+ * The promotion cycle emits a structured notify event (ADR-0004) instead of
+ * calling the notification library; the entry adapter renders the notice.
+ */
+describe('summarizer promotion notify events', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        callSummarizer.mockReset();
+        setNotifyAdapter(null);
+        delete globalThis.toastr;
+    });
+
+    /**
+     * Install a context whose Layer 0 exceeds its token quota (24 ~150-char
+     * snippets vs. a 2400-token quota under the length-based test tokenizer).
+     */
+    function installOverflowingStore() {
+        const snippets = Array.from({ length: 24 }, (_, i) => ({
+            text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}\n[STATE]\nlocation: room${i}`,
+            sourceMessageIds: [`msg-${i}`],
+        }));
+        installSummaryContext({
+            metadata: { summaryception: makeSummaryStore({ layers: [snippets] }) },
+            settings: makeSummarySettings({ memoryTokenBudget: 4000 }),
+        });
+    }
+
+    it('emits one structured promotion-started event and never calls toastr', async () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const recorder = makeNotifyRecorder();
+        setNotifyAdapter(recorder);
+        installOverflowingStore();
+        callSummarizer.mockResolvedValue({ status: 'failed' });
+
+        await expect(maybePromoteLayer(0, recorder)).resolves.toBe(false);
+
+        expect(toastr.info).not.toHaveBeenCalled();
+        expect(recorder.events).toEqual([
+            {
+                type: 'transient',
+                kind: NOTIFY_EVENTS.PROMOTION_STARTED,
+                mergedCount: 3,
+                fromLayer: 0,
+                toLayer: 1,
+            },
+        ]);
+    });
+
+    it('stays silent without an adapter', async () => {
+        setNotifyAdapter(null);
+        installOverflowingStore();
+        callSummarizer.mockResolvedValue({ status: 'failed' });
+
+        await expect(maybePromoteLayer(0)).resolves.toBe(false);
+
+        expect(callSummarizer).toHaveBeenCalledTimes(1);
+        expect(globalThis.toastr).toBeUndefined();
+    });
+});

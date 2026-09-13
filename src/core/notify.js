@@ -31,6 +31,9 @@
  * @property {number} [attempt] - Zero-based failed attempt index (retry-wait).
  * @property {number} [delayMs] - Backoff wait in ms; display ignores it (retry-wait).
  * @property {string} [percent] - CN ideograph percentage of visible characters (language-mix-retry).
+ * @property {number} [mergedCount] - Snippets merged per promotion (promotion-started).
+ * @property {number} [fromLayer] - Source layer index (promotion-started).
+ * @property {number} [toLayer] - Destination layer index (promotion-started).
  */
 
 /**

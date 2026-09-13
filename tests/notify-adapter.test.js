@@ -230,4 +230,20 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning.mock.calls[0][2].timeOut).toBe(5000);
         expect(String(toastr.warning.mock.calls[0][0])).toContain('23.4');
     });
+
+    it('shows a promotion notice for a fixed duration', () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const adapter = createToastrNotifyAdapter();
+
+        adapter.transient({ kind: 'promotion-started', mergedCount: 3, fromLayer: 0, toLayer: 1 });
+
+        expect(toastr.info).toHaveBeenCalledTimes(1);
+        const [text, title, opts] = toastr.info.mock.calls[0];
+        expect(String(title)).toContain(TOAST_TITLE);
+        expect(String(text)).toContain('3');
+        expect(String(text)).toContain('Layer 0');
+        expect(String(text)).toContain('Layer 1');
+        expect(opts.timeOut).toBe(3000);
+        expect(opts.progressBar).toBe(true);
+    });
 });
