@@ -30,6 +30,7 @@
 - Resolve identifiers to current chat indexes only for host commands and planning.
 - Do not infer ownership from old array positions.
 - Hide summarized turns through the host command.
+- Ghosting receives the notify adapter through its options. Core never reads the global adapter (ADR-0004).
 - Unhide only store-owned messages.
 - Clear unhides the chat and removes extension-owned chat data.
 - Standard placements use the host extension prompt.
@@ -107,6 +108,7 @@
 - Feature modules return structured outcomes. Entry modules format user notices.
 - Bind toast action buttons with delegated document clicks. Toast content does not exist at bind time.
 - Keep user-facing text out of feature modules.
+- Core emits structured notify events and outcome statuses. Entry owns all notice text, display duration, and update cadence (ADR-0004).
 - Keep the first view focused on status, activity, and required action.
 - Use compact sections and responsive grids. Collapse near 520 pixels.
 - Keep navigation sticky, opaque, keyboard accessible, and text-labelled.
