@@ -1,5 +1,10 @@
 import { formatTokenValue } from '../core/token-count.js';
-import { GHOST_PROGRESS, NOTIFY_EVENTS, TOAST_TITLE } from '../foundation/constants.js';
+import {
+    BATCH_PROGRESS,
+    GHOST_PROGRESS,
+    NOTIFY_EVENTS,
+    TOAST_TITLE,
+} from '../foundation/constants.js';
 
 /**
  * Show the Slop Breaker no-op toast.
@@ -210,11 +215,14 @@ export function confirmSlopBreaker() {
 
 /**
  * Display policy for one progress label: title subtitle, action text, and the
- * every-N-items update cadence.
+ * every-N-items update cadence. Counted views render `text: done / total`
+ * lines; message views render one static string and ignore counts.
  * @typedef {object} ProgressView
- * @property {string} subtitle - Title suffix after the toast title.
- * @property {string} text - Action text leading each progress line.
- * @property {number} everyN - Render only when processed is a multiple of this.
+ * @property {string} [subtitle] - Title suffix after the toast title; omitted renders the bare title.
+ * @property {string} [text] - Action text leading each counted progress line.
+ * @property {string} [message] - Static toast message; replaces counted lines.
+ * @property {boolean} [progressBar] - Show toastr's progress bar.
+ * @property {number} [everyN] - Render only when processed is a multiple of this (counted views only).
  */
 
 /**
@@ -225,18 +233,27 @@ export function confirmSlopBreaker() {
 const NOTIFY_PROGRESS_VIEWS = {
     [GHOST_PROGRESS.HIDE]: { subtitle: 'Ghosting', text: 'Hiding messages', everyN: 1 },
     [GHOST_PROGRESS.UNHIDE]: { subtitle: 'Clearing', text: 'Unhiding messages', everyN: 10 },
+    [BATCH_PROGRESS.MEMORY]: { message: 'Updating conversation memory…', progressBar: true },
 };
 
-/** Fallback policy for progress labels without an entry mapping. */
+/**
+ * Fallback display policy for unknown progress labels: 'Working' title
+ * subtitle and action text, updated on every event.
+ * @type {ProgressView}
+ */
 const DEFAULT_PROGRESS_VIEW = { subtitle: 'Working', text: 'Working', everyN: 1 };
 
 /**
- * Opaque progress handle: the toast element plus the display policy it opened with.
- * @typedef {object} ToastrProgressHandle
- * @property {unknown} toast - toastr toast element.
- * @property {ProgressView} view - Display policy for this handle.
- * @property {number} total - Item total captured at open time.
+ * Per-kind terminal notice policy for progress clears (ADR-0004): rendered
+ * right after the progress toast closes. Unknown kinds close silently.
+ * @type {Record<string, () => void>}
  */
+const NOTIFY_TERMINAL_VIEWS = {
+    [BATCH_PROGRESS.UPDATED]: () =>
+        toastr.success('Conversation memory updated.', TOAST_TITLE, { timeOut: 3000 }),
+    [BATCH_PROGRESS.FAILED]: () =>
+        toastr.warning('Conversation memory was not updated.', TOAST_TITLE, { timeOut: 3000 }),
+};
 
 /**
  * Fixed display duration for retry warnings. Independent of the backoff wait,
@@ -283,6 +300,15 @@ const NOTIFY_TRANSIENT_VIEWS = {
 };
 
 /**
+ * Handle for an open notify progress toast: the toastr element, the matched
+ * display policy, and the total used for counted progress lines.
+ * @typedef {object} ToastrProgressHandle
+ * @property {object} toast - Active toastr element.
+ * @property {ProgressView} view - Matched display policy for the label.
+ * @property {number} total - Total items reported by the progress event.
+ */
+
+/**
  * Build the toastr-backed notify adapter (ADR-0004). Display durations and
  * update cadence live here; events carry structured data only.
  * @returns {import('../core/notify.js').NotifyAdapter}
@@ -299,12 +325,13 @@ export function createToastrNotifyAdapter() {
         progress(event) {
             const view = NOTIFY_PROGRESS_VIEWS[event.label] || DEFAULT_PROGRESS_VIEW;
             const toast = toastr.info(
-                `${view.text}: 0 / ${event.total}`,
-                `${TOAST_TITLE} - ${view.subtitle}`,
+                view.message ?? `${view.text}: 0 / ${event.total}`,
+                view.subtitle ? `${TOAST_TITLE} - ${view.subtitle}` : TOAST_TITLE,
                 {
                     timeOut: 0,
                     extendedTimeOut: 0,
                     tapToDismiss: false,
+                    ...(view.progressBar ? { progressBar: true } : {}),
                 },
             );
             return { toast, view, total: event.total };
@@ -314,7 +341,7 @@ export function createToastrNotifyAdapter() {
                 return;
             }
             const progress = /** @type {ToastrProgressHandle} */ (handle);
-            if (event.processed % progress.view.everyN !== 0) {
+            if (!progress.view.everyN || event.processed % progress.view.everyN !== 0) {
                 return;
             }
             const pct = Math.round((event.processed / progress.total) * 100);
@@ -322,9 +349,15 @@ export function createToastrNotifyAdapter() {
                 .find('.toast-message')
                 .text(`${progress.view.text}: ${event.processed} / ${progress.total} (${pct}%)`);
         },
-        clear(handle) {
+        clear(handle, event) {
             if (handle) {
                 toastr.clear(/** @type {ToastrProgressHandle} */ (handle).toast);
+            }
+            const terminal = event?.kind
+                ? NOTIFY_TERMINAL_VIEWS[/** @type {string} */ (event.kind)]
+                : null;
+            if (terminal) {
+                terminal();
             }
         },
     };

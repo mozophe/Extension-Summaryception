@@ -7,6 +7,7 @@ import {
 } from '../foundation/state.js';
 import { debug, info, trace } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
+import { getNotifyAdapter } from './notify.js';
 import {
     drainPromotionOverflow,
     hasPromotionOverflow,
@@ -178,10 +179,7 @@ export async function runElasticManual(deps, strategy, options = {}) {
 }
 
 async function processRoutePlan(routePlan) {
-    const success = await commitRoutePlan(routePlan, {
-        showToasts: true,
-        catchExceptions: true,
-    });
+    const success = await commitRoutePlan(routePlan, { catchExceptions: true }, getNotifyAdapter());
 
     if (!success) {
         debug('Route batch failed, stopping summarization cycle to avoid retry loop.');
@@ -196,20 +194,25 @@ async function processRoutePlan(routePlan) {
 /**
  * Commit one normalized route plan.
  * @param {import('./summarization-routes.js').SummaryRoutePlan} routePlan
- * @param {{ showToasts?: boolean, catchExceptions?: boolean }} [options]
+ * @param {{ catchExceptions?: boolean }} [options]
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for automatic runs; manual runs own their progress UI and stay silent.
  * @returns {Promise<boolean>}
  */
-async function commitRoutePlan(routePlan, options = {}) {
+async function commitRoutePlan(routePlan, options = {}, notify) {
     if (routePlan.commitMode === SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS) {
-        return await summarizeAtomicLayer0Partitions(routePlan.partitions, options);
+        return await summarizeAtomicLayer0Partitions(routePlan.partitions, options, notify);
     }
     if (routePlan.commitMode === SUMMARY_COMMIT_MODES.TURNS_WITH_SOURCE_END) {
-        return await summarizeBatchFromTurns(routePlan.batchTurns, {
-            ...options,
-            sourceEndIdx: routePlan.sourceEndIdx,
-        });
+        return await summarizeBatchFromTurns(
+            routePlan.batchTurns,
+            {
+                ...options,
+                sourceEndIdx: routePlan.sourceEndIdx,
+            },
+            notify,
+        );
     }
-    return await summarizeBatchFromTurns(routePlan.batchTurns, options);
+    return await summarizeBatchFromTurns(routePlan.batchTurns, options, notify);
 }
 
 async function processPromotionCycle() {

@@ -22,6 +22,18 @@ export const TOAST_TITLE = 'Summaryception';
 export const GHOST_PROGRESS = { HIDE: 'ghost-hide', UNHIDE: 'ghost-unhide' };
 
 /**
+ * Stable batch progress label and terminal clear kinds emitted on the notify
+ * adapter (ADR-0004); the entry adapter maps them to on-screen text. Core
+ * carries these ids, never prose.
+ * @type {{ MEMORY: string, UPDATED: string, FAILED: string }}
+ */
+export const BATCH_PROGRESS = Object.freeze({
+    MEMORY: 'batch-memory',
+    UPDATED: 'batch-memory-updated',
+    FAILED: 'batch-memory-failed',
+});
+
+/**
  * Stable transient event kinds emitted on the notify adapter (ADR-0004); the
  * entry adapter maps each kind to a user notice. Core carries these ids, never
  * prose.

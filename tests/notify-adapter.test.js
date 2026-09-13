@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { TOAST_TITLE } from '../src/foundation/constants.js';
+import { BATCH_PROGRESS, TOAST_TITLE } from '../src/foundation/constants.js';
 import { formatTokenValue } from '../src/core/token-count.js';
 import { createToastrNotifyAdapter } from '../src/entry/ui-dialogs.js';
 import { installBrowserRuntimeStub } from './test-helpers.js';
@@ -75,6 +75,61 @@ describe('toastr notify adapter mapping', () => {
 
         expect(toastr.clear).toHaveBeenCalledTimes(1);
         expect(toastr.clear).toHaveBeenCalledWith(toast);
+    });
+
+    it('opens the batch progress as a persistent bar toast under the bare title', () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const adapter = createToastrNotifyAdapter();
+
+        adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 3 });
+
+        expect(toastr.info).toHaveBeenCalledTimes(1);
+        const [text, title, opts] = toastr.info.mock.calls[0];
+        expect(String(title)).toBe(TOAST_TITLE);
+        expect(String(text)).not.toContain('0 / 3');
+        expect(opts.timeOut).toBe(0);
+        expect(opts.extendedTimeOut).toBe(0);
+        expect(opts.tapToDismiss).toBe(false);
+        expect(opts.progressBar).toBe(true);
+    });
+
+    it('ignores processed counts for the batch progress view', () => {
+        installBrowserRuntimeStub();
+        const writes = installTextCapture();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 3 });
+
+        adapter.update(handle, { processed: 1 });
+        adapter.update(handle, { processed: 3 });
+
+        expect(writes).toHaveLength(0);
+    });
+
+    it('closes the batch progress with a success terminal on commit', () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 1 });
+        const toast = toastr.info.mock.results[0].value;
+
+        adapter.clear(handle, { kind: BATCH_PROGRESS.UPDATED });
+
+        expect(toastr.clear).toHaveBeenCalledTimes(1);
+        expect(toastr.clear).toHaveBeenCalledWith(toast);
+        expect(toastr.success).toHaveBeenCalledTimes(1);
+        expect(toastr.success.mock.calls[0][2]).toEqual({ timeOut: 3000 });
+        expect(toastr.warning).not.toHaveBeenCalled();
+    });
+
+    it('closes the batch progress with a warning terminal on failure', () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 1 });
+
+        adapter.clear(handle, { kind: BATCH_PROGRESS.FAILED });
+
+        expect(toastr.warning).toHaveBeenCalledTimes(1);
+        expect(toastr.warning.mock.calls[0][2]).toEqual({ timeOut: 3000 });
+        expect(toastr.success).not.toHaveBeenCalled();
     });
 
     it('ignores transient events with no entry mapping', () => {
