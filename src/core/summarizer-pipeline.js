@@ -1,4 +1,5 @@
-import { TOAST_TITLE, defaultSettings } from '../foundation/constants.js';
+import { NOTIFY_EVENTS, defaultSettings } from '../foundation/constants.js';
+import { getNotifyAdapter } from './notify.js';
 import { warn, isTraceEnabled, trace } from '../foundation/logger.js';
 import { getEffectiveSettings, getPlayerName } from '../foundation/state.js';
 import { appendLayer0PromptConstraints } from './layer0-compression.js';
@@ -86,7 +87,7 @@ export async function processSummarizerResponse(rawResult, settings, metadata = 
     const chinesePolicyResult = applyChineseOutputPolicy(cleanedResult, settings);
 
     if (chinesePolicyResult.error) {
-        notifyChinesePolicyRejection(chinesePolicyResult.percent);
+        notifyLanguageMixRejection(chinesePolicyResult.percent);
         return {
             status: 'cn-rejected',
             text: '',
@@ -316,18 +317,17 @@ function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metad
 }
 
 /**
- * Show the existing CN policy warning without coupling prompts.js to UI side effects.
+ * Emit the structured language-mix event without coupling prompts.js to UI side effects.
  * @param {string | null} percent
  * @returns {void}
  */
-function notifyChinesePolicyRejection(percent) {
+function notifyLanguageMixRejection(percent) {
     const displayPercent = percent || '?';
     warn(
         `Summarizer response rejected: CN ideographs were ${displayPercent}% of visible characters.`,
     );
-    toastr.warning(
-        `Summarizer response contained too much CN text (${displayPercent}%). Retrying...`,
-        TOAST_TITLE,
-        { timeOut: 5000 },
-    );
+    getNotifyAdapter().transient({
+        kind: NOTIFY_EVENTS.LANGUAGE_MIX_RETRY,
+        percent: displayPercent,
+    });
 }

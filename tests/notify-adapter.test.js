@@ -219,4 +219,15 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning).toHaveBeenCalledTimes(1);
         expect(toastr.warning.mock.calls[0][2].timeOut).toBeLessThan(60000);
     });
+
+    it('shows a language-mix warning for a fixed duration', () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const adapter = createToastrNotifyAdapter();
+
+        adapter.transient({ kind: 'language-mix-retry', percent: '23.4' });
+
+        expect(toastr.warning).toHaveBeenCalledTimes(1);
+        expect(toastr.warning.mock.calls[0][2].timeOut).toBe(5000);
+        expect(String(toastr.warning.mock.calls[0][0])).toContain('23.4');
+    });
 });

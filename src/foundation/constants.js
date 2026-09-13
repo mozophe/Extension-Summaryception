@@ -37,7 +37,7 @@ export const BATCH_PROGRESS = Object.freeze({
  * Stable transient event kinds emitted on the notify adapter (ADR-0004); the
  * entry adapter maps each kind to a user notice. Core carries these ids, never
  * prose.
- * @type {{ RUN_ABORTED: string, RUN_FAILED: string, EASY_GUARD_BLOCKED: string, RETRY_WAIT: string, ROUTE_CYCLE_WAIT: string }}
+ * @type {{ RUN_ABORTED: string, RUN_FAILED: string, EASY_GUARD_BLOCKED: string, RETRY_WAIT: string, ROUTE_CYCLE_WAIT: string, LANGUAGE_MIX_RETRY: string }}
  */
 export const NOTIFY_EVENTS = Object.freeze({
     RUN_ABORTED: 'run-aborted',
@@ -45,6 +45,7 @@ export const NOTIFY_EVENTS = Object.freeze({
     EASY_GUARD_BLOCKED: 'easy-guard-blocked',
     RETRY_WAIT: 'retry-wait',
     ROUTE_CYCLE_WAIT: 'route-cycle-wait',
+    LANGUAGE_MIX_RETRY: 'language-mix-retry',
 });
 
 export const MEMORY_MODES = Object.freeze({

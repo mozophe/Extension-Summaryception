@@ -297,6 +297,12 @@ const NOTIFY_TRANSIENT_VIEWS = {
         toastr.warning('Both summarizer routes failed. Retrying primary...', TOAST_TITLE, {
             timeOut: RETRY_NOTICE_MS,
         }),
+    [NOTIFY_EVENTS.LANGUAGE_MIX_RETRY]: (event) =>
+        toastr.warning(
+            `Summarizer response contained too much CN text (${event.percent ?? '?'}%). Retrying...`,
+            TOAST_TITLE,
+            { timeOut: RETRY_NOTICE_MS },
+        ),
 };
 
 /**

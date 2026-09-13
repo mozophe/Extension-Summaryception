@@ -30,6 +30,7 @@
  * @property {number} [limit] - Configured token cap (easy-guard-blocked).
  * @property {number} [attempt] - Zero-based failed attempt index (retry-wait).
  * @property {number} [delayMs] - Backoff wait in ms; display ignores it (retry-wait).
+ * @property {string} [percent] - CN ideograph percentage of visible characters (language-mix-retry).
  */
 
 /**
