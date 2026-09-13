@@ -153,3 +153,47 @@ describe('manual run progress callbacks', () => {
         expect(batchMocks.summarizeBatchFromTurns).not.toHaveBeenCalled();
     });
 });
+
+describe('manual run failure limit', () => {
+    /** Build manual runner deps with a stub queue. */
+    function makeDeps() {
+        return {
+            queue: {
+                setPhase: vi.fn(),
+                setSummarizing: vi.fn(),
+                getIsSummarizing: vi.fn(() => true),
+            },
+            refreshUi: vi.fn(),
+            withUsageRun: vi.fn(async (_label, work) => await work()),
+        };
+    }
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        installSummaryContext({ chat: [] });
+        stateMocks.getChatStore.mockReturnValue({});
+        stateMocks.getEffectiveSettings.mockReturnValue({});
+        stateMocks.getCurrentSummarizedBoundary.mockReturnValue(0);
+        // Every batch commit fails without moving the summarized boundary.
+        batchMocks.summarizeBatchFromTurns.mockResolvedValue(false);
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue({
+            ready: true,
+            reason: 'ready',
+            commitMode: 'TURNS',
+            batchTurns: [{ index: 2 }],
+            partitions: [{}],
+            totalBatches: 1,
+            targetIndex: TARGET_INDEX,
+        });
+    });
+
+    it('stops the run after three consecutive batch failures', async () => {
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(outcome.failureLimitReached).toBe(true);
+        expect(outcome.failed).toBe(3);
+        expect(outcome.completed).toBe(0);
+        expect(outcome.fullyCommitted).toBe(false);
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(3);
+    });
+});

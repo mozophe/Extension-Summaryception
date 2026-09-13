@@ -3,12 +3,8 @@ import { abortCurrentSummarizerRequest } from './summarizer-request.js';
 import { SummarizerQueue } from './summarizer-queue.js';
 import { withUsageRun } from './summarizer-usage.js';
 import { flushPendingChatSave } from './persist-state.js';
-import {
-    describeManualRun as describeEngineManualRun,
-    runElasticAutoCycle,
-    runManual as runEngineManual,
-    yieldWorkerCycle,
-} from './summarizer-engine.js';
+import { runElasticAutoCycle, runManual as runEngineManual } from './summarizer-engine.js';
+import { sleep } from '../foundation/retry.js';
 import {
     beginForegroundGeneration as beginCommitFreeze,
     endForegroundGeneration as endCommitFreeze,
@@ -32,7 +28,9 @@ const summarizerQueue = new SummarizerQueue({
     abort: abortCurrentSummarizerRequest,
     refreshUi: refreshUI,
     withUsageRun,
-    yieldCycle: yieldWorkerCycle,
+    yieldCycle: async () => {
+        await sleep(0);
+    },
     afterDrain: flushPendingChatSave,
 });
 
@@ -140,7 +138,7 @@ export function requestSummarization() {
     return summarizerQueue.request();
 }
 
-export { ELASTIC_STRATEGIES } from './summarizer-engine.js';
+export { describeManualRun, ELASTIC_STRATEGIES } from './summarizer-engine.js';
 
 /**
  * Run Force Summarize or Slop Breaker through the shared engine.
@@ -150,15 +148,6 @@ export { ELASTIC_STRATEGIES } from './summarizer-engine.js';
  */
 export async function runManual(strategy, options = {}) {
     return await runEngineManual(getManualRunnerDeps(), strategy, options);
-}
-
-/**
- * Describe the manual work one strategy would run, without running it.
- * @param {'FORCE' | 'SLOP'} strategy
- * @returns {Promise<{ ready: boolean, backlog: number }>}
- */
-export function describeManualRun(strategy) {
-    return describeEngineManualRun(strategy);
 }
 
 /**

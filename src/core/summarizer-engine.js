@@ -31,7 +31,6 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @property {number} failed - Number of failed batches.
  * @property {number} totalBatches - Estimated total batches for the run.
  * @property {boolean} fullyCommitted - Whether all requested work was committed and normalized.
- * @property {boolean} shouldReload - Whether the caller should reload chat/UI state.
  * @property {boolean} failureLimitReached - Whether consecutive failures halted the run.
  */
 
@@ -50,18 +49,6 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @property {(progress: ManualRunProgress) => void} [onStart] - Called with initial progress.
  * @property {(progress: ManualRunProgress) => void} [onProgress] - Called after batch progress changes.
  * @property {import('./notify.js').NotifyAdapter} [notify] - Adapter for progress notices; absent runs stay silent.
- */
-/**
- * Internal manual loop task built from one strategy's initial route plan.
- * @typedef {object} ManualLoopTask
- * @property {number} totalBatches - Estimated total batches for the run.
- * @property {string} label - Short progress label for the active operation.
- * @property {string} title - User-visible progress title.
- * @property {number} targetIndex - Summarized boundary the run must reach.
- * @property {() => Promise<import('./summarization-routes.js').SummaryRoutePlan>} getBatch - Builds the next route plan to commit.
- * @property {(batch: import('./summarization-routes.js').SummaryRoutePlan) => boolean} isBatchReady - Whether a route plan has work.
- * @property {(batch: import('./summarization-routes.js').SummaryRoutePlan, notify?: import('./notify.js').NotifyAdapter) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
- * @property {(outcome: ManualRunOutcome, task: ManualLoopTask) => boolean} isComplete - Whether the run reached its target.
  */
 
 /**
@@ -108,13 +95,6 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
     queue.setPhase('layer0');
     return await processRoutePlan(routePlan, notify);
 }
-/**
- * Yield briefly between automatic work units.
- * @returns {Promise<void>}
- */
-export async function yieldWorkerCycle() {
-    await sleep(0);
-}
 
 /**
  * Run Force Summarize or Slop Breaker through the shared engine.
@@ -135,19 +115,25 @@ export async function runManual(deps, strategy, options = {}) {
         }
 
         const prepared = await prepareSummaryCycle();
-        const task = await buildManualTask(manualStrategy, prepared);
-        if (!task) {
+        const initialRoutePlan = await manualStrategy.buildBatch(prepared);
+        const targetIndex = initialRoutePlan.targetIndex;
+        if (!initialRoutePlan.ready || typeof targetIndex !== 'number') {
             return createManualRunOutcome();
         }
 
-        const outcome = await executeManualTask(deps, task, options);
+        const outcome = await executeManualTask(
+            deps,
+            manualStrategy,
+            { targetIndex, totalBatches: initialRoutePlan.totalBatches },
+            options,
+        );
         const promotionStatus = await normalizeManualMemory(outcome, options.notify);
         deps.refreshUi();
         return {
             ...outcome,
             blocked: outcome.blocked || promotionStatus === 'blocked',
-            fullyCommitted: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
-            shouldReload: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
+            fullyCommitted:
+                isManualRunComplete(outcome, targetIndex) && promotionStatus === 'completed',
         };
     });
 }
@@ -211,8 +197,8 @@ async function commitRoutePlan(routePlan, options = {}, notify) {
     return await summarizeBatchFromTurns(routePlan.batchTurns, options, notify);
 }
 
-const isManualTargetReached = (_outcome, task) =>
-    getCurrentSummarizedBoundary(getChat(), getChatStore()) >= task.targetIndex;
+const isManualTargetReached = (targetIndex) =>
+    getCurrentSummarizedBoundary(getChat(), getChatStore()) >= targetIndex;
 
 /**
  * Per-strategy manual run configuration. `assessCommit` turns the summarized
@@ -248,31 +234,6 @@ const MANUAL_STRATEGIES = Object.freeze({
 });
 
 /**
- * Build the manual loop task for one strategy from its initial route plan.
- * @param {ManualStrategy} strategy
- * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
- * @returns {Promise<ManualLoopTask | null>}
- */
-async function buildManualTask(strategy, prepared) {
-    const initialRoutePlan = await strategy.buildBatch(prepared);
-    const targetIndex = initialRoutePlan.targetIndex;
-    if (!initialRoutePlan.ready || typeof targetIndex !== 'number') {
-        return null;
-    }
-
-    return {
-        totalBatches: initialRoutePlan.totalBatches,
-        label: strategy.label,
-        title: strategy.title,
-        targetIndex,
-        getBatch: () => strategy.buildBatch(undefined, targetIndex),
-        isBatchReady: (batch) => batch?.ready,
-        processBatch: (batch, notify) => processStrategyBatch(batch, strategy, notify),
-        isComplete: isManualTargetReached,
-    };
-}
-
-/**
  * Build the next Force Summarize route plan.
  * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} [prepared]
  * @returns {Promise<import('./summarization-routes.js').SummaryRoutePlan>}
@@ -302,27 +263,28 @@ async function buildSlopBatch(prepared, targetIndex) {
 }
 
 /**
- * Drive one manual task batch loop to completion.
+ * Drive one manual run batch loop to completion.
  * @param {ManualRunnerDeps} deps
- * @param {ManualLoopTask} task
+ * @param {ManualStrategy} strategy
+ * @param {{ targetIndex: number, totalBatches: number }} target - Values captured from the initial route plan.
  * @param {ManualRunOptions} options
  * @returns {Promise<ManualRunOutcome>}
  */
-async function executeManualTask(deps, task, options) {
-    const outcome = createManualRunOutcome({ totalBatches: task.totalBatches });
+async function executeManualTask(deps, strategy, target, options) {
+    const outcome = createManualRunOutcome({ totalBatches: target.totalBatches });
     let consecutiveFailures = 0;
 
-    options.onStart?.(createProgress(outcome, task));
+    options.onStart?.(createProgress(outcome, strategy));
     deps.queue.setSummarizing(true);
 
     try {
         while (!isCancelled(options.signal)) {
-            const batch = await task.getBatch();
-            if (!task.isBatchReady(batch)) {
+            const batch = await strategy.buildBatch(undefined, target.targetIndex);
+            if (!batch?.ready) {
                 break;
             }
 
-            const result = await task.processBatch(batch, options.notify);
+            const result = await processStrategyBatch(batch, strategy, options.notify);
             updateManualOutcome({ outcome, result });
             consecutiveFailures = result.success && result.committed ? 0 : consecutiveFailures;
 
@@ -341,7 +303,7 @@ async function executeManualTask(deps, task, options) {
                 break;
             }
 
-            options.onProgress?.(createProgress(outcome, task));
+            options.onProgress?.(createProgress(outcome, strategy));
             await sleep(200);
         }
 
@@ -432,11 +394,11 @@ async function normalizePromotions(notify) {
     return await drainPromotionOverflow({ maxConsecutiveFailures: 3, notify });
 }
 
-function isManualRunComplete(outcome, task) {
+function isManualRunComplete(outcome, targetIndex) {
     if (outcome.cancelled || outcome.blocked || outcome.failed > 0 || outcome.completed === 0) {
         return false;
     }
-    return task.isComplete(outcome, task);
+    return isManualTargetReached(targetIndex);
 }
 
 async function prepareManualRun(deps, recoverReason) {
@@ -452,19 +414,18 @@ function createManualRunOutcome(overrides = {}) {
         failed: 0,
         totalBatches: 0,
         fullyCommitted: false,
-        shouldReload: false,
         failureLimitReached: false,
         ...overrides,
     };
 }
 
-function createProgress(outcome, task) {
+function createProgress(outcome, strategy) {
     return {
         completed: outcome.completed,
         failed: outcome.failed,
         totalBatches: outcome.totalBatches,
-        label: task.label,
-        title: task.title,
+        label: strategy.label,
+        title: strategy.title,
     };
 }
 

@@ -522,14 +522,13 @@ function showManualCacheWarning(settings) {
 
 /**
  * Reload the page after successful manual context changes.
- * @param {{ shouldReload?: boolean } | undefined} outcome
+ * @param {{ fullyCommitted?: boolean } | undefined} outcome
  * @returns {void}
  */
 function reloadAfterManualRun(outcome) {
-    if (!outcome?.shouldReload) {
-        return;
+    if (outcome?.fullyCommitted) {
+        reloadPage();
     }
-    reloadPage();
 }
 
 function reloadPage() {
