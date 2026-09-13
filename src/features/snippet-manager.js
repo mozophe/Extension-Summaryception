@@ -11,7 +11,7 @@ import { withUsageRun } from '../core/summarizer-usage.js';
 import { refreshExtensionState } from './persist.js';
 
 /**
- * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context: string }} RegenerationTarget
+ * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context?: string }} RegenerationTarget
  * @typedef {{ status: 'missing' } | { status: 'unsupported' } | { status: 'busy' }} RegenerationUnavailable
  * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'empty-source' } | { status: 'unsupported' } | { status: 'failed' } | { status: 'aborted' } | { status: 'blocked' }} RegenerationRunResult
  * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' | 'empty-source' | 'failed' | 'aborted' | 'blocked' }} RegenerateSnippetResult
@@ -38,7 +38,26 @@ export function getSnippetTextAt(layerIndex, snippetIndex) {
  * @returns {RegenerationTarget | RegenerationUnavailable}
  */
 export function getSnippetRegenerationTarget(layerIndex, snippetIndex) {
-    return resolveRegenerationTarget(getChatStore(), getChat(), layerIndex, snippetIndex);
+    return resolveRegenerationTarget(getChatStore(), getChat(), { layerIndex, snippetIndex });
+}
+
+/**
+ * Whether a snippet can be regenerated: a contiguous Layer 0 source range.
+ * True while summarization is busy; the click path reports busy.
+ * @param {number} layerIndex
+ * @param {number} snippetIndex
+ * @returns {boolean}
+ */
+export function isRegenerationCandidate(layerIndex, snippetIndex) {
+    const target = resolveRegenerationTarget(
+        getChatStore(),
+        getChat(),
+        { layerIndex, snippetIndex },
+        {
+            includeContext: false,
+        },
+    );
+    return target.status === 'ready' || target.status === 'busy';
 }
 
 /**
@@ -67,7 +86,7 @@ export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
     if (layerIndex === 0) {
         Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
     }
-    bumpSummaryStoreMutationEpoch(store);
+    await commitSnippetMutation(store);
     return { status: 'updated' };
 }
 
@@ -86,7 +105,6 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
 
     const removed = layer[snippetIndex];
     layer.splice(snippetIndex, 1);
-    bumpSummaryStoreMutationEpoch(store);
 
     if (layerIndex === 0) {
         const remainingIds = new Set(
@@ -102,7 +120,7 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
         }
     }
 
-    await saveSnippetStore();
+    await commitSnippetMutation(store);
     return { status: 'deleted', layerIndex };
 }
 
@@ -114,7 +132,10 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
  * @returns {Promise<RegenerateSnippetResult>}
  */
 export async function regenerateSnippetAt(layerIndex, snippetIndex, notify) {
-    const target = resolveRegenerationTarget(getChatStore(), getChat(), layerIndex, snippetIndex);
+    const target = resolveRegenerationTarget(getChatStore(), getChat(), {
+        layerIndex,
+        snippetIndex,
+    });
     if (target.status !== 'ready') {
         return target;
     }
@@ -145,7 +166,7 @@ async function regenerateSnippetWithTarget(target, notify) {
 
     const outcome = await callSummarizer(
         passage.text,
-        target.context,
+        /** @type {string} */ (target.context),
         {
             kind: 'regenerate',
             sourceRange: target.range,
@@ -171,9 +192,7 @@ async function regenerateSnippetWithTarget(target, notify) {
     target.snippet.timestamp = Date.now();
     target.snippet.regenerated = true;
     Object.assign(target.snippet, buildSnippetMetadataFromState(parseSnippet(newSummary).state));
-    bumpSummaryStoreMutationEpoch(getChatStore());
-
-    await saveSnippetStore();
+    await commitSnippetMutation(getChatStore());
     return { status: 'regenerated', range: target.range };
 }
 
@@ -183,11 +202,12 @@ async function regenerateSnippetWithTarget(target, notify) {
  * for a contiguous Layer 0 source range while no summarization is running.
  * @param {SummaryceptionStore} store
  * @param {ChatMessage[]} chat
- * @param {number} layerIndex
- * @param {number} snippetIndex
+ * @param {{ layerIndex: number, snippetIndex: number }} position
+ * @param {{ includeContext?: boolean }} [options] - Skip context building for status-only callers.
  * @returns {RegenerationTarget | RegenerationUnavailable}
  */
-function resolveRegenerationTarget(store, chat, layerIndex, snippetIndex) {
+function resolveRegenerationTarget(store, chat, position, { includeContext = true } = {}) {
+    const { layerIndex, snippetIndex } = position;
     const snippet = getSnippetAt(store, layerIndex, snippetIndex);
     if (!snippet) {
         return { status: 'missing' };
@@ -210,7 +230,9 @@ function resolveRegenerationTarget(store, chat, layerIndex, snippetIndex) {
         status: 'ready',
         snippet,
         range: /** @type {[number, number]} */ ([indices[0], indices[indices.length - 1]]),
-        context: buildSnippetContext(store, layerIndex, snippetIndex),
+        ...(includeContext
+            ? { context: buildSnippetContext(store, layerIndex, snippetIndex) }
+            : {}),
     };
 }
 
@@ -224,6 +246,17 @@ function getSnippetAt(store, layerIndex, snippetIndex) {
 async function saveSnippetStore() {
     await saveChatStore();
     refreshExtensionState({ injection: true, ui: false });
+}
+
+/**
+ * The Snippet Commit point: bump the Mutation Epoch, then persist the store.
+ * Every snippet mutation routes through here.
+ * @param {SummaryceptionStore} store
+ * @returns {Promise<void>}
+ */
+async function commitSnippetMutation(store) {
+    bumpSummaryStoreMutationEpoch(store);
+    await saveSnippetStore();
 }
 
 function buildSnippetContext(store, excludeLayerIndex, excludeSnippetIndex) {

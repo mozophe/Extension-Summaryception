@@ -11,11 +11,19 @@ _Avoid_: Tier, level
 **Snippet**:
 One summary text unit inside a layer, owned by the store and carrying stable message-identifier provenance.
 
+**Snippet Commit**:
+The single point every Snippet mutation passes through: apply the change, bump the Mutation Epoch, persist.
+_Avoid_: Snippet save
+
 **Promotion**:
 Moving merged older snippets from a layer into the next deeper layer.
 
 **Promotion Drain**:
 The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the stop guard trips, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
+
+**Regeneration**:
+Rebuilding one Layer 0 Snippet from its source turns through a new summarizer request.
+_Avoid_: Redo, re-summarize
 
 **Ghosting**:
 Hiding summarized turns from model context through the host command while keeping them visible in chat.

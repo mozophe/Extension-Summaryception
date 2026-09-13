@@ -60,6 +60,25 @@ export function extractSnippetMetadata(snippet = {}) {
 }
 
 /**
+ * Derive structured display metadata for a snippet. Entry layers compose
+ * user-facing strings from these fields; this module returns data only.
+ * @param {object} snippet
+ * @param {string[]} [snippet.sourceMessageIds] - Stable source message identifiers.
+ * @param {number} [snippet.mergedCount] - How many child snippets were merged in.
+ * @param {number} [snippet.fromLayer] - Layer the merged children came from.
+ * @param {boolean} [snippet.promoted] - Whether promotion created this snippet.
+ * @returns {{ sourceCount: number, mergedCount: number, fromLayer: number | undefined, promoted: boolean }}
+ */
+export function getSnippetDisplayMeta(snippet) {
+    return {
+        sourceCount: snippet.sourceMessageIds?.length || 0,
+        mergedCount: snippet.mergedCount || 0,
+        fromLayer: snippet.fromLayer,
+        promoted: Boolean(snippet.promoted),
+    };
+}
+
+/**
  * Format a snippet as anchored narrative for chronology or promotion input.
  * Parses the snippet, strips any stored leading anchor from the narrative when
  * an anchor was produced, and joins anchor + narrative with single spaces.

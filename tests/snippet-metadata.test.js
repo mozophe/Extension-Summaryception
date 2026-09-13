@@ -5,6 +5,7 @@ import {
     extractSnippetMetadata,
     formatCompactSnippetAnchor,
     formatSnippetAnchor,
+    getSnippetDisplayMeta,
 } from '../src/core/snippet-metadata.js';
 import { installSummaryContext, makeMessages } from './test-helpers.js';
 
@@ -60,5 +61,34 @@ describe('live metadata anchors', () => {
     it('omits anchors when no source ID resolves', () => {
         installSummaryContext({ chat: makeMessages(1) });
         expect(formatSnippetAnchor({ sourceMessageIds: ['missing'] })).toBe('');
+    });
+});
+
+describe('getSnippetDisplayMeta', () => {
+    it('derives counts from a source snippet', () => {
+        expect(getSnippetDisplayMeta({ sourceMessageIds: ['a', 'b', 'c'] })).toEqual({
+            sourceCount: 3,
+            mergedCount: 0,
+            fromLayer: undefined,
+            promoted: false,
+        });
+    });
+
+    it('derives merge provenance and promotion from a merged snippet', () => {
+        expect(getSnippetDisplayMeta({ mergedCount: 4, fromLayer: 1, promoted: 1 })).toEqual({
+            sourceCount: 0,
+            mergedCount: 4,
+            fromLayer: 1,
+            promoted: true,
+        });
+    });
+
+    it('derives safe defaults from a bare snippet', () => {
+        expect(getSnippetDisplayMeta({})).toEqual({
+            sourceCount: 0,
+            mergedCount: 0,
+            fromLayer: undefined,
+            promoted: false,
+        });
     });
 });

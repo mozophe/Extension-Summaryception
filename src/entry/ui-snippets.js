@@ -1,9 +1,11 @@
 import { TOAST_TITLE, layerLabel, listNonEmptyLayers } from '../foundation/constants.js';
 import { getChatStore } from '../foundation/state.js';
+import { getSnippetDisplayMeta } from '../core/snippet-metadata.js';
 import {
     deleteSnippetAt,
     getSnippetRegenerationTarget,
     getSnippetTextAt,
+    isRegenerationCandidate,
     regenerateSnippetAt,
     updateSnippetTextAt,
 } from '../features/snippet-manager.js';
@@ -108,18 +110,18 @@ function buildSnippetBrowserItem(snippet, layerIndex, snippetIndex) {
         snippetIndex,
         text: snippet.text,
         meta: getSnippetMeta(snippet),
-        canRedo: Boolean(layerIndex === 0 && snippet.sourceMessageIds?.length),
+        canRedo: isRegenerationCandidate(layerIndex, snippetIndex),
     };
 }
 
 function getSnippetMeta(snippet) {
-    const sourceCount = snippet.sourceMessageIds?.length || 0;
+    const { sourceCount, mergedCount, fromLayer, promoted } = getSnippetDisplayMeta(snippet);
     const rangeStr = sourceCount
         ? `${sourceCount} source messages`
-        : snippet.mergedCount
-          ? `merged ${snippet.mergedCount} from L${snippet.fromLayer}`
+        : mergedCount
+          ? `merged ${mergedCount} from L${fromLayer}`
           : '';
-    const seedStr = snippet.promoted ? ' promoted' : '';
+    const seedStr = promoted ? ' promoted' : '';
     return `${rangeStr}${seedStr}`;
 }
 
@@ -370,6 +372,7 @@ async function commitSnippetEdit(textarea, position) {
             timeOut: 1500,
         });
     }
+    // 'unchanged'/'missing'/'empty' stay silent: re-render restores truth; accidental Enter must not toast.
 }
 
 function resizeSnippetEdit(textarea) {
