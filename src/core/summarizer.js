@@ -4,9 +4,9 @@ import { SummarizerQueue } from './summarizer-queue.js';
 import { withUsageRun } from './summarizer-usage.js';
 import { flushPendingChatSave } from './persist-state.js';
 import {
-    runCatchup as runEngineCatchup,
+    describeManualRun as describeEngineManualRun,
     runElasticAutoCycle,
-    runSlopBreaker as runEngineSlopBreaker,
+    runManual as runEngineManual,
     yieldWorkerCycle,
 } from './summarizer-engine.js';
 import {
@@ -140,22 +140,25 @@ export function requestSummarization() {
     return summarizerQueue.request();
 }
 
+export { ELASTIC_STRATEGIES } from './summarizer-engine.js';
+
 /**
- * Force the catch-up pass to summarize turns beyond the dynamic verbatim window.
+ * Run Force Summarize or Slop Breaker through the shared engine.
+ * @param {'FORCE' | 'SLOP'} strategy
  * @param {ManualRunOptions} [options]
  * @returns {Promise<ManualRunOutcome>}
  */
-export async function runCatchup(options = {}) {
-    return await runEngineCatchup(getManualRunnerDeps(), options);
+export async function runManual(strategy, options = {}) {
+    return await runEngineManual(getManualRunnerDeps(), strategy, options);
 }
 
 /**
- * Run Slop Breaker up to a fixed live-context cut.
- * @param {ManualRunOptions} [options]
- * @returns {Promise<ManualRunOutcome>}
+ * Describe the manual work one strategy would run, without running it.
+ * @param {'FORCE' | 'SLOP'} strategy
+ * @returns {Promise<{ ready: boolean, backlog: number }>}
  */
-export async function runSlopBreaker(options = {}) {
-    return await runEngineSlopBreaker(getManualRunnerDeps(), options);
+export function describeManualRun(strategy) {
+    return describeEngineManualRun(strategy);
 }
 
 /**

@@ -2,7 +2,6 @@ import {
     MEMORY_MODES,
     MEMORY_POSITIONS,
     UI_MODES,
-    defaultSettings,
     layerLabel,
     listNonEmptyLayers,
 } from '../foundation/constants.js';
@@ -18,7 +17,8 @@ import {
 import { getIsSummarizing } from '../core/summarizer.js';
 import { countTextTokens, formatCompactTokenCount, formatTokenValue } from '../core/token-count.js';
 
-import { buildAutoSummaryRoutePlan } from '../core/summarization-routes.js';
+import { describeAutoWork } from '../core/summarization-routes.js';
+import { estimateContextPreview } from '../core/token-budget.js';
 import { getEffectiveMemoryUsage } from '../core/memory-budget.js';
 import { assembleSummaryBlock } from '../features/injection.js';
 import { syncAllSettingsToDOM, syncRoleMaskModeControl } from './ui-bind.js';
@@ -44,18 +44,16 @@ export async function updateUI() {
         // alwaysOn category: the input is disabled in markup, so reflect it as
         // permanently ticked rather than reading the (ignored) persisted flag.
         $('#sc_state_cat_date_time').prop('checked', true);
-        const plan = await buildAutoSummaryRoutePlan(getChat(), store, effectiveSettings).catch(
-            () => null,
-        );
+        const work = await describeAutoWork(getChat(), store, effectiveSettings).catch(() => null);
         const ghostedCount = getGhostedCount();
         const metrics = {
             totalSnippets: listNonEmptyLayers(store).reduce((n, { layer }) => n + layer.length, 0),
         };
 
-        const overview = { settings: effectiveSettings, plan, ghostedCount, metrics };
+        const overview = { settings: effectiveSettings, work, ghostedCount, metrics };
         await renderStatusOverview('sc_status', 'enabled', overview);
         await renderStatusOverview('sc_easy_status', 'mode', overview);
-        await renderBudgetStatus(effectiveSettings, store, plan);
+        await renderBudgetStatus(effectiveSettings, store, work);
         await renderMemoryBudget(effectiveSettings, store, 'easy_memory');
         renderLayerStats(effectiveSettings, store, ghostedCount);
         await renderPreview();
@@ -102,38 +100,12 @@ function syncEasyPayloadSchematic(s = getEffectiveSettings()) {
 }
 
 /**
- * Build configured recent/queued context limits for the main request preview.
+ * Sync the request-context preview lines from the shared core estimator.
  * @param {ReturnType<typeof getSettings>} [s]
- * @returns {{ rawChatMin: number, rawChatMax: number, mainMin: number, mainMax: number }}
- */
-export function buildMainContextPreviewModel(s = getEffectiveSettings()) {
-    const memoryBudget = readTokenSetting(s, 'memoryTokenBudget');
-    const verbatimBudget = readTokenSetting(s, 'verbatimTokenBudget');
-    const queuedBudget = readTokenSetting(s, 'queuedTokenBudget');
-    return {
-        rawChatMin: verbatimBudget,
-        rawChatMax: verbatimBudget + queuedBudget,
-        mainMin: memoryBudget + verbatimBudget,
-        mainMax: memoryBudget + verbatimBudget + queuedBudget,
-    };
-}
-
-/**
- *
+ * @returns {void}
  */
 export function syncLLMContextPreview(s = getEffectiveSettings()) {
-    const model = buildMainContextPreviewModel(s);
-    const maxL0Source = readTokenSetting(s, 'maxL0SourceTokens');
-    const minL0Source = readTokenSetting(s, 'minSummaryBudget');
-    const memoryBudget = readTokenSetting(s, 'memoryTokenBudget');
-    const snippetsPerPromotion = readTokenSetting(s, 'snippetsPerPromotion');
-    const summaryTarget = readTokenSetting(s, 'layer0SummaryTokenTarget');
-    const BASE_PROMPT_OVERHEAD = 2000;
-    const DEEP_MEMORY_RATIO = 0.5;
-    const l0Typical = minL0Source + memoryBudget + BASE_PROMPT_OVERHEAD;
-    const l0Max = maxL0Source + memoryBudget + BASE_PROMPT_OVERHEAD;
-    const l1Source = snippetsPerPromotion * summaryTarget;
-    const l1Total = l1Source + Math.round(memoryBudget * DEEP_MEMORY_RATIO) + 1000;
+    const model = estimateContextPreview(s);
     const $mainValue = $('#sc_llm_context_main');
     const $l0Value = $('#sc_llm_context_l0');
     const $l1Value = $('#sc_llm_context_l1');
@@ -141,17 +113,12 @@ export function syncLLMContextPreview(s = getEffectiveSettings()) {
         `${formatCompactTokenCount(model.mainMin)} → ${formatCompactTokenCount(model.mainMax)} + ST prompt`,
     );
     $l0Value.text(
-        `~${formatCompactTokenCount(l0Typical)} (Max ~${formatCompactTokenCount(l0Max)})`,
+        `~${formatCompactTokenCount(model.l0Typical)} (Max ~${formatCompactTokenCount(model.l0Max)})`,
     );
-    $l1Value.text(`Max ~${formatCompactTokenCount(l1Total)} tokens`);
+    $l1Value.text(`Max ~${formatCompactTokenCount(model.l1Total)} tokens`);
     setContextValueColor($mainValue, model.mainMax);
-    setContextValueColor($l0Value, l0Typical);
-    setContextValueColor($l1Value, l1Total);
-}
-
-function readTokenSetting(settings, key) {
-    const number = Number(settings[key]);
-    return Number.isFinite(number) ? number : defaultSettings[key];
+    setContextValueColor($l0Value, model.l0Typical);
+    setContextValueColor($l1Value, model.l1Total);
 }
 
 function setContextValueColor($element, tokens) {
@@ -177,9 +144,9 @@ function getContextColorClass(tokens) {
 }
 
 async function renderStatusOverview(prefix, modeField, overview) {
-    const { settings: s, plan, ghostedCount, metrics } = overview;
+    const { settings: s, work, ghostedCount, metrics } = overview;
     $(`#${prefix}_${modeField}`).text(getModeLabel(s));
-    $(`#${prefix}_worker`).text(await getWorkerLabel(s, plan));
+    $(`#${prefix}_worker`).text(await getWorkerLabel(s, work));
     $(`#${prefix}_snippets`).text(String(metrics.totalSnippets));
     $(`#${prefix}_ghosted`).text(String(ghostedCount));
 }
@@ -194,7 +161,13 @@ function getModeLabel(s) {
     return 'Off';
 }
 
-async function getWorkerLabel(s, plan) {
+/**
+ * Build the worker status label from the auto work read model.
+ * @param {ReturnType<typeof getEffectiveSettings>} s
+ * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
+ * @returns {Promise<string>}
+ */
+async function getWorkerLabel(s, work) {
     if (getIsSummarizing()) {
         return 'Running';
     }
@@ -202,7 +175,7 @@ async function getWorkerLabel(s, plan) {
         return 'Off';
     }
 
-    const backlogCount = plan?.ready ? Math.max(plan.batchTurns.length, plan.overflowCount) : 0;
+    const backlogCount = work?.ready ? work.backlog : 0;
     return backlogCount > 0 ? `Backlog ${backlogCount}` : 'Idle';
 }
 
@@ -292,9 +265,9 @@ export function formatBudgetTokenLabel(count, estimated = false) {
     return formatTokenValue(normalizeBudgetCount(count), estimated);
 }
 
-async function renderBudgetStatus(s, store, plan) {
-    await renderVerbatimBudget(s, plan);
-    await renderTriggerGauge(s, plan);
+async function renderBudgetStatus(s, store, work) {
+    await renderVerbatimBudget(s, work);
+    await renderTriggerGauge(s, work);
     await renderMemoryBudget(s, store);
 }
 
@@ -317,31 +290,42 @@ async function renderBudgetCard(prefix, build) {
     }
 }
 
-async function renderVerbatimBudget(s, plan) {
+/**
+ * Render the verbatim budget card from the auto work read model.
+ * @param {ReturnType<typeof getEffectiveSettings>} s
+ * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
+ * @returns {Promise<void>}
+ */
+async function renderVerbatimBudget(s, work) {
     await renderBudgetCard('verbatim', () => {
-        if (!plan) {
-            throw new Error('Summary route plan unavailable');
+        if (!work) {
+            throw new Error('Summary work read model unavailable');
         }
-        const stats = plan.rawPlan.verbatimStats || { finalTokens: 0, finalTokensEstimated: false };
         return {
             budget: s.verbatimTokenBudget,
             verbatim: {
                 label: 'Recent Chat',
                 kind: 'verbatim',
-                count: stats.finalTokens,
-                estimated: stats.finalTokensEstimated,
+                count: work.verbatimTokens,
+                estimated: work.verbatimEstimated,
             },
             layers: [],
         };
     });
 }
 
-async function renderTriggerGauge(s, plan) {
+/**
+ * Render the queued-chat trigger gauge from the auto work read model.
+ * @param {ReturnType<typeof getEffectiveSettings>} s
+ * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
+ * @returns {Promise<void>}
+ */
+async function renderTriggerGauge(s, work) {
     await renderBudgetCard('trigger', () => {
-        if (!plan) {
-            throw new Error('Summary route plan unavailable');
+        if (!work) {
+            throw new Error('Summary work read model unavailable');
         }
-        const model = buildTriggerGaugeModel(plan, s);
+        const model = buildTriggerGaugeModel(work, s);
         return {
             budget: model.triggerTokens,
             verbatim: {
@@ -357,16 +341,15 @@ async function renderTriggerGauge(s, plan) {
 }
 
 /**
- * Compute the queued-chat gauge from the unified planner.
- * @param {import('../core/summarization-routes.js').SummaryRoutePlan} plan
+ * Compute the queued-chat gauge from the auto work read model.
+ * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
  * @param {ReturnType<typeof getEffectiveSettings>} s
  * @returns {{ queuedTokens: number, queuedEstimated: boolean, triggerTokens: number, label: string }}
  */
-export function buildTriggerGaugeModel(plan, s) {
-    const queuedStats = plan.rawPlan?.queuedStats;
+export function buildTriggerGaugeModel(work, s) {
     return {
-        queuedTokens: normalizeBudgetCount(queuedStats?.finalTokens ?? 0),
-        queuedEstimated: Boolean(queuedStats?.finalTokensEstimated),
+        queuedTokens: normalizeBudgetCount(work?.queuedTokens ?? 0),
+        queuedEstimated: Boolean(work?.queuedEstimated),
         triggerTokens: normalizeBudgetCount(s.queuedTokenBudget),
         label: 'Summarize at Recent + Queued',
     };

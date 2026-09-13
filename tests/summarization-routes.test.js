@@ -5,6 +5,7 @@ import {
     SUMMARY_ROUTES,
     buildAutoSummaryRoutePlan,
     buildForceSummaryRoutePlan,
+    describeAutoWork,
 } from '../src/core/summarization-routes.js';
 import { MEMORY_MODES } from '../src/foundation/constants.js';
 import {
@@ -71,19 +72,18 @@ describe('buildAutoSummaryRoutePlan', () => {
 
 describe('buildForceSummaryRoutePlan', () => {
     it('summarizes the queued block while preserving Recent Chat', async () => {
+        const settings = readySettings(MEMORY_MODES.BALANCED);
         const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
-        const plan = await buildForceSummaryRoutePlan(
-            chat,
-            makeSummaryStore(),
-            readySettings(MEMORY_MODES.BALANCED),
-        );
+        const plan = await buildForceSummaryRoutePlan(chat, makeSummaryStore(), settings);
         expect(plan.reason).toBe('force');
         expect(plan.ready).toBe(true);
-        expect(plan.rawPlan.verbatimStartIdx).toBeGreaterThan(0);
-        expect(plan.batchTurns.every((turn) => turn.index < plan.rawPlan.verbatimStartIdx)).toBe(
-            true,
-        );
-        expect(plan.batchTurns.length).toBeLessThan(plan.rawPlan.visibleTurnCount);
+        expect(plan.targetIndex).toBeGreaterThan(0);
+        expect(plan.batchTurns.every((turn) => turn.index < plan.targetIndex)).toBe(true);
+        expect(plan.batchTurns.length).toBeLessThan(plan.visibleTurnCount);
+        expect(plan.visibleTurnCount).toBeGreaterThan(0);
+        expect(plan.tokenStats.partitionCount).toBe(plan.partitions.length);
+        expect(plan.tokenStats.verbatimBudget).toBe(settings.verbatimTokenBudget);
+        expect(plan.tokenStats.queuedBudget).toBe(settings.queuedTokenBudget);
     });
 
     it('stays idle on empty chat', async () => {
@@ -94,5 +94,29 @@ describe('buildForceSummaryRoutePlan', () => {
         );
         expect(plan.reason).toBe('none');
         expect(plan.ready).toBe(false);
+    });
+});
+describe('describeAutoWork', () => {
+    it('reports ready backlog and token scalars for eligible work', async () => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const work = await describeAutoWork(
+            chat,
+            makeSummaryStore(),
+            readySettings(MEMORY_MODES.BALANCED),
+        );
+        expect(work.ready).toBe(true);
+        expect(work.backlog).toBeGreaterThan(0);
+        expect(work.verbatimTokens).toBeGreaterThan(0);
+        expect(work.queuedTokens).toBeGreaterThan(0);
+    });
+
+    it('reports zero backlog and zero tokens without eligible work', async () => {
+        const work = await describeAutoWork([], makeSummaryStore(), makeSummarySettings());
+        expect(work.ready).toBe(false);
+        expect(work.backlog).toBe(0);
+        expect(work.verbatimTokens).toBe(0);
+        expect(work.verbatimEstimated).toBe(false);
+        expect(work.queuedTokens).toBe(0);
+        expect(work.queuedEstimated).toBe(false);
     });
 });

@@ -35,7 +35,7 @@ vi.mock('../src/core/summary-preflight.js', () => ({
     prepareSummaryCycle: vi.fn(async () => ({ chat: [], store: {} })),
 }));
 
-import { runCatchup, runSlopBreaker } from '../src/core/summarizer-engine.js';
+import { ELASTIC_STRATEGIES, runManual } from '../src/core/summarizer-engine.js';
 import { installSummaryContext } from './test-helpers.js';
 
 const TARGET_INDEX = 5;
@@ -86,12 +86,15 @@ describe('manual run progress callbacks', () => {
             batchTurns: [{ index: 2 }],
             partitions: [{}],
             totalBatches: 1,
-            rawPlan: { queuedEndIdx: TARGET_INDEX, visibleTurnCount: 4 },
+            targetIndex: TARGET_INDEX,
         });
         const onStart = vi.fn();
         const onProgress = vi.fn();
 
-        const outcome = await runCatchup(makeDeps(), { onStart, onProgress });
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {
+            onStart,
+            onProgress,
+        });
 
         expect(onStart).toHaveBeenCalledWith({
             completed: 0,
@@ -114,11 +117,10 @@ describe('manual run progress callbacks', () => {
             totalBatches: 1,
             sourceEndIdx: TARGET_INDEX,
             targetIndex: TARGET_INDEX,
-            rawPlan: {},
         });
         const onStart = vi.fn();
 
-        const outcome = await runSlopBreaker(makeDeps(), { onStart });
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.SLOP, { onStart });
 
         expect(onStart).toHaveBeenCalledWith({
             completed: 0,
@@ -138,12 +140,12 @@ describe('manual run progress callbacks', () => {
             batchTurns: [{ index: 2 }],
             partitions: [{}],
             totalBatches: 1,
-            rawPlan: { queuedEndIdx: TARGET_INDEX, visibleTurnCount: 4 },
+            targetIndex: TARGET_INDEX,
         });
         const controller = new AbortController();
         controller.abort();
 
-        const outcome = await runCatchup(makeDeps(), {
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {
             signal: controller.signal,
         });
 

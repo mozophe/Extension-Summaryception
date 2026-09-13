@@ -19,10 +19,8 @@ import {
 } from './summarization-routes.js';
 import { prepareSummaryCycle } from './summary-preflight.js';
 export const ELASTIC_STRATEGIES = Object.freeze({
-    AUTO: 'AUTO',
     FORCE: 'FORCE',
     SLOP: 'SLOP',
-    CACHE: 'CACHE',
 });
 
 /**
@@ -54,16 +52,16 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @property {import('./notify.js').NotifyAdapter} [notify] - Adapter for progress notices; absent runs stay silent.
  */
 /**
- * @typedef {object} ManualTask
- * @property {string} kind - Manual strategy identifier.
+ * Internal manual loop task built from one strategy's initial route plan.
+ * @typedef {object} ManualLoopTask
  * @property {number} totalBatches - Estimated total batches for the run.
  * @property {string} label - Short progress label for the active operation.
  * @property {string} title - User-visible progress title.
  * @property {number} targetIndex - Summarized boundary the run must reach.
- * @property {() => Promise<*>} getBatch - Builds the next route plan to commit.
- * @property {(batch: *) => boolean} isBatchReady - Whether a route plan has work.
- * @property {(batch: *, notify?: import('./notify.js').NotifyAdapter) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
- * @property {(outcome: ManualRunOutcome, task: ManualTask) => boolean} isComplete - Whether the run reached its target.
+ * @property {() => Promise<import('./summarization-routes.js').SummaryRoutePlan>} getBatch - Builds the next route plan to commit.
+ * @property {(batch: import('./summarization-routes.js').SummaryRoutePlan) => boolean} isBatchReady - Whether a route plan has work.
+ * @property {(batch: import('./summarization-routes.js').SummaryRoutePlan, notify?: import('./notify.js').NotifyAdapter) => Promise<{ success: boolean, committed: boolean, done?: boolean }>} processBatch - Commits one route plan.
+ * @property {(outcome: ManualRunOutcome, task: ManualLoopTask) => boolean} isComplete - Whether the run reached its target.
  */
 
 /**
@@ -107,7 +105,7 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
         return 'idle';
     }
 
-    queue.setPhase(routePlan.phase);
+    queue.setPhase('layer0');
     return await processRoutePlan(routePlan, notify);
 }
 /**
@@ -119,57 +117,60 @@ export async function yieldWorkerCycle() {
 }
 
 /**
- * Run the force-summarize catch-up loop.
- * The engine builds its own force route plan; callers only pass run options.
- * @param {ManualRunnerDeps} deps
- * @param {ManualRunOptions} [options]
- * @returns {Promise<ManualRunOutcome>}
- */
-export async function runCatchup(deps, options = {}) {
-    return await deps.withUsageRun('force summarize catch-up', async () => {
-        trace('>>> ENTERING runCatchup');
-        return await runElasticManual(deps, ELASTIC_STRATEGIES.FORCE, options);
-    });
-}
-
-/**
- * Run Slop Breaker up to a fixed live-context cut.
- * @param {ManualRunnerDeps} deps
- * @param {ManualRunOptions} [options]
- * @returns {Promise<ManualRunOutcome>}
- */
-export async function runSlopBreaker(deps, options = {}) {
-    return await deps.withUsageRun('slop breaker', async () => {
-        return await runElasticManual(deps, ELASTIC_STRATEGIES.SLOP, options);
-    });
-}
-
-/**
  * Run Force Summarize or Slop Breaker through the shared engine.
+ * The engine builds its own route plan; callers only pass run options.
  * @param {ManualRunnerDeps} deps
  * @param {'FORCE' | 'SLOP'} strategy
  * @param {ManualRunOptions} [options]
  * @returns {Promise<ManualRunOutcome>}
  */
-export async function runElasticManual(deps, strategy, options = {}) {
-    if (!(await prepareManualRun(deps, `manual ${strategy.toLowerCase()}`))) {
-        return createManualRunOutcome({ blocked: true });
-    }
-
-    const prepared = await prepareSummaryCycle();
-    const task = await buildManualTask(strategy, prepared);
-    if (!task) {
+export async function runManual(deps, strategy, options = {}) {
+    const manualStrategy = MANUAL_STRATEGIES[strategy];
+    if (!manualStrategy) {
         return createManualRunOutcome();
     }
+    return await deps.withUsageRun(manualStrategy.usageLabel, async () => {
+        if (!(await prepareManualRun(deps, `manual ${strategy.toLowerCase()}`))) {
+            return createManualRunOutcome({ blocked: true });
+        }
 
-    const outcome = await executeManualTask(deps, task, options);
-    const promotionStatus = await normalizeManualMemory(outcome, options.notify);
-    deps.refreshUi();
+        const prepared = await prepareSummaryCycle();
+        const task = await buildManualTask(manualStrategy, prepared);
+        if (!task) {
+            return createManualRunOutcome();
+        }
+
+        const outcome = await executeManualTask(deps, task, options);
+        const promotionStatus = await normalizeManualMemory(outcome, options.notify);
+        deps.refreshUi();
+        return {
+            ...outcome,
+            blocked: outcome.blocked || promotionStatus === 'blocked',
+            fullyCommitted: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
+            shouldReload: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
+        };
+    });
+}
+
+/**
+ * Describe the manual work one strategy would run, without preflight or side effects.
+ * @param {'FORCE' | 'SLOP'} strategy
+ * @returns {Promise<{ ready: boolean, backlog: number }>}
+ */
+export async function describeManualRun(strategy) {
+    const chat = getChat();
+    const store = getChatStore();
+    const settings = getEffectiveSettings();
+    if (strategy !== ELASTIC_STRATEGIES.FORCE && strategy !== ELASTIC_STRATEGIES.SLOP) {
+        return { ready: false, backlog: 0 };
+    }
+    const plan =
+        strategy === ELASTIC_STRATEGIES.SLOP
+            ? await buildSlopSummaryRoutePlan(chat, store, settings)
+            : await buildForceSummaryRoutePlan(chat, store, settings);
     return {
-        ...outcome,
-        blocked: outcome.blocked || promotionStatus === 'blocked',
-        fullyCommitted: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
-        shouldReload: isManualRunComplete(outcome, task) && promotionStatus === 'completed',
+        ready: plan.ready,
+        backlog: Math.max(plan.batchTurns.length, plan.overflowCount),
     };
 }
 
@@ -213,97 +214,97 @@ async function commitRoutePlan(routePlan, options = {}, notify) {
 const isManualTargetReached = (_outcome, task) =>
     getCurrentSummarizedBoundary(getChat(), getChatStore()) >= task.targetIndex;
 
+/**
+ * Per-strategy manual run configuration. `assessCommit` turns the summarized
+ * boundary movement around one batch commit into the batch result flags.
+ * @typedef {object} ManualStrategy
+ * @property {string} usageLabel - Usage accounting scope label for the run.
+ * @property {string} label - Short progress label for the active operation.
+ * @property {string} title - User-visible progress title.
+ * @property {(prepared?: { chat: ChatMessage[], store: SummaryceptionStore }, targetIndex?: number) => Promise<import('./summarization-routes.js').SummaryRoutePlan>} buildBatch - Builds the next route plan.
+ * @property {(plan: import('./summarization-routes.js').SummaryRoutePlan, beforeIndex: number, afterIndex: number) => { committed: boolean, done?: boolean }} assessCommit - Boundary assessment for one committed batch.
+ */
+
 const MANUAL_STRATEGIES = Object.freeze({
     [ELASTIC_STRATEGIES.FORCE]: {
-        buildTask: buildForceTask,
-        processBatch: processForceBatch,
-        isComplete: isManualTargetReached,
+        usageLabel: 'force summarize catch-up',
+        label: 'Processing',
+        title: 'Summaryception Catch-Up',
+        buildBatch: buildForceBatch,
+        assessCommit: (_plan, beforeIndex, afterIndex) => ({
+            committed: afterIndex > beforeIndex,
+        }),
     },
     [ELASTIC_STRATEGIES.SLOP]: {
-        buildTask: buildSlopTask,
-        processBatch: processSlopBatch,
-        isComplete: isManualTargetReached,
+        usageLabel: 'slop breaker',
+        label: 'Breaking slop',
+        title: 'Summaryception Slop Breaker',
+        buildBatch: buildSlopBatch,
+        assessCommit: (plan, _beforeIndex, afterIndex) => ({
+            committed: plan.sourceEndIdx !== undefined && afterIndex >= plan.sourceEndIdx,
+            done: plan.targetIndex !== undefined && afterIndex >= plan.targetIndex,
+        }),
     },
 });
 
 /**
- * Build the manual task for one strategy.
- * @param {'FORCE' | 'SLOP'} strategy
+ * Build the manual loop task for one strategy from its initial route plan.
+ * @param {ManualStrategy} strategy
  * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
- * @returns {Promise<ManualTask | null | undefined>}
+ * @returns {Promise<ManualLoopTask | null>}
  */
 async function buildManualTask(strategy, prepared) {
-    const manualStrategy = MANUAL_STRATEGIES[strategy];
-    return await manualStrategy?.buildTask(manualStrategy, prepared);
-}
-
-/**
- * @param {*} strategy
- * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
- * @returns {Promise<ManualTask | null>}
- */
-async function buildForceTask(strategy, prepared) {
-    const initialRoutePlan = await getForceRoutePlan(prepared);
-    if (!initialRoutePlan.ready) {
-        return null;
-    }
-
-    return {
-        kind: ELASTIC_STRATEGIES.FORCE,
-        totalBatches: initialRoutePlan.totalBatches,
-        label: 'Processing',
-        title: 'Summaryception Catch-Up',
-        targetIndex: initialRoutePlan.rawPlan.queuedEndIdx,
-        getBatch: getForceRoutePlan,
-        isBatchReady: (batch) => batch?.ready,
-        processBatch: strategy.processBatch,
-        isComplete: strategy.isComplete,
-    };
-}
-
-/**
- * @param {*} strategy
- * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} prepared
- * @returns {Promise<ManualTask | null>}
- */
-async function buildSlopTask(strategy, prepared) {
-    const initialRoutePlan = await buildSlopSummaryRoutePlan(
-        prepared.chat,
-        prepared.store,
-        getEffectiveSettings(),
-    );
+    const initialRoutePlan = await strategy.buildBatch(prepared);
     const targetIndex = initialRoutePlan.targetIndex;
     if (!initialRoutePlan.ready || typeof targetIndex !== 'number') {
         return null;
     }
 
     return {
-        kind: ELASTIC_STRATEGIES.SLOP,
         totalBatches: initialRoutePlan.totalBatches,
-        label: 'Breaking slop',
-        title: 'Summaryception Slop Breaker',
+        label: strategy.label,
+        title: strategy.title,
         targetIndex,
-        getBatch: async () => {
-            const cycle = await prepareSummaryCycle();
-            return await buildSlopSummaryRoutePlan(
-                cycle.chat,
-                cycle.store,
-                getEffectiveSettings(),
-                {
-                    targetIndex,
-                },
-            );
-        },
+        getBatch: () => strategy.buildBatch(undefined, targetIndex),
         isBatchReady: (batch) => batch?.ready,
-        processBatch: strategy.processBatch,
-        isComplete: strategy.isComplete,
+        processBatch: (batch, notify) => processStrategyBatch(batch, strategy, notify),
+        isComplete: isManualTargetReached,
     };
+}
+
+/**
+ * Build the next Force Summarize route plan.
+ * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} [prepared]
+ * @returns {Promise<import('./summarization-routes.js').SummaryRoutePlan>}
+ */
+async function buildForceBatch(prepared) {
+    const cycle = prepared || (await prepareSummaryCycle());
+    const plan = await buildForceSummaryRoutePlan(cycle.chat, cycle.store, getEffectiveSettings());
+    trace(`Current visible turns: ${plan.visibleTurnCount}, plan reason: ${plan.reason}`);
+    return plan;
+}
+
+/**
+ * Build the next Slop Breaker route plan. The first plan resolves its own cut;
+ * later batches pin the same fixed target boundary.
+ * @param {{ chat: ChatMessage[], store: SummaryceptionStore }} [prepared]
+ * @param {number} [targetIndex] Fixed chat index the run should summarize through.
+ * @returns {Promise<import('./summarization-routes.js').SummaryRoutePlan>}
+ */
+async function buildSlopBatch(prepared, targetIndex) {
+    const cycle = prepared || (await prepareSummaryCycle());
+    return await buildSlopSummaryRoutePlan(
+        cycle.chat,
+        cycle.store,
+        getEffectiveSettings(),
+        typeof targetIndex === 'number' ? { targetIndex } : {},
+    );
 }
 
 /**
  * Drive one manual task batch loop to completion.
  * @param {ManualRunnerDeps} deps
- * @param {ManualTask} task
+ * @param {ManualLoopTask} task
  * @param {ManualRunOptions} options
  * @returns {Promise<ManualRunOutcome>}
  */
@@ -402,33 +403,18 @@ function shouldStopManualLoop(outcome, result, signal, queue) {
     return false;
 }
 
-async function processForceBatch(plan, notify) {
-    trace('Processing force batch via elastic engine');
+/**
+ * Commit one route plan through the strategy's boundary assessment.
+ * @param {import('./summarization-routes.js').SummaryRoutePlan} plan
+ * @param {ManualStrategy} strategy
+ * @param {import('./notify.js').NotifyAdapter} [notify]
+ * @returns {Promise<{ success: boolean, committed: boolean, done?: boolean }>}
+ */
+async function processStrategyBatch(plan, strategy, notify) {
     const beforeIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     const success = await commitRoutePlan(plan, { catchExceptions: true }, notify);
     const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    return {
-        success,
-        committed: success && afterIndex > beforeIndex,
-    };
-}
-
-async function processSlopBatch(plan, notify) {
-    const success = await commitRoutePlan(plan, { catchExceptions: true }, notify);
-    const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    return {
-        success,
-        committed: success && afterIndex >= plan.sourceEndIdx,
-        done: afterIndex >= plan.targetIndex,
-    };
-}
-
-async function getForceRoutePlan(prepared) {
-    const cycle = prepared || (await prepareSummaryCycle());
-    const plan = await buildForceSummaryRoutePlan(cycle.chat, cycle.store, getEffectiveSettings());
-
-    trace(`Current visible turns: ${plan.rawPlan.visibleTurnCount}, plan reason: ${plan.reason}`);
-    return plan;
+    return { success, ...strategy.assessCommit(plan, beforeIndex, afterIndex) };
 }
 
 async function normalizeManualMemory(outcome, notify) {
@@ -487,10 +473,10 @@ function isCancelled(signal) {
 }
 
 function logRoutePlan(routePlan, s) {
-    const plan = routePlan.rawPlan;
+    const stats = routePlan.tokenStats;
     debug(
-        `Mode: ${s.memoryMode}, recent: ${formatTokenValue(plan.verbatimTokens)}/` +
-            `${formatTokenValue(plan.verbatimBudget)}, queued: ${formatTokenValue(plan.queuedTokens)}/` +
-            `${formatTokenValue(plan.queuedBudget)}, partitions: ${plan.partitions.length}`,
+        `Mode: ${s.memoryMode}, recent: ${formatTokenValue(stats.verbatimTokens)}/` +
+            `${formatTokenValue(stats.verbatimBudget)}, queued: ${formatTokenValue(stats.queuedTokens)}/` +
+            `${formatTokenValue(stats.queuedBudget)}, partitions: ${stats.partitionCount}`,
     );
 }

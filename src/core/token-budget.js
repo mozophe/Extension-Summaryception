@@ -1,3 +1,4 @@
+import { defaultSettings } from '../foundation/constants.js';
 import { getActiveLineCap } from '../foundation/state-categories.js';
 import { countTextTokens } from './token-count.js';
 import { parseStateBlock } from './summarizer-state.js';
@@ -167,4 +168,47 @@ export async function countLayer0SourceBudget({ sourceNarrativeTokens, sourceSta
         stateTokens,
         stateKeyCount: Object.keys(parseStateBlock(stateText).state).length,
     };
+}
+
+/** Overhead of the surrounding SillyTavern prompt in the main-request preview. */
+const PREVIEW_BASE_PROMPT_OVERHEAD = 2000;
+/** Fixed allowance for deep-layer snippets in the L1 preview line. */
+const PREVIEW_DEEP_MEMORY_OVERHEAD = 1000;
+
+/**
+ * Estimate the injected-context sizes shown by the settings preview panel.
+ * @param {ReturnType<typeof import('../foundation/state.js').getSettings>} settings
+ * @returns {{ rawChatMin: number, rawChatMax: number, mainMin: number, mainMax: number, l0Typical: number, l0Max: number, l1Total: number }}
+ */
+export function estimateContextPreview(settings) {
+    const memoryBudget = readTokenSetting(settings, 'memoryTokenBudget');
+    const verbatimBudget = readTokenSetting(settings, 'verbatimTokenBudget');
+    const queuedBudget = readTokenSetting(settings, 'queuedTokenBudget');
+    const minL0Source = readTokenSetting(settings, 'minSummaryBudget');
+    const maxL0Source = readTokenSetting(settings, 'maxL0SourceTokens');
+    const snippetsPerPromotion = readTokenSetting(settings, 'snippetsPerPromotion');
+    const summaryTarget = readTokenSetting(settings, 'layer0SummaryTokenTarget');
+    return {
+        rawChatMin: verbatimBudget,
+        rawChatMax: verbatimBudget + queuedBudget,
+        mainMin: memoryBudget + verbatimBudget,
+        mainMax: memoryBudget + verbatimBudget + queuedBudget,
+        l0Typical: minL0Source + memoryBudget + PREVIEW_BASE_PROMPT_OVERHEAD,
+        l0Max: maxL0Source + memoryBudget + PREVIEW_BASE_PROMPT_OVERHEAD,
+        l1Total:
+            snippetsPerPromotion * summaryTarget +
+            Math.round(memoryBudget * LAYER_SAFETY_MULTIPLIER.l1) +
+            PREVIEW_DEEP_MEMORY_OVERHEAD,
+    };
+}
+
+/**
+ * Read a numeric token setting, falling back to its default when unset or invalid.
+ * @param {object} settings
+ * @param {string} key
+ * @returns {number}
+ */
+function readTokenSetting(settings, key) {
+    const number = Number(settings[key]);
+    return Number.isFinite(number) ? number : defaultSettings[key];
 }

@@ -1,42 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MEMORY_MODES } from '../src/foundation/constants.js';
+import { estimateContextPreview } from '../src/core/token-budget.js';
 import { bindDataSettingElements, readLines } from '../src/entry/ui-bind.js';
 import { getSettings } from '../src/foundation/state.js';
-import { buildMainContextPreviewModel, buildTriggerGaugeModel } from '../src/entry/ui.js';
+import { buildTriggerGaugeModel } from '../src/entry/ui.js';
 import { installSummaryContext } from './test-helpers.js';
 
 describe('context limit and trigger gauge UI models', () => {
-    it('builds the main-request range from memory, verbatim, and queued budgets for both modes', () => {
-        const base = {
-            memoryTokenBudget: 10000,
-            verbatimTokenBudget: 16000,
-            queuedTokenBudget: 32000,
-        };
+    it('builds the context preview estimates from token budgets and defaults', () => {
         expect(
-            buildMainContextPreviewModel({ ...base, memoryMode: MEMORY_MODES.BALANCED }),
+            estimateContextPreview({
+                memoryTokenBudget: 10000,
+                verbatimTokenBudget: 16000,
+                queuedTokenBudget: 32000,
+            }),
         ).toEqual({
             rawChatMin: 16000,
             rawChatMax: 48000,
             mainMin: 26000,
             mainMax: 58000,
-        });
-        expect(
-            buildMainContextPreviewModel({ ...base, memoryMode: MEMORY_MODES.PREFIX_CACHE }),
-        ).toEqual({
-            rawChatMin: 16000,
-            rawChatMax: 48000,
-            mainMin: 26000,
-            mainMax: 58000,
+            l0Typical: 28000,
+            l0Max: 36000,
+            l1Total: 6840,
         });
     });
 
-    it('builds the queued gauge from queued planner stats and the queued budget', () => {
+    it('builds the queued gauge from the auto work read model and the queued budget', () => {
         expect(
             buildTriggerGaugeModel(
-                {
-                    rawPlan: { queuedStats: { finalTokens: 4321.2, finalTokensEstimated: true } },
-                },
+                { queuedTokens: 4321.2, queuedEstimated: true },
                 { queuedTokenBudget: 16000 },
             ),
         ).toEqual({

@@ -32,16 +32,13 @@ import {
 import { ghostMessagesInRange, unghostAllMessages } from '../core/ghosting.js';
 import {
     abortSummarization,
+    describeManualRun,
+    ELASTIC_STRATEGIES,
     getIsSummarizing,
     hasActiveAbortController,
     requestSummarization,
-    runCatchup,
-    runSlopBreaker,
+    runManual,
 } from '../core/summarizer.js';
-import {
-    buildForceSummaryRoutePlan,
-    buildSlopSummaryRoutePlan,
-} from '../core/summarization-routes.js';
 import { updateInjection } from '../features/injection.js';
 import { persistAndRefresh } from '../features/persist.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
@@ -466,19 +463,17 @@ async function executeForceSummarize($button) {
         '<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>',
         {
             run: async (options) => {
-                const plan = await buildForceSummaryRoutePlan(getChat(), getChatStore(), s);
-
-                if (!plan.ready) {
+                const preview = await describeManualRun(ELASTIC_STRATEGIES.FORCE);
+                if (!preview.ready) {
                     toastr.info('Nothing eligible to summarize.', TOAST_TITLE);
                     return;
                 }
 
-                const overflow = Math.max(plan.batchTurns.length, plan.overflowCount);
-                toastr.info(`${overflow} turns ready to process. Starting...`, TOAST_TITLE, {
+                toastr.info(`${preview.backlog} turns ready to process. Starting...`, TOAST_TITLE, {
                     timeOut: 2000,
                 });
 
-                return runCatchup(options);
+                return runManual(ELASTIC_STRATEGIES.FORCE, options);
             },
             report: showCatchupOutcome,
         },
@@ -495,8 +490,8 @@ async function onSlopBreaker() {
         return;
     }
 
-    const plan = await buildSlopSummaryRoutePlan(getChat(), getChatStore(), s);
-    if (!plan.ready) {
+    const preview = await describeManualRun(ELASTIC_STRATEGIES.SLOP);
+    if (!preview.ready) {
         showSlopBreakerNoop();
         return;
     }
@@ -508,7 +503,7 @@ async function onSlopBreaker() {
         $(this),
         '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
         {
-            run: (options) => runSlopBreaker(options),
+            run: (options) => runManual(ELASTIC_STRATEGIES.SLOP, options),
             report: showSlopBreakerOutcome,
         },
     );

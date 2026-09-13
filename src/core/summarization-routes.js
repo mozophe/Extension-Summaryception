@@ -15,7 +15,16 @@ export const SUMMARY_COMMIT_MODES = Object.freeze({
     ATOMIC_PARTITIONS: 'atomic-partitions',
 });
 
-const LAYER0_PHASE = /** @type {'layer0'} */ ('layer0');
+/**
+ * @typedef {object} SummaryRouteTokenStats
+ * @property {number} [verbatimTokens] Final token count of the verbatim tail.
+ * @property {boolean} [verbatimEstimated] Whether the verbatim count is an estimate.
+ * @property {number} [verbatimBudget] Configured verbatim token budget.
+ * @property {number} [queuedTokens] Final token count of the queued window.
+ * @property {boolean} [queuedEstimated] Whether the queued count is an estimate.
+ * @property {number} [queuedBudget] Configured queued token budget.
+ * @property {number} partitionCount Partitions covering the planned source span.
+ */
 
 /**
  * @typedef {object} SummaryRoutePlan
@@ -23,14 +32,14 @@ const LAYER0_PHASE = /** @type {'layer0'} */ ('layer0');
  * @property {boolean} ready True when the route can run a summarization batch now.
  * @property {string} reason Underlying chat window plan reason.
  * @property {string} commitMode Store commit strategy from `SUMMARY_COMMIT_MODES`.
- * @property {'layer0'} phase Pipeline phase marker for the route.
  * @property {import('./chatutils.js').AssistantTurn[]} batchTurns Turns selected for the current batch.
  * @property {import('./partition-planner.js').SourcePartition[]} partitions Source partitions to commit.
  * @property {number} overflowCount Eligible turns awaiting summarization.
  * @property {number} totalBatches Batches the route runs, 0 when not ready.
  * @property {number} [sourceEndIdx] Optional exclusive end of the source window.
- * @property {number} [targetIndex] Optional store target index for commits.
- * @property {object} rawPlan Underlying raw plan backing this route.
+ * @property {number} [targetIndex] Numeric target boundary the run must reach.
+ * @property {number} [visibleTurnCount] Assistant turns in the live chat window.
+ * @property {SummaryRouteTokenStats} tokenStats Token counts and budgets backing the route.
  */
 
 /**
@@ -49,12 +58,12 @@ export async function buildAutoSummaryRoutePlan(chat, store, settings) {
             ready: plan.reason === 'ready',
             reason: plan.reason,
             commitMode: SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS,
-            phase: LAYER0_PHASE,
             batchTurns: plan.batchTurns,
             partitions: plan.partitions,
             overflowCount: plan.overflowCount,
             totalBatches: plan.reason === 'ready' ? plan.partitions.length : 0,
-            rawPlan: plan,
+            visibleTurnCount: plan.visibleTurnCount,
+            tokenStats: buildWindowTokenStats(plan),
         };
     }
     return buildTurnRoute({
@@ -64,6 +73,36 @@ export async function buildAutoSummaryRoutePlan(chat, store, settings) {
         batchTurns: selectLayer0BatchTurns(plan),
         totalBatches: 1,
     });
+}
+
+/**
+ * Flat auto-work read model for status rendering.
+ * @typedef {object} AutoWorkReadModel
+ * @property {boolean} ready Whether an automatic batch is ready now.
+ * @property {number} backlog Eligible turns awaiting summarization.
+ * @property {number} verbatimTokens Token count of the verbatim tail.
+ * @property {boolean} verbatimEstimated Whether the verbatim count is an estimate.
+ * @property {number} queuedTokens Token count of the queued window.
+ * @property {boolean} queuedEstimated Whether the queued count is an estimate.
+ */
+
+/**
+ * Build the automatic route plan and flatten it into status scalars.
+ * @param {ChatMessage[]} chat
+ * @param {SummaryceptionStore} store
+ * @param {ExtensionSettings} settings
+ * @returns {Promise<AutoWorkReadModel>}
+ */
+export async function describeAutoWork(chat, store, settings) {
+    const plan = await buildAutoSummaryRoutePlan(chat, store, settings);
+    return {
+        ready: plan.ready,
+        backlog: Math.max(plan.batchTurns.length, plan.overflowCount),
+        verbatimTokens: plan.tokenStats.verbatimTokens ?? 0,
+        verbatimEstimated: plan.tokenStats.verbatimEstimated ?? false,
+        queuedTokens: plan.tokenStats.queuedTokens ?? 0,
+        queuedEstimated: plan.tokenStats.queuedEstimated ?? false,
+    };
 }
 
 /**
@@ -81,6 +120,7 @@ export async function buildForceSummaryRoutePlan(chat, store, settings) {
         plan,
         batchTurns: selectLayer0BatchTurns(plan),
         totalBatches: plan.partitions.length,
+        targetIndex: plan.queuedEndIdx,
     });
 }
 
@@ -99,29 +139,57 @@ export async function buildSlopSummaryRoutePlan(chat, store, settings, opts = {}
         ready: plan.reason === 'ready',
         reason: plan.reason,
         commitMode: SUMMARY_COMMIT_MODES.TURNS_WITH_SOURCE_END,
-        phase: LAYER0_PHASE,
         batchTurns: plan.batchTurns,
         partitions: plan.partitions,
         overflowCount: plan.eligibleTurns.length,
         totalBatches: plan.totalBatches,
         sourceEndIdx: plan.sourceEndIdx,
         targetIndex: plan.targetIndex,
-        rawPlan: plan,
+        tokenStats: { partitionCount: plan.partitions.length },
     };
 }
 
-function buildTurnRoute({ route, ready, plan, batchTurns, totalBatches }) {
+/**
+ * Copy the token stats a chat window plan contributes to its route plan.
+ * @param {import('./chat-window-planner.js').ChatWindowPlan} plan
+ * @returns {SummaryRouteTokenStats}
+ */
+function buildWindowTokenStats(plan) {
+    return {
+        verbatimTokens: plan.verbatimTokens,
+        verbatimEstimated: plan.verbatimStats.finalTokensEstimated,
+        verbatimBudget: plan.verbatimBudget,
+        queuedTokens: plan.queuedTokens,
+        queuedEstimated: plan.queuedStats.finalTokensEstimated,
+        queuedBudget: plan.queuedBudget,
+        partitionCount: plan.partitions.length,
+    };
+}
+
+/**
+ * Build the shared turn-route plan shape from a chat window plan.
+ * @param {object} p
+ * @param {string} p.route
+ * @param {boolean} p.ready
+ * @param {import('./chat-window-planner.js').ChatWindowPlan} p.plan
+ * @param {import('./chatutils.js').AssistantTurn[]} p.batchTurns
+ * @param {number} p.totalBatches
+ * @param {number} [p.targetIndex]
+ * @returns {SummaryRoutePlan}
+ */
+function buildTurnRoute({ route, ready, plan, batchTurns, totalBatches, targetIndex }) {
     return {
         route,
         ready,
         reason: plan.reason,
         commitMode: SUMMARY_COMMIT_MODES.TURNS,
-        phase: LAYER0_PHASE,
         batchTurns,
         partitions: plan.partitions,
         overflowCount: plan.overflowCount,
         totalBatches: ready ? Math.max(1, totalBatches) : 0,
-        rawPlan: plan,
+        visibleTurnCount: plan.visibleTurnCount,
+        tokenStats: buildWindowTokenStats(plan),
+        ...(typeof targetIndex === 'number' ? { targetIndex } : {}),
     };
 }
 

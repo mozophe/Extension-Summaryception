@@ -84,6 +84,7 @@
 - Manual engine runs ignore the pause latch and enabled state.
 - The stale-cache advice toast starts the same manual run as the Force Summarize button.
 - Manual runs build their route plan inside the engine; callers pass run options only.
+- Manual run previews come from the engine describe call; entry never builds route plans.
 - UI handlers still block manual actions when the extension is disabled.
 - Manual run callbacks and the abort signal pass as an explicit argument. Never carry them on the task object.
 - A manual run needs a numeric target boundary. Reject the run when the route plan omits it.
@@ -99,6 +100,7 @@
 - Bind each control through one owner. Duplicate bindings cause double saves and double refreshes.
 - Derive panel visibility in the render pass, not in change handlers.
 - Compute route plans and metric counts once per refresh. Pass them to renderers as parameters.
+- Status panels read the auto work read model; entry renders scalars.
 - Sliders save on input. Text and numeric controls save on change or blur.
 - Keep slider min, max, and step equal to the settings clamp bounds.
 - Operating mode gates runtime behavior. Complexity mode selects the visible panel.
@@ -125,10 +127,11 @@
 ## Tuning
 
 - Do not optimize raw cost alone. Smaller context can reduce roleplay quality.
-- Prefix Cache keeps a larger recent range and queues older chat for atomic flushes.
 - Automatic summarization waits until the configured Recent + Queued raw-chat threshold is full.
-- Memory below steady-state use silently truncates injected memory.
+- Prefix Cache keeps a larger recent range and queues older chat for atomic flushes.
 - Recall depends on prompt quality, model behavior, and chat depth.
+- Context preview numbers come from one core estimator.
+- Memory below steady-state use silently truncates injected memory.
 - Cache TTL applies to Prefix Cache mode only.
 - Stale-cache advice needs a queue at or above Min Turns per Batch and a readable last-message time.
 - Retention clamp invariants live in one read-time normalizer. UI sliders delegate to it; keep no second enforcement.
