@@ -1,13 +1,8 @@
 import { MODULE_NAME } from '../foundation/constants.js';
-import {
-    executeSlashCommandsWithOptions,
-    getChat,
-    getChatMetadata,
-    saveChat,
-    saveMetadata,
-} from '../foundation/context.js';
+import { getChat, getChatMetadata, saveChat, saveMetadata } from '../foundation/context.js';
 import { info } from '../foundation/logger.js';
 import { bumpSummaryStoreMutationEpoch, getChatStore } from '../foundation/state.js';
+import { clearAllGhosting } from '../core/ghosting.js';
 import { refreshExtensionState } from './persist.js';
 
 // ─── Memory Clear Workflow ───────────────────────────────────────────
@@ -20,15 +15,9 @@ import { refreshExtensionState } from './persist.js';
 export async function clearSummaryceptionMemory(
     /** @type {{ updateUi?: boolean }} */ { updateUi = false } = {},
 ) {
-    const chat = getChat();
-    if (chat.length > 0) {
-        await executeSlashCommandsWithOptions(`/unhide 0-${chat.length - 1}`, {
-            showOutput: false,
-        });
-    }
+    await clearAllGhosting();
     const store = getChatStore();
     store.layers.length = 0;
-    store.ghostedMessageIds = [];
     bumpSummaryStoreMutationEpoch(store);
     refreshExtensionState({ injection: true, ui: updateUi });
 

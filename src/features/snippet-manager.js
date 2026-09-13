@@ -1,8 +1,8 @@
 import { getChat } from '../foundation/context.js';
-import { rangesFromSortedIndices, resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { bumpSummaryStoreMutationEpoch, getChatStore, saveChatStore } from '../foundation/state.js';
 import { buildPassageFromRangeWithStats } from '../core/chatutils.js';
-import { unghostMessagesInRange } from '../core/ghosting.js';
+import { syncGhosting } from '../core/ghosting.js';
 import { validateSummarizerOutputIntegrity } from '../core/prompts.js';
 import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
 import { parseSnippet } from '../core/summarizer-state.js';
@@ -103,21 +103,10 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
         return { status: 'missing' };
     }
 
-    const removed = layer[snippetIndex];
     layer.splice(snippetIndex, 1);
 
     if (layerIndex === 0) {
-        const remainingIds = new Set(
-            store.layers.flatMap((snippets) =>
-                snippets.flatMap((snippet) => snippet.sourceMessageIds || []),
-            ),
-        );
-        const removedIds = new Set(removed.sourceMessageIds.filter((id) => !remainingIds.has(id)));
-        store.ghostedMessageIds = store.ghostedMessageIds.filter((id) => !removedIds.has(id));
-        const indices = resolveScIdsToIndices(getChat(), [...removedIds]);
-        for (const [start, end] of rangesFromSortedIndices(indices)) {
-            await unghostMessagesInRange(start, end);
-        }
+        await syncGhosting();
     }
 
     await commitSnippetMutation(store);

@@ -6,7 +6,6 @@ import {
     listNonEmptyLayers,
 } from '../foundation/constants.js';
 import { getChat } from '../foundation/context.js';
-import { resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { warn } from '../foundation/logger.js';
 import {
     getEffectiveSettings,
@@ -14,6 +13,7 @@ import {
     getChatStore,
     getCurrentSummarizedBoundary,
 } from '../foundation/state.js';
+import { countGhostedMessages } from '../core/ghosting.js';
 import { getIsSummarizing } from '../core/summarizer.js';
 import { countTextTokens, formatCompactTokenCount, formatTokenValue } from '../core/token-count.js';
 
@@ -45,7 +45,7 @@ export async function updateUI() {
         // permanently ticked rather than reading the (ignored) persisted flag.
         $('#sc_state_cat_date_time').prop('checked', true);
         const work = await describeAutoWork(getChat(), store, effectiveSettings).catch(() => null);
-        const ghostedCount = getGhostedCount();
+        const ghostedCount = countGhostedMessages();
         const metrics = {
             totalSnippets: listNonEmptyLayers(store).reduce((n, { layer }) => n + layer.length, 0),
         };
@@ -189,15 +189,6 @@ function syncMemoryModeControls(s) {
     $('#sc_memory_help_prefix_cache').toggle(isPrefixCache);
     $('#sc_manual_cache_warning').toggle(isPrefixCache);
     $('.sc-cache-mode-row').toggle(isPrefixCache);
-}
-
-function getGhostedCount() {
-    try {
-        const chat = getChat();
-        return resolveScIdsToIndices(chat, getChatStore().ghostedMessageIds).length;
-    } catch (_e) {
-        return 0;
-    }
 }
 
 /**

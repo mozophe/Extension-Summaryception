@@ -2,7 +2,7 @@ import { getChat, isDryRunEvent } from '../foundation/context.js';
 import { debug, info, isDebugEnabled, warn } from '../foundation/logger.js';
 import { ensureChatScIds } from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
-import { repairMissingGhostingForSummaries } from '../core/ghosting-reconcile.js';
+import { syncGhosting } from '../core/ghosting.js';
 import { maskUserRoleAsAssistantInGenerateData } from '../core/assistant-role-mask.js';
 import { evaluateStaleCacheAdvice, isProviderCacheMode } from '../core/cache-staleness.js';
 import { buildChatWindowPlan } from '../core/chat-window-planner.js';
@@ -276,7 +276,7 @@ async function reconcileLoadedChatState() {
     getChatStore();
     await repairOrphanedMessages();
     updateInjection();
-    await repairMissingGhostingForSummaries();
+    await syncGhosting();
 }
 
 /**

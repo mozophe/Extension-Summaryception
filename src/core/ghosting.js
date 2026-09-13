@@ -6,7 +6,7 @@ import {
     resolveScIdsToIndices,
 } from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
-import { debug, error, info, warn } from '../foundation/logger.js';
+import { debug, error, warn } from '../foundation/logger.js';
 import { persistChatState } from './persist-state.js';
 import { canStartPromptMutation, queuePromptEffect, runPromptEffect } from './summarizer-commit.js';
 
@@ -32,6 +32,90 @@ export async function repairGhostingForRange(startIdx, endIdx, options = {}) {
 }
 
 /**
+ * Reconcile Ghosting ownership with Snippet provenance. The desired id set is
+ * every sourceMessageId across all layers: desired messages that still need
+ * ownership or visual hide are hidden through the ranged hide engine, owned
+ * ids no longer referenced by any layer are released through the unhide path.
+ * Ownership ends up exactly the desired set; desired ids whose messages no
+ * longer resolve stay owned but inert.
+ * @param {GhostRangeOptions} [options] - Carries the notify adapter; without one the work runs silent.
+ * @returns {Promise<{ hidden: number, unhidden: number }>} Messages covered by the applied hide and release ranges.
+ */
+export async function syncGhosting(options = {}) {
+    const chat = getChat();
+    const store = getChatStore();
+    const desired = collectDesiredGhostIds(store);
+    const desiredOwned = new Set(desired);
+
+    const staleIds = store.ghostedMessageIds.filter((id) => !desiredOwned.has(id));
+    const staleRanges = rangesFromSortedIndices(resolveScIdsToIndices(chat, staleIds));
+    if (staleRanges.length > 0) {
+        await unhideRanges({ chat, store, ranges: staleRanges, notify: options.notify });
+    }
+
+    let hidden = 0;
+    for (const range of rangesFromSortedIndices(resolveScIdsToIndices(chat, desired))) {
+        if (collectHideRanges(chat, store, range).length === 0) {
+            continue;
+        }
+        await repairGhostingForRange(range[0], range[1], { notify: options.notify });
+        hidden += getRangeSize(range);
+    }
+
+    store.ghostedMessageIds = desired;
+    return { hidden, unhidden: countRangeMessages(staleRanges) };
+}
+
+/**
+ * Derive the desired ghost id set from Snippet provenance across all layers.
+ * @param {SummaryceptionStore} store
+ * @returns {string[]} Unique source message ids in first-seen order.
+ */
+function collectDesiredGhostIds(store) {
+    const desired = [];
+    const seen = new Set();
+    for (const layer of store.layers || []) {
+        for (const snippet of layer || []) {
+            for (const id of snippet.sourceMessageIds || []) {
+                if (!seen.has(id)) {
+                    seen.add(id);
+                    desired.push(id);
+                }
+            }
+        }
+    }
+    return desired;
+}
+
+/**
+ * Unhide every message in the chat through the host full-range command and
+ * wipe Summaryception ghost ownership.
+ * @param {GhostRangeOptions} [_options] - Reserved option bag kept for parity with the other Ghosting entry points.
+ * @returns {Promise<void>}
+ */
+export async function clearAllGhosting(_options = {}) {
+    const chat = getChat();
+    if (chat.length > 0) {
+        await executeSlashCommandsWithOptions(`/unhide 0-${chat.length - 1}`, {
+            showOutput: false,
+        });
+    }
+    getChatStore().ghostedMessageIds = [];
+}
+
+/**
+ * Count chat messages currently under Summaryception ghost ownership.
+ * @returns {number} Owned ids that still resolve in the chat; 0 without a chat context.
+ */
+export function countGhostedMessages() {
+    try {
+        return resolveScIdsToIndices(getChat(), getChatStore().ghostedMessageIds).length;
+    } catch (_e) {
+        return 0;
+    }
+}
+
+/**
  * Ghost eligible messages in a specific chat range.
  * @internal
  * @param {number} startIdx
@@ -45,47 +129,6 @@ export async function ghostMessagesInRange(startIdx, endIdx, options = {}) {
         apply: async ({ epoch }) =>
             await ghostMessagesInRangeEffect(startIdx, endIdx, epoch, options),
     });
-}
-
-/**
- * Unghost all messages that Summaryception ghosted.
- * @param {GhostRangeOptions} [options] - Carries the notify adapter; without one the work runs silent.
- * @returns {Promise<void>}
- */
-export async function unghostAllMessages(options = {}) {
-    const chat = getChat();
-    const store = getChatStore();
-    const ranges = getOwnedGhostRanges(chat, store);
-    const total = countRangeMessages(ranges);
-
-    if (total === 0) {
-        return;
-    }
-
-    const notify = options.notify;
-    const progress = notify ? notify.progress({ label: GHOST_PROGRESS.UNHIDE, total }) : null;
-    await unhideRanges({ chat, store, ranges, progress, notify });
-    notify?.clear(progress, { kind: GHOST_PROGRESS.UNHIDDEN });
-    info(`Unghosted ${total} messages (only Summaryception-hidden ones)`);
-}
-
-/**
- * Unghost Summaryception-owned messages in a specific chat range.
- * @param {number} startIdx
- * @param {number} endIdx
- * @param {GhostRangeOptions} [options] - Carries the notify adapter
- */
-export async function unghostMessagesInRange(startIdx, endIdx, options = {}) {
-    const chat = getChat();
-    const store = getChatStore();
-    const range = normalizeRange(startIdx, endIdx, chat.length);
-
-    if (!range) {
-        return;
-    }
-
-    const ranges = getOwnedGhostRanges(chat, store, range);
-    await unhideRanges({ chat, store, ranges, notify: options.notify });
 }
 
 /**
@@ -284,30 +327,6 @@ function markGhostedRange(chat, store, range) {
         }
     }
     store.ghostedMessageIds = [...owned];
-}
-
-/**
- * Collect ranges of Summaryception-owned messages.
- * @param {ChatMessage[]} chat
- * @param {SummaryceptionStore} store
- * @param {[number, number]} [limit]
- * @returns {Array<[number, number]>}
- */
-function getOwnedGhostRanges(chat, store, limit) {
-    return rangesFromSortedIndices(collectGhostedMessageIndices(chat, store, limit));
-}
-
-/**
- * Resolve Summaryception-owned message IDs to current chat indices.
- * @param {ChatMessage[]} chat
- * @param {SummaryceptionStore} store
- * @param {[number, number]} [limit]
- * @returns {number[]}
- */
-export function collectGhostedMessageIndices(chat, store, limit) {
-    return resolveScIdsToIndices(chat, store.ghostedMessageIds).filter(
-        (index) => !limit || (index >= limit[0] && index <= limit[1]),
-    );
 }
 
 /**

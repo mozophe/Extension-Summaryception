@@ -15,10 +15,8 @@ import {
     UI_MODES,
     defaultSettings,
 } from '../foundation/constants.js';
-import { getChat } from '../foundation/context.js';
-import { clampInteger } from '../foundation/numeric.js';
-import { rangesFromSortedIndices, resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { error, warn } from '../foundation/logger.js';
+import { clampInteger } from '../foundation/numeric.js';
 import {
     bumpSummaryStoreMutationEpoch,
     deriveAdvancedEngineTuning,
@@ -29,7 +27,7 @@ import {
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
-import { ghostMessagesInRange, unghostAllMessages } from '../core/ghosting.js';
+import { syncGhosting } from '../core/ghosting.js';
 import {
     abortSummarization,
     describeManualRun,
@@ -564,17 +562,9 @@ function triggerImport() {
             }
 
             const store = getChatStore();
-            await unghostAllMessages({ notify: notifyAdapter });
             store.layers = data.layers;
-            store.ghostedMessageIds = data.ghostedMessageIds;
+            await syncGhosting({ notify: notifyAdapter });
             bumpSummaryStoreMutationEpoch(store);
-            const indices = resolveScIdsToIndices(getChat(), store.ghostedMessageIds);
-            for (const [start, end] of rangesFromSortedIndices(indices)) {
-                await ghostMessagesInRange(start, end, {
-                    showProgress: true,
-                    notify: notifyAdapter,
-                });
-            }
 
             await persistAndRefresh({ ui: true });
             toastr.success(

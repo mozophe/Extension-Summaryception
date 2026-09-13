@@ -27,6 +27,7 @@ _Avoid_: Redo, re-summarize
 
 **Ghosting**:
 Hiding summarized turns from model context through the host command while keeping them visible in chat.
+Ownership sync derives the desired ghosted ids from Snippet provenance across all layers: it hides desired messages that are not covered yet and releases owned ids no longer referenced.
 
 **Verbatim Window**:
 The recent chat range kept in model context without summarization.
