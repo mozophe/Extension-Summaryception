@@ -193,8 +193,20 @@ export async function runPromptEffect(effect) {
  * Stop prompt-affecting work while foreground generation or queued effects need priority.
  * @returns {boolean}
  */
-export function shouldStopPromptWork() {
+function shouldStopPromptWork() {
     return isPromptMutationFrozen() || pendingCommits.length > 0 || pendingPromptEffects.length > 0;
+}
+
+/**
+ * Ask the foreground gate whether prompt-affecting work may start, first
+ * attempting to recover a stale freeze so a heal reopens the gate inline.
+ * @param {string} reason - Context for diagnostic logging
+ * @param {{ refreshUi?: () => void }} [options]
+ * @returns {Promise<'open'|'blocked'>}
+ */
+export async function promptWorkGate(reason, { refreshUi } = {}) {
+    await recoverStalePromptFreeze(reason, { refreshUi });
+    return shouldStopPromptWork() ? 'blocked' : 'open';
 }
 
 /**

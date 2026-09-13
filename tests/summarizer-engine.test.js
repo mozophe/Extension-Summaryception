@@ -27,14 +27,11 @@ vi.mock('../src/core/persist-state.js', () => ({
     flushPendingChatSave: vi.fn(async () => {}),
     persistChatState: vi.fn(async () => {}),
 }));
-vi.mock('../src/core/summarizer-commit.js', () => ({
-    recoverStalePromptFreeze: vi.fn(async () => {}),
-    shouldStopPromptWork: vi.fn(() => false),
-}));
 vi.mock('../src/core/summary-preflight.js', () => ({
     prepareSummaryCycle: vi.fn(async () => ({ chat: [], store: {} })),
 }));
 
+import { resetCommitStateForTests } from '../src/core/summarizer-commit.js';
 import { ELASTIC_STRATEGIES, runManual } from '../src/core/summarizer-engine.js';
 import { installSummaryContext } from './test-helpers.js';
 
@@ -66,6 +63,7 @@ describe('manual run progress callbacks', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        resetCommitStateForTests();
         installSummaryContext({ chat: [] });
         boundary = 0;
         stateMocks.getChatStore.mockReturnValue({});
@@ -170,6 +168,7 @@ describe('manual run failure limit', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        resetCommitStateForTests();
         installSummaryContext({ chat: [] });
         stateMocks.getChatStore.mockReturnValue({});
         stateMocks.getEffectiveSettings.mockReturnValue({});

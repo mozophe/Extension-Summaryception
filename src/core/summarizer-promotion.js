@@ -24,11 +24,7 @@ import {
     getPromotionSummaryTokenTarget,
 } from './layer0-compression.js';
 import { buildRepairDiagnostics } from './repair-diagnostics.js';
-import {
-    commitWhenSafe,
-    shouldStopPromptWork,
-    updateCommittedInjection,
-} from './summarizer-commit.js';
+import { commitWhenSafe, promptWorkGate, updateCommittedInjection } from './summarizer-commit.js';
 import { buildSnapshotBasis, isSnapshotStoreCurrent } from './summarizer-snapshot.js';
 import { countTextTokens, formatTokenValue } from './token-count.js';
 
@@ -658,7 +654,7 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
 /**
  * Drain promotion overflow: the single loop that owns overflow clearing.
  * Repeatedly promotes the shallowest over-limit layer until layers fit, the
- * prompt-mutation stop guard trips, or consecutive failed promotions reach
+ * Foreground Gate blocks, or consecutive failed promotions reach
  * `maxConsecutiveFailures`.
  * @param {object} [options]
  * @param {number} [options.maxConsecutiveFailures] - Consecutive failed promotions tolerated before stopping.
@@ -674,12 +670,12 @@ export async function drainPromotionOverflow({ maxConsecutiveFailures = Infinity
         if (!candidate) {
             return { status: 'completed', attempts };
         }
-        if (shouldStopPromptWork()) {
+        if ((await promptWorkGate('promotion drain')) === 'blocked') {
             return { status: 'blocked', attempts };
         }
         const promoted = await attemptPromotion(candidate, s, notify);
         attempts++;
-        if (shouldStopPromptWork()) {
+        if ((await promptWorkGate('promotion drain')) === 'blocked') {
             return { status: 'blocked', attempts };
         }
         if (promoted) {

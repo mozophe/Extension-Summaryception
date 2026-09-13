@@ -9,7 +9,7 @@ import { debug, info, trace } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
 import { drainPromotionOverflow } from './summarizer-promotion.js';
 import { flushPendingChatSave } from './persist-state.js';
-import { recoverStalePromptFreeze, shouldStopPromptWork } from './summarizer-commit.js';
+import { promptWorkGate } from './summarizer-commit.js';
 import { formatTokenValue } from './token-count.js';
 import {
     SUMMARY_COMMIT_MODES,
@@ -65,9 +65,7 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @returns {Promise<'processed' | 'idle' | 'blocked' | 'failed'>}
  */
 export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
-    await recoverStalePromptFreeze('auto worker', { refreshUi });
-
-    if (shouldStopPromptWork()) {
+    if ((await promptWorkGate('auto worker', { refreshUi })) === 'blocked') {
         queue.setPhase('paused');
         return 'blocked';
     }
@@ -167,7 +165,7 @@ async function processRoutePlan(routePlan, notify) {
         debug('Route batch failed, stopping summarization cycle to avoid retry loop.');
         return 'failed';
     }
-    if (shouldStopPromptWork()) {
+    if ((await promptWorkGate('route plan')) === 'blocked') {
         return 'blocked';
     }
     return 'processed';
@@ -285,7 +283,7 @@ async function executeManualTask(deps, strategy, target, options) {
             }
 
             const result = await processStrategyBatch(batch, strategy, options.notify);
-            updateManualOutcome({ outcome, result });
+            await updateManualOutcome({ outcome, result });
             consecutiveFailures = result.success && result.committed ? 0 : consecutiveFailures;
 
             if (
@@ -341,10 +339,10 @@ function updateConsecutiveFailures(outcome, result, consecutiveFailures) {
     return failures;
 }
 
-function updateManualOutcome({ outcome, result }) {
+async function updateManualOutcome({ outcome, result }) {
     if (result.success && result.committed) {
         outcome.completed++;
-        if (shouldStopPromptWork()) {
+        if ((await promptWorkGate('manual outcome')) === 'blocked') {
             outcome.blocked = true;
         }
     } else if (result.success) {
@@ -383,7 +381,7 @@ async function normalizeManualMemory(outcome, notify) {
     if (outcome.cancelled || outcome.blocked || outcome.completed === 0 || outcome.failed > 0) {
         return 'skipped';
     }
-    if (shouldStopPromptWork()) {
+    if ((await promptWorkGate('manual promotion')) === 'blocked') {
         info('Manual promotion deferred; prompt mutation guard is active.');
         return 'blocked';
     }
@@ -402,8 +400,7 @@ function isManualRunComplete(outcome, targetIndex) {
 }
 
 async function prepareManualRun(deps, recoverReason) {
-    await recoverStalePromptFreeze(recoverReason, { refreshUi: deps.refreshUi });
-    return !shouldStopPromptWork();
+    return (await promptWorkGate(recoverReason, { refreshUi: deps.refreshUi })) === 'open';
 }
 
 function createManualRunOutcome(overrides = {}) {

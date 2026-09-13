@@ -19,7 +19,7 @@ _Avoid_: Snippet save
 Moving merged older snippets from a layer into the next deeper layer.
 
 **Promotion Drain**:
-The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the stop guard trips, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
+The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the Foreground Gate blocks, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
 
 **Regeneration**:
 Rebuilding one Layer 0 Snippet from its source turns through a new summarizer request.
@@ -62,3 +62,7 @@ The persisted `autoPaused` flag set by Stop. Automatic cycles respect it; manual
 
 **Manual Run**:
 A user-triggered summarization run through the Engine Gate, driven by one strategy: Force Summarize or Slop Breaker. Manual runs ignore the Pause Latch and enabled state.
+
+**Foreground Gate**:
+The single ask that decides whether prompt-affecting work may run. Open only when no foreground freeze, no stale recovery, and no queued commits or prompt effects. The Engine Gate decides when to summarize; the Foreground Gate decides when prompt mutations are safe.
+_Avoid_: Stop guard

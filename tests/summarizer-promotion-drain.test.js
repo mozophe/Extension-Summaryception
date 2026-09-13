@@ -3,25 +3,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const callSummarizer = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/summarizer-request.js', () => ({ callSummarizer }));
 
-const shouldStopPromptWork = vi.hoisted(() => vi.fn(() => false));
-vi.mock('../src/core/summarizer-commit.js', async (importOriginal) => ({
-    ...(await importOriginal()),
-    shouldStopPromptWork,
-}));
-
+import {
+    beginForegroundGeneration,
+    resetCommitStateForTests,
+} from '../src/core/summarizer-commit.js';
 import { drainPromotionOverflow } from '../src/core/summarizer-promotion.js';
 import { installSummaryContext, makeSummarySettings, makeSummaryStore } from './test-helpers.js';
 
 /**
  * drainPromotionOverflow is the single owner of overflow clearing: one loop,
- * one failure budget, one stop guard. Tests drive the real module through its
+ * one failure budget, one Foreground Gate. Tests drive the real module through its
  * interface with a mocked summarizer request.
  */
 describe('drainPromotionOverflow', () => {
     afterEach(() => {
         vi.restoreAllMocks();
         callSummarizer.mockReset();
-        shouldStopPromptWork.mockReset().mockReturnValue(false);
+        resetCommitStateForTests();
     });
 
     /**
@@ -83,7 +81,7 @@ describe('drainPromotionOverflow', () => {
 
     it('reports blocked before the first attempt when the stop guard trips', async () => {
         installOverflowingStore();
-        shouldStopPromptWork.mockReturnValue(true);
+        beginForegroundGeneration();
 
         await expect(drainPromotionOverflow({ maxConsecutiveFailures: 1 })).resolves.toEqual({
             status: 'blocked',
@@ -95,8 +93,10 @@ describe('drainPromotionOverflow', () => {
 
     it('reports blocked after an attempt when the stop guard trips mid-drain', async () => {
         installOverflowingStore();
-        callSummarizer.mockResolvedValue({ status: 'failed' });
-        shouldStopPromptWork.mockReturnValueOnce(false).mockReturnValueOnce(true);
+        callSummarizer.mockImplementation(async () => {
+            beginForegroundGeneration();
+            return { status: 'failed' };
+        });
 
         await expect(drainPromotionOverflow({ maxConsecutiveFailures: 3 })).resolves.toEqual({
             status: 'blocked',
