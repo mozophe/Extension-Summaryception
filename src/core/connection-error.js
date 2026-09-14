@@ -33,9 +33,10 @@ function isAuthFailure(msg, status) {
 
 /**
  * Wrap a raw error into a ConnectionError with normalized fields.
- * Procedure: Extract status and retryable from the raw error, apply the
- * caller override, then shape the message per the failure kind. An explicit
- * message bypasses classification and is used verbatim.
+ * Procedure: Extract status and retryable from the raw error, resolve the
+ * cause chain message, apply the caller override, then shape the message per
+ * the failure kind. An explicit message bypasses classification and is used
+ * verbatim.
  * @param {unknown} error - The raw error to wrap
  * @param {{ profileId?: string, retryable?: boolean | null, message?: string | null }} [options]
  * @param {string} [fallbackLabel] - Prefix for the classified message
@@ -67,7 +68,8 @@ export function wrapConnectionError(
         );
     }
 
-    if (msg.includes('not found') || msg.includes('profile')) {
+    const lowerMsg = msg.toLowerCase();
+    if (lowerMsg.includes('not found') && lowerMsg.includes('profile')) {
         return new ConnectionError(
             `${fallbackLabel || 'Connection'} "${profileId}" not found. It may have been deleted. ` +
                 'Please re-select a profile in Summaryception settings.',

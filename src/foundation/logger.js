@@ -106,24 +106,65 @@ export function error(...args) {
 }
 
 /**
+ * Read an HTTP status from an error-like object.
+ * @param {Error & { status?: number, statusCode?: number, response?: { status?: number } } | null} node
+ * @returns {number | null}
+ */
+function statusOf(node) {
+    return (
+        (node && (node.status || node.statusCode || (node.response && node.response.status))) ||
+        null
+    );
+}
+
+/**
+ * Read the caller-supplied retryable hint from an error-like object.
+ * @param {Error & { retryable?: boolean | (() => boolean) } | null} node
+ * @returns {boolean | null}
+ */
+function retryableOf(node) {
+    if (!node) {
+        return null;
+    }
+    if (typeof node.retryable === 'boolean') {
+        return node.retryable;
+    }
+    if (typeof node.retryable === 'function') {
+        return node.retryable();
+    }
+    return null;
+}
+
+/**
  * Coerce any thrown value into a plain object with the standard error fields.
+ * Procedure: Read the top-level fields, then walk the `cause` chain resolving
+ * the deepest informative message and the deepest status found at any level.
+ * Cyclic chains stop at the first revisited error.
  * @param {unknown} err - A thrown value. It can be an Error, a plain object, a string, or null.
  * @returns {{ name: string, message: string, status: number|null, retryable: boolean|null }}
  */
 export function serializeError(err) {
     const e =
-        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean | (() => boolean), response?: { status?: number } }} */ (
+        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean | (() => boolean), response?: { status?: number }, cause?: unknown }} */ (
             err
         );
+    let message = e && e.message ? e.message : String(e);
+    let status = statusOf(e);
+    const seen = new Set();
+    let cursor = /** @type {unknown} */ (e);
+    while (cursor && typeof cursor === 'object' && !seen.has(cursor)) {
+        seen.add(cursor);
+        const node = /** @type {typeof e} */ (cursor);
+        if (node.message) {
+            message = node.message;
+        }
+        status = statusOf(node) || status;
+        cursor = node.cause;
+    }
     return {
         name: (e && e.name) || 'Error',
-        message: e && e.message ? e.message : String(e),
-        status: (e && (e.status || e.statusCode || (e.response && e.response.status))) || null,
-        retryable:
-            e && typeof e.retryable === 'boolean'
-                ? e.retryable
-                : e && typeof e.retryable === 'function'
-                  ? e.retryable()
-                  : null,
+        message,
+        status,
+        retryable: retryableOf(e),
     };
 }
