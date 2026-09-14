@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+    createUuid,
     ensureChatScIds,
     ensureMessageScId,
     getMessageIndexByScId,
@@ -59,5 +60,27 @@ describe('message identity', () => {
         expect(ensureMessageScId(null)).toBeNull();
         expect(ensureMessageScId([])).toBeNull();
         expect(ensureChatScIds('not-chat')).toBe(false);
+    });
+
+    it('prefers native crypto.randomUUID through createUuid', () => {
+        vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('native-uuid');
+
+        expect(createUuid()).toBe('native-uuid');
+    });
+
+    it('falls back to distinct v4 UUIDs when crypto.randomUUID is unavailable', () => {
+        const nativeRandomUUID = globalThis.crypto.randomUUID;
+        globalThis.crypto.randomUUID = undefined;
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        try {
+            const first = ensureMessageScId(makeMessage({ scId: undefined }));
+            const second = ensureMessageScId(makeMessage({ scId: '' }));
+
+            expect(first).toMatch(uuidPattern);
+            expect(second).toMatch(uuidPattern);
+            expect(first).not.toBe(second);
+        } finally {
+            globalThis.crypto.randomUUID = nativeRandomUUID;
+        }
     });
 });

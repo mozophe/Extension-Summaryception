@@ -389,19 +389,26 @@ async function runManualSummarization($button, idleHtml, { run, report }) {
     if ($button) {
         $button.prop('disabled', true).html(MANUAL_RUN_BUSY_HTML);
     }
+    let outcome;
     try {
-        const outcome = await run(options);
-        if (outcome !== undefined) {
-            report(outcome);
-            updateInjection();
-            reloadAfterManualRun(outcome);
-        }
+        outcome = await run(options);
+    } catch (err) {
+        error(err);
+        toastr.error('Summarization failed - check console.', TOAST_TITLE, {
+            timeOut: 8000,
+        });
+        return;
     } finally {
         clearManualProgressToast(progressToast);
         if ($button) {
             $button.prop('disabled', false).html(idleHtml);
         }
         updateUI();
+    }
+    if (outcome !== undefined) {
+        report(outcome);
+        updateInjection();
+        reloadAfterManualRun(outcome);
     }
 }
 
