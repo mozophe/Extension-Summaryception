@@ -106,11 +106,13 @@ describe('state-categories catalog', () => {
         expect(getActiveLineCap(legacy)).toBe(2);
     });
 
-    it('ships every category enabled by default except chekhov', () => {
-        expect(getEnabledStateKeys(defaultSettings)).toStrictEqual(
-            STATE_CATEGORIES.map((c) => c.key).filter((key) => key !== 'chekhov'),
-        );
+    it('ships date-time and location on; bonds, chekhov, gm-notes, inventory opt-in', () => {
+        expect(defaultSettings.stateCatDateTime).toBe(true);
+        expect(defaultSettings.stateCatLocation).toBe(true);
+        expect(defaultSettings.stateCatBonds).toBe(false);
         expect(defaultSettings.stateCatChekhov).toBe(false);
+        expect(defaultSettings.stateCatGmNotes).toBe(false);
+        expect(defaultSettings.stateCatInventory).toBe(false);
     });
 
     it('ships with the [CURRENT STATE] injection off by default', () => {

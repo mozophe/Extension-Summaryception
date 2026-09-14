@@ -245,16 +245,17 @@ export const defaultSettings = Object.freeze({
     customMemoryDepth: 0,
     injectCurrentState: false, // false = omit the [CURRENT STATE] block from injected memory
     // ─── Modular STATE categories (stateCat*) ─────────────────────────
-    // Most categories ship enabled: the extension's [CURRENT STATE] injection
-    // is meant to be the sole carrier, so users should disable the equivalent
-    // blocks in their RP preset. stateCatDateTime is informational only;
-    // alwaysOn forces true at runtime regardless of this flag. Chekhov ships
-    // off: it needs matching FIRE-decision logic in the preset CoT to be useful.
+    // Categories are opt-in: FF presets already ship their own trackers for
+    // bonds, GM notes, and inventory, so enabling duplicates those blocks.
+    // stateCatDateTime is informational only; alwaysOn forces true at runtime
+    // regardless of this flag. Location ships on as the cheap scene anchor.
+    // Chekhov ships off: it needs matching FIRE-decision logic in the preset
+    // CoT to be useful.
     stateCatDateTime: true,
-    stateCatBonds: true,
+    stateCatBonds: false,
     stateCatChekhov: false,
-    stateCatGmNotes: true,
-    stateCatInventory: true,
+    stateCatGmNotes: false,
+    stateCatInventory: false,
     stateCatLocation: true,
     minSummaryTurns: 3,
     maxSummaryTurns: 8,

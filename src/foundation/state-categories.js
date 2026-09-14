@@ -18,8 +18,7 @@
  * summarizer (token caps never appear in the model prompt).
  * @type {ReadonlyArray<{
  *   key: string, sourceKey: string, alwaysOn: boolean,
- *   priorityRank: number, lineCapDefault: number,
- *   helpTitle: string, helpShort: string, helpWhen: string, helpRisk: string
+ *   priorityRank: number, lineCapDefault: number
  * }>}
  */
 export const STATE_CATEGORIES = Object.freeze([
@@ -29,12 +28,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: true,
         priorityRank: -1,
         lineCapDefault: 2,
-        helpTitle: 'Date & Time',
-        helpShort: 'Time anchor carried across every snapshot.',
-        helpWhen:
-            'Required. The RP must carry date/time info in each assistant message so the summarizer can normalize it.',
-        helpRisk:
-            'No date in chat = nothing to carry forward; the snapshot loses its temporal anchor.',
     },
     {
         key: 'bonds',
@@ -42,12 +35,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: false,
         priorityRank: 1,
         lineCapDefault: 6,
-        helpTitle: 'Bonds (Relationships RPG)',
-        helpShort: 'Persistent relationship engine: BOND/Sparks/Grudge per character pair.',
-        helpWhen:
-            "Replaces FF5's <internal_bondtracker>. Disable that block in your preset when on.",
-        helpRisk:
-            'Disable in preset: the bond numbers, gates, and drift rules move here; keep the BOND→DnD DC-mod logic in your preset CoT.',
     },
     {
         key: 'chekhov',
@@ -55,12 +42,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: false,
         priorityRank: 2,
         lineCapDefault: 8,
-        helpTitle: 'Chekhov (Narrative Gun)',
-        helpShort: 'Aging narrative-debt bullets that fire probabilistically.',
-        helpWhen:
-            "Replaces FF5's <internal_chekhovguntracker> storage. Disable that block in your preset when on.",
-        helpRisk:
-            'Keep the FIRE-decision d20 logic in your preset CoT; only the bullet register lives here.',
     },
     {
         key: 'gm_notes',
@@ -68,11 +49,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: false,
         priorityRank: 3,
         lineCapDefault: 12,
-        helpTitle: 'GM Notes',
-        helpShort: 'Persistent GM scratchpad with [R]/[T]/[D] prefixed entries.',
-        helpWhen:
-            "Replaces FF5's <internal_gmnotebook>. Disable that block in your preset when on.",
-        helpRisk: 'Do not duplicate content that already lives in bonds/chekhov/inventory.',
     },
     {
         key: 'inventory',
@@ -80,11 +56,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: false,
         priorityRank: 4,
         lineCapDefault: 6,
-        helpTitle: 'Inventory & Titles',
-        helpShort: 'User-only items, titles/skills, and status conditions.',
-        helpWhen: "Replaces FF5's <internal_inv>. Disable that block in your preset when on.",
-        helpRisk:
-            'Track user only, not NPCs. Consumable items go here; future-affecting one-shots go in chekhov.',
     },
     {
         key: 'location',
@@ -92,11 +63,6 @@ export const STATE_CATEGORIES = Object.freeze([
         alwaysOn: false,
         priorityRank: 5,
         lineCapDefault: 2,
-        helpTitle: 'Location',
-        helpShort: 'Current scene location.',
-        helpWhen:
-            'Optional. Needed if your preset uses proximity-based modifiers (e.g. Chekhov location-match).',
-        helpRisk: 'Low risk; dispensable if your preset does not key off scene location.',
     },
 ]);
 
