@@ -4,8 +4,10 @@ import {
     getChatStore,
     getCurrentSummarizedBoundary,
     getEffectiveSettings,
+    getSettings,
+    saveSettings,
 } from '../foundation/state.js';
-import { debug, info, trace } from '../foundation/logger.js';
+import { debug, info, trace, warn } from '../foundation/logger.js';
 import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
 import { drainPromotionOverflow } from './summarizer-promotion.js';
 import { flushPendingChatSave } from './persist-state.js';
@@ -134,6 +136,46 @@ export async function runManual(deps, strategy, options = {}) {
                 isManualRunComplete(outcome, targetIndex) && promotionStatus === 'completed',
         };
     });
+}
+
+/**
+ * @typedef {object} PauseLatchDeps
+ * @property {import('./summarizer-queue.js').SummarizerQueue} queue - Shared summarizer queue: getIsSummarizing/abort settle a live run, request kicks the resume cycle.
+ * @property {() => boolean} hasActiveAbortController - Whether a summarizer request is in flight; injected from summarizer-request.js to avoid a cross-import.
+ */
+
+/**
+ * Stop path for the pause latch: abort any live run, persist `autoPaused`, and
+ * let the queue settle. Callers only map the returned status to a notice.
+ * @param {PauseLatchDeps} deps
+ * @returns {Promise<'paused' | 'already-paused' | 'idle'>}
+ */
+export async function pauseAutoSummarization(deps) {
+    if (!deps.queue.getIsSummarizing() && !deps.hasActiveAbortController()) {
+        return getSettings().autoPaused ? 'already-paused' : 'idle';
+    }
+    deps.queue.abort();
+    const s = getSettings();
+    s.autoPaused = true;
+    saveSettings();
+    return 'paused';
+}
+
+/**
+ * Resume path for the pause latch: clear `autoPaused` and fire-and-forget one
+ * automatic cycle.
+ * @param {PauseLatchDeps} deps
+ * @returns {Promise<'resumed' | 'not-paused'>}
+ */
+export async function resumeAutoSummarization(deps) {
+    const s = getSettings();
+    if (!s.autoPaused) {
+        return 'not-paused';
+    }
+    s.autoPaused = false;
+    saveSettings();
+    void deps.queue.request().catch((e) => warn('Resume-triggered summary failed:', e));
+    return 'resumed';
 }
 
 /**

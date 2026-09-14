@@ -80,8 +80,8 @@
 - One engine gate owns all automatic work.
 - Route every automatic trigger through the queue and engine gate.
 - Put automatic run guards in the gate.
-- Stop persists a pause latch and lets the queue settle.
-- Resume clears the latch and starts one cycle.
+- Stop persists a pause latch behind the engine's pauseAutoSummarization seam and lets the queue settle.
+- Resume clears the latch behind the engine's resumeAutoSummarization seam and starts one cycle; entry maps returned statuses to notices.
 - Manual engine runs ignore the pause latch and enabled state.
 - The stale-cache advice toast starts the same manual run as the Force Summarize button.
 - Manual runs build their route plan inside the engine; callers pass run options only.

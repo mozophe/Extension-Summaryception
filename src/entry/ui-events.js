@@ -33,8 +33,9 @@ import {
     describeManualRun,
     ELASTIC_STRATEGIES,
     getIsSummarizing,
-    hasActiveAbortController,
+    pauseAutoSummarization,
     requestSummarization,
+    resumeAutoSummarization,
     runManual,
 } from '../core/summarizer.js';
 import { updateInjection } from '../features/injection.js';
@@ -315,21 +316,18 @@ function cancelManualRun(controller) {
 /**
  * Stop the in-flight summarizer and latch autoPaused so automatic cycles do
  * not resume on their own while the user is still changing settings.
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function onStopSummarize() {
-    if (!getIsSummarizing() && !hasActiveAbortController()) {
-        if (getSettings().autoPaused) {
-            toastr.info('Already paused.', TOAST_TITLE);
-        } else {
-            toastr.info('Nothing is running.', TOAST_TITLE);
-        }
+async function onStopSummarize() {
+    const status = await pauseAutoSummarization();
+    if (status === 'already-paused') {
+        toastr.info('Already paused.', TOAST_TITLE);
         return;
     }
-    abortSummarization();
-    const s = getSettings();
-    s.autoPaused = true;
-    saveSettings();
+    if (status === 'idle') {
+        toastr.info('Nothing is running.', TOAST_TITLE);
+        return;
+    }
     toastr.warning('Summarization paused. Progress saved. Press Resume to continue.', TOAST_TITLE, {
         timeOut: 5000,
     });
@@ -340,21 +338,18 @@ function onStopSummarize() {
 
 /**
  * Clear the autoPaused latch and kick a single automatic cycle.
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function onResumeSummarize() {
-    const s = getSettings();
-    if (!s.autoPaused) {
+async function onResumeSummarize() {
+    const status = await resumeAutoSummarization();
+    if (status === 'not-paused') {
         toastr.info('Not paused.', TOAST_TITLE);
         return;
     }
-    s.autoPaused = false;
-    saveSettings();
     toastr.success('Resumed. Automatic summarization is active again.', TOAST_TITLE, {
         timeOut: 3000,
     });
     updateUI();
-    void requestSummarization().catch((e) => warn('Resume-triggered summary failed:', e));
 }
 
 /**

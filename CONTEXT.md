@@ -63,7 +63,7 @@ _Avoid_: UI refresher, refresh registry
 The single gate that owns all automatic summarization work and its guards.
 
 **Pause Latch**:
-The persisted `autoPaused` flag set by Stop. Automatic cycles respect it; manual runs do not.
+The persisted `autoPaused` flag. Stop and Resume transitions cross the engine seam: core aborts, latches, and kicks the resume cycle; entry maps returned statuses to notices. Automatic cycles respect it; manual runs do not.
 
 **Manual Run**:
 A user-triggered summarization run through the Engine Gate, driven by one strategy: Force Summarize or Slop Breaker. Manual runs ignore the Pause Latch and enabled state.
