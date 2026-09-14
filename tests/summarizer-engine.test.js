@@ -72,7 +72,7 @@ describe('manual run progress callbacks', () => {
         // Committing one batch advances the summarized boundary to the target.
         batchMocks.summarizeBatchFromTurns.mockImplementation(async () => {
             boundary = TARGET_INDEX;
-            return true;
+            return { status: 'completed' };
         });
     });
 
@@ -174,7 +174,7 @@ describe('manual run failure limit', () => {
         stateMocks.getEffectiveSettings.mockReturnValue({});
         stateMocks.getCurrentSummarizedBoundary.mockReturnValue(0);
         // Every batch commit fails without moving the summarized boundary.
-        batchMocks.summarizeBatchFromTurns.mockResolvedValue(false);
+        batchMocks.summarizeBatchFromTurns.mockResolvedValue({ status: 'failed' });
         routeMocks.buildForceSummaryRoutePlan.mockResolvedValue({
             ready: true,
             reason: 'ready',

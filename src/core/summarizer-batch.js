@@ -29,7 +29,7 @@ import {
  * @param {import('./chatutils.js').AssistantTurn[]} visibleTurns
  * @param {{ catchExceptions?: boolean, sourceEndIdx?: number }} [opts]
  * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 export async function summarizeBatchFromTurns(
     /** @type {import('./chatutils.js').AssistantTurn[]} */ visibleTurns,
@@ -52,7 +52,7 @@ export async function summarizeBatchFromTurns(
 
     if (eligibleTurns.length === 0) {
         await repairGhosting(visibleTurns, summarizedBoundary, notify);
-        return false;
+        return { status: 'idle' };
     }
     return await summarizeBatchCore({
         chat,
@@ -68,7 +68,7 @@ export async function summarizeBatchFromTurns(
  * @param {import('./partition-planner.js').SourcePartition[]} partitions
  * @param {{ catchExceptions?: boolean }} [opts]
  * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 export async function summarizeAtomicLayer0Partitions(
     partitions,
@@ -107,13 +107,13 @@ async function repairGhosting(visibleTurns, boundaryIndex, notify) {
  * @param {import('./chatutils.js').AssistantTurn[]} p.eligibleTurns - Eligible turns
  * @param {{ catchExceptions: boolean, sourceEndIdx?: number }} p.opts - Options
  * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function summarizeBatchCore({ chat, store, eligibleTurns, opts, notify }) {
     const batch = eligibleTurns;
     if (batch.length === 0) {
         trace('<<< EXITING summarizeBatchFromTurns - EMPTY BATCH');
-        return false;
+        return { status: 'idle' };
     }
 
     const { startIdx, endIdx: batchEndIdx } = getBatchRange(batch);
@@ -127,7 +127,7 @@ async function summarizeBatchCore({ chat, store, eligibleTurns, opts, notify }) 
     ensureLayer0(store);
     const passageStart = summarizedBoundary < 0 ? 0 : summarizedBoundary + 1;
     if (!isPassageRangeValid(passageStart, endIdx)) {
-        return false;
+        return { status: 'idle' };
     }
 
     return await summarizeSafely(opts.catchExceptions, 'summarizeBatchFromTurns', () =>
@@ -139,12 +139,12 @@ async function summarizeBatchCore({ chat, store, eligibleTurns, opts, notify }) 
  * validated passage and closes exactly once at the terminal outcome.
  * @param {import('./partition-planner.js').SourcePartition[]} partitions
  * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
     const usablePartitions = (partitions || []).filter((partition) => partition?.turns?.length > 0);
     if (usablePartitions.length === 0) {
-        return false;
+        return { status: 'idle' };
     }
 
     const chat = getChat();
@@ -171,10 +171,10 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
     for (const partition of usablePartitions) {
         if (getSummaryStoreMutationEpoch(store) !== baseMutationEpoch) {
             settleProgressClosed(progress);
-            return false;
+            return { status: 'failed', completed: snapshots.length, failed: 1 };
         }
 
-        const job = await runLayer0Summarization({
+        const result = await runLayer0Summarization({
             chat,
             store,
             passageStart: partition.sourceStartIdx,
@@ -186,25 +186,28 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
             total: usablePartitions.length,
             settle: settleProgressClosed,
         });
-        if (!job) {
+        if (result.status) {
             settleProgressClosed(progress);
-            return false;
+            return { status: 'failed', completed: snapshots.length, failed: 1 };
         }
 
-        progress = job.progress;
-        snapshots.push(job.snapshot);
-        pendingSnippets.push(buildLayer0Snippet(job.snapshot, job.summary));
+        progress = result.progress;
+        snapshots.push(result.snapshot);
+        pendingSnippets.push(buildLayer0Snippet(result.snapshot, result.summary));
         contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
         notify?.update(progress, { processed: snapshots.length });
     }
 
-    return await commitLayer0Job({
+    const committed = await commitLayer0Job({
         kind: 'layer0-atomic-cache',
         snapshot: snapshots[0],
         progress,
         notify,
         commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }),
     });
+    return committed
+        ? { status: 'completed', completed: snapshots.length }
+        : { status: 'failed', failed: snapshots.length };
 }
 
 /**
@@ -225,8 +228,8 @@ function closeBatchProgress(notify, progress, kind) {
  * Rethrow unless catchExceptions is set; log and report failure otherwise.
  * @param {boolean} catchExceptions - Swallow exceptions when true
  * @param {string} source - Caller name used in log prefixes
- * @param {() => Promise<boolean>} run - Summarization step to run
- * @returns {Promise<boolean>}
+ * @param {() => Promise<import('./run-outcome.js').SummarizationRunOutcome>} run - Summarization step to run
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function summarizeSafely(catchExceptions, source, run) {
     try {
@@ -241,7 +244,7 @@ async function summarizeSafely(catchExceptions, source, run) {
         });
         error(`${source} exception:`, err);
         trace(`<<< EXITING ${source} - EXCEPTION`);
-        return false;
+        return { status: 'failed' };
     }
 }
 
@@ -260,7 +263,7 @@ async function summarizeSafely(catchExceptions, source, run) {
  * @param {unknown} p.progress - Shared batch progress handle; null before the first validation
  * @param {number} p.total - Total partitions in the batch
  * @param {((handle: unknown, kind?: string) => void) | undefined} [p.settle] - Terminal close routed to the atomic caller's settled guard so the shared handle closes exactly once
- * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, progress: unknown} | null>}
+ * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, progress: unknown, status?: undefined} | {status: 'idle' | 'aborted' | 'failed'}>}
  */
 async function runLayer0Summarization({
     chat,
@@ -283,7 +286,7 @@ async function runLayer0Summarization({
     });
     tracePassageTokens(snapshot);
     if (!snapshot.passageText.trim()) {
-        return null;
+        return { status: 'idle' };
     }
 
     if (!progress && notify) {
@@ -320,12 +323,12 @@ async function runLayer0Summarization({
     }
     if (outcome.status === 'aborted') {
         failClosed(BATCH_PROGRESS.ABORTED);
-        return null;
+        return { status: 'aborted' };
     }
     const summary = outcome.status === 'completed' ? outcome.text : '';
     if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
         failClosed();
-        return null;
+        return { status: 'failed' };
     }
     return { snapshot, summary, progress };
 }
@@ -381,10 +384,10 @@ async function commitLayer0Job({ kind, snapshot, progress, notify, commit }) {
  * @param {number} p.passageStart - First passage index
  * @param {number} p.endIdx - Last passage index
  * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function performBatchSummary({ chat, store, passageStart, endIdx, notify }) {
-    const job = await runLayer0Summarization({
+    const result = await runLayer0Summarization({
         chat,
         store,
         passageStart,
@@ -393,18 +396,20 @@ async function performBatchSummary({ chat, store, passageStart, endIdx, notify }
         progress: null,
         total: 1,
     });
-    if (!job) {
-        return false;
+    if (result.status) {
+        return result.status === 'idle' ? { status: 'idle' } : { status: 'failed' };
     }
-    notify?.update(job.progress, { processed: 1 });
+    notify?.update(result.progress, { processed: 1 });
 
-    return await commitLayer0Job({
+    const committed = await commitLayer0Job({
         kind: 'layer0',
-        snapshot: job.snapshot,
-        progress: job.progress,
+        snapshot: result.snapshot,
+        progress: result.progress,
         notify,
-        commit: () => commitLayer0Snippet({ snapshot: job.snapshot, summary: job.summary, notify }),
+        commit: () =>
+            commitLayer0Snippet({ snapshot: result.snapshot, summary: result.summary, notify }),
     });
+    return committed ? { status: 'completed', completed: 1 } : { status: 'failed' };
 }
 
 /**

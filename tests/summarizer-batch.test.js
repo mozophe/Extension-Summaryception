@@ -40,7 +40,10 @@ describe('Layer 0 deferred cleanup commit', () => {
             };
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toBe(true);
+        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+            status: 'completed',
+            completed: 1,
+        });
 
         expect(progressOpenAtRequest).toBe(true);
         const progress = recorder.events.filter((event) => event.type === 'progress');
@@ -62,7 +65,9 @@ describe('Layer 0 deferred cleanup commit', () => {
         installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
         callSummarizer.mockResolvedValue({ status: 'aborted' });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toBe(false);
+        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+            status: 'failed',
+        });
 
         const progress = recorder.events.filter((event) => event.type === 'progress');
         expect(progress).toHaveLength(1);
@@ -82,9 +87,9 @@ describe('Layer 0 deferred cleanup commit', () => {
             installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
             callSummarizer.mockResolvedValue({ status });
 
-            await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toBe(
-                false,
-            );
+            await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+                status: 'failed',
+            });
 
             const clears = recorder.events.filter((event) => event.type === 'clear');
             expect(clears).toHaveLength(1);
@@ -104,7 +109,9 @@ describe('Layer 0 deferred cleanup commit', () => {
             text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toBe(false);
+        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+            status: 'idle',
+        });
 
         expect(callSummarizer).not.toHaveBeenCalled();
         expect(recorder.events).toEqual([]);
@@ -120,7 +127,10 @@ describe('Layer 0 deferred cleanup commit', () => {
             text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toBe(true);
+        await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toEqual({
+            status: 'completed',
+            completed: 1,
+        });
 
         expect(metadata.summaryception.layers[0][0].sourceMessageIds).toEqual([
             'user-id',
@@ -158,7 +168,7 @@ describe('Layer 0 deferred cleanup commit', () => {
             status: 'completed',
             text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
         });
-        await expect(resultPromise).resolves.toBe(true);
+        await expect(resultPromise).resolves.toEqual({ status: 'completed', completed: 1 });
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'assistant-id']);
         expect(metadata.summaryception.layers[0]).toHaveLength(1);
@@ -218,9 +228,11 @@ describe('Layer 0 atomic multi-partition progress', () => {
             { turns: [{ index: 3 }], sourceStartIdx: 3, sourceEndIdx: 3 },
         ];
 
-        await expect(summarizeAtomicLayer0Partitions(partitions, {}, recorder)).resolves.toBe(
-            false,
-        );
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, recorder)).resolves.toEqual({
+            status: 'failed',
+            completed: 1,
+            failed: 1,
+        });
 
         const progress = recorder.events.filter((event) => event.type === 'progress');
         expect(progress).toHaveLength(1);
@@ -253,7 +265,9 @@ describe('Layer 0 request outcome handling', () => {
             installSummaryContext({ chat, metadata });
             callSummarizer.mockResolvedValue({ status });
 
-            await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toBe(false);
+            await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toEqual({
+                status: 'failed',
+            });
 
             expect(metadata.summaryception.layers[0]).toEqual([]);
             expect(metadata.summaryception.mutationEpoch).toBe(0);

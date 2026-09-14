@@ -656,7 +656,7 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
  * @param {object} [options]
  * @param {number} [options.maxConsecutiveFailures] - Consecutive failed promotions tolerated before stopping.
  * @param {import('./notify.js').NotifyAdapter} [options.notify] - Notify adapter threaded from the engine; runs without one stay silent.
- * @returns {Promise<{ status: 'completed'|'blocked'|'failed', attempts: number }>} Run Outcome status and the number of promotions attempted.
+ * @returns {Promise<{status: 'completed', attempts: number} | {status: 'blocked', attempts: number} | {status: 'failed', attempts: number}>} Run status and the number of promotions attempted.
  */
 export async function drainPromotionOverflow({ maxConsecutiveFailures = Infinity, notify } = {}) {
     const s = getEffectiveSettings();

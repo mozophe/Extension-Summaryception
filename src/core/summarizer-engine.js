@@ -62,32 +62,32 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * Run one automatic elastic summarization action.
  * @param {import('./summarizer-queue.js').SummarizerQueueContext} queue
  * @param {{ refreshUi?: () => void, notify?: import('./notify.js').NotifyAdapter }} [opts]
- * @returns {Promise<'processed' | 'idle' | 'blocked' | 'failed'>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
     if ((await promptWorkGate('auto worker', { refreshUi })) === 'blocked') {
         queue.setPhase('paused');
-        return 'blocked';
+        return { status: 'blocked' };
     }
 
     const s = getEffectiveSettings();
     if (!s.enabled || s.autoPaused) {
         queue.setPhase('paused');
-        return 'idle';
+        return { status: 'idle' };
     }
 
     const prepared = await prepareSummaryCycle();
     queue.setPhase('promoting');
     const promotion = await drainPromotionOverflow({ maxConsecutiveFailures: 1, notify });
-    if (promotion.status !== 'completed' || promotion.attempts > 0) {
-        return promotion.status === 'completed' ? 'processed' : promotion.status;
+    if (promotion.attempts > 0 || promotion.status !== 'completed') {
+        return promotion;
     }
 
     const routePlan = await buildAutoSummaryRoutePlan(prepared.chat, prepared.store, s);
     logRoutePlan(routePlan, s);
 
     if (!routePlan.ready) {
-        return 'idle';
+        return { status: 'idle' };
     }
 
     queue.setPhase('layer0');
@@ -158,17 +158,23 @@ export async function describeManualRun(strategy) {
     };
 }
 
+/**
+ * Commit a route plan and apply the auto-run gate on top of the batch outcome.
+ * @param {import('./summarization-routes.js').SummaryRoutePlan} routePlan
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for automatic runs.
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
+ */
 async function processRoutePlan(routePlan, notify) {
-    const success = await commitRoutePlan(routePlan, { catchExceptions: true }, notify);
+    const outcome = await commitRoutePlan(routePlan, { catchExceptions: true }, notify);
 
-    if (!success) {
+    if (outcome.status !== 'completed') {
         debug('Route batch failed, stopping summarization cycle to avoid retry loop.');
-        return 'failed';
+        return outcome;
     }
     if ((await promptWorkGate('route plan')) === 'blocked') {
-        return 'blocked';
+        return { ...outcome, status: 'blocked' };
     }
-    return 'processed';
+    return outcome;
 }
 
 /**
@@ -176,7 +182,7 @@ async function processRoutePlan(routePlan, notify) {
  * @param {import('./summarization-routes.js').SummaryRoutePlan} routePlan
  * @param {{ catchExceptions?: boolean }} [options]
  * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for automatic runs; manual runs own their progress UI and stay silent.
- * @returns {Promise<boolean>}
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function commitRoutePlan(routePlan, options = {}, notify) {
     if (routePlan.commitMode === SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS) {
@@ -372,9 +378,12 @@ function shouldStopManualLoop(outcome, result, signal, queue) {
  */
 async function processStrategyBatch(plan, strategy, notify) {
     const beforeIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    const success = await commitRoutePlan(plan, { catchExceptions: true }, notify);
+    const outcome = await commitRoutePlan(plan, { catchExceptions: true }, notify);
     const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    return { success, ...strategy.assessCommit(plan, beforeIndex, afterIndex) };
+    return {
+        success: outcome.status === 'completed',
+        ...strategy.assessCommit(plan, beforeIndex, afterIndex),
+    };
 }
 
 async function normalizeManualMemory(outcome, notify) {

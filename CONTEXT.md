@@ -49,7 +49,7 @@ _Avoid_: Append Only
 The set of request routes (new summary, deeper merge, fallback) built for one run.
 
 **Run Outcome**:
-The structured result of one summarizer request: `completed`, `aborted`, `blocked`, or `failed`. Outcomes and notify events carry data only; entry renders all user-facing notices.
+The structured result at every run level — summarizer request, batch commit, promotion drain, auto cycle: `completed`, `aborted`, `blocked`, `failed`, or `idle` (no eligible work). Outcomes and notify events carry data only; entry renders all user-facing notices.
 
 **Notify Adapter**:
 The display-side receiver of core notify events. Entry owns the instance and all notice text; core receives it only by argument.
