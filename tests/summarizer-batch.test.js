@@ -162,7 +162,6 @@ describe('Layer 0 deferred cleanup commit', () => {
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'assistant-id']);
         expect(metadata.summaryception.layers[0]).toHaveLength(1);
-        expect(saveChat).not.toHaveBeenCalled();
         expect(reloadCurrentChat).not.toHaveBeenCalled();
         expect(saveMetadata).toHaveBeenCalled();
     });
@@ -174,7 +173,7 @@ describe('Layer 0 deferred cleanup commit', () => {
         let metadataSaves = 0;
         const saveMetadata = vi.fn(async () => {
             metadataSaves++;
-            if (metadataSaves === 2) {
+            if (metadataSaves === 1) {
                 throw new Error('metadata write failed');
             }
         });

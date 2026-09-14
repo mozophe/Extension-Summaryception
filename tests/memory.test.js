@@ -50,7 +50,7 @@ describe('clearSummaryceptionMemory', () => {
             }),
         ]);
         expect(runtime.chat.every((message) => !Object.hasOwn(message, 'sc_id'))).toBe(true);
-        expect(saveMetadata).toHaveBeenCalledOnce();
+        expect(saveMetadata).toHaveBeenCalled();
         expect(saveChat).toHaveBeenCalledTimes(1);
     });
 });

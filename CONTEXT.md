@@ -12,7 +12,7 @@ _Avoid_: Tier, level
 One summary text unit inside a layer, owned by the store and carrying stable message-identifier provenance.
 
 **Snippet Commit**:
-The single point every Snippet mutation passes through: apply the change, bump the Mutation Epoch, persist.
+The single point every Snippet mutation passes through: apply the change, sync Ghosting ownership, bump the Mutation Epoch, persist. Any failing step restores the pre-commit store state.
 _Avoid_: Snippet save
 
 **Promotion**:

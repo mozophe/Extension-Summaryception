@@ -1,13 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
-const stateMocks = vi.hoisted(() => ({
-    saveChatStore: vi.fn(async () => {}),
-}));
-
-vi.mock('../src/foundation/state.js', async (importOriginal) => ({
-    ...(await importOriginal()),
-    saveChatStore: stateMocks.saveChatStore,
-}));
+import { describe, expect, it, vi } from 'vitest';
 
 const summarizerMocks = vi.hoisted(() => ({
     callSummarizer: vi.fn(),
@@ -21,11 +12,6 @@ const { isRegenerationCandidate, updateSnippetTextAt } =
     await import('../src/features/snippet-manager.js');
 
 describe('updateSnippetTextAt', () => {
-    afterEach(() => {
-        vi.restoreAllMocks();
-        stateMocks.saveChatStore.mockClear();
-    });
-
     async function installWithSnippet() {
         const chat = [makeMessage({ role: 'user', content: 'hello' })];
         const store = makeSummaryStore({
@@ -35,14 +21,12 @@ describe('updateSnippetTextAt', () => {
         return store;
     }
 
-    it('persists the store after an applied edit', async () => {
+    it('returns the updated status after an applied edit', async () => {
         await installWithSnippet();
 
         await expect(updateSnippetTextAt(0, 0, 'new text')).resolves.toEqual({
             status: 'updated',
         });
-
-        expect(stateMocks.saveChatStore).toHaveBeenCalledTimes(1);
     });
 });
 

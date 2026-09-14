@@ -18,7 +18,6 @@ import {
 import { error, warn } from '../foundation/logger.js';
 import { clampInteger } from '../foundation/numeric.js';
 import {
-    bumpSummaryStoreMutationEpoch,
     deriveAdvancedEngineTuning,
     enforceRetentionInvariants,
     getEffectiveSettings,
@@ -27,7 +26,7 @@ import {
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
-import { syncGhosting } from '../core/ghosting.js';
+import { commitSnippetMutation } from '../core/snippet-commit.js';
 import {
     abortSummarization,
     describeManualRun,
@@ -38,7 +37,7 @@ import {
     runManual,
 } from '../core/summarizer.js';
 import { updateInjection } from '../features/injection.js';
-import { persistAndRefresh } from '../features/persist.js';
+import { refreshExtensionState } from '../features/persist.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
 import { updateUI, syncLLMContextPreview } from './ui.js';
 import {
@@ -562,11 +561,14 @@ function triggerImport() {
             }
 
             const store = getChatStore();
-            store.layers = data.layers;
-            await syncGhosting({ notify: notifyAdapter });
-            bumpSummaryStoreMutationEpoch(store);
-
-            await persistAndRefresh({ ui: true });
+            await commitSnippetMutation(
+                store,
+                () => {
+                    store.layers = data.layers;
+                },
+                { notify: notifyAdapter, chatSave: 'immediate' },
+            );
+            refreshExtensionState({ injection: false, ui: true });
             toastr.success(
                 `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded.`,
                 TOAST_TITLE,

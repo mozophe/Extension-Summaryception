@@ -1,21 +1,19 @@
 import { BATCH_PROGRESS } from '../foundation/constants.js';
 import { getContext, getChat } from '../foundation/context.js';
-import { ensureChatScIds, resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { ensureChatScIds } from '../foundation/message-identity.js';
 import {
-    bumpSummaryStoreMutationEpoch,
     getChatStore,
     getCurrentSummarizedBoundary,
     getSummaryStoreMutationEpoch,
-    saveChatStore,
 } from '../foundation/state.js';
 import { debug, error, info, isTraceEnabled, serializeError, trace } from '../foundation/logger.js';
-import { ghostMessagesInRange, repairGhostingForRange } from './ghosting.js';
+import { repairGhostingForRange } from './ghosting.js';
 import { buildPassageFromRangeWithStats, buildFullContext } from './chatutils.js';
 import { persistChatState } from './persist-state.js';
 import { callSummarizer } from './summarizer-request.js';
 import { buildSnippetMetadataFromState } from './snippet-metadata.js';
-import { commitWhenSafe, updateCommittedInjection } from './summarizer-commit.js';
-import { executeLayer0StoreTransaction } from './layer0-store-transaction.js';
+import { commitWhenSafe } from './summarizer-commit.js';
+import { commitSnippetMutation } from './snippet-commit.js';
 import { isSummarizerOutputSafe } from './prompts.js';
 import { parseSnippet } from './summarizer-state.js';
 import { buildMemoryInjection, getCurrentStateSnapshotText } from './memory-injection.js';
@@ -484,20 +482,23 @@ async function commitLayer0Snippet({ snapshot, summary, notify }) {
     if (!isLayer0SummarySafe(summary, snapshot)) {
         return false;
     }
-    await executeLayer0Commit({
+    const chat = getChat();
+    const chatRollbackPoint = [...chat];
+    await commitSnippetMutation(
         store,
-        sourceMessageIds: snapshot.sourceMessageIds,
-        notify,
-        rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
-        onRollback: () => {
-            debug('Layer 0 commit rolled back: post-save persistence failed.');
-        },
-        mutate: () => {
+        () => {
             store.layers[0].push(buildLayer0Snippet(snapshot, summary));
-            bumpSummaryStoreMutationEpoch(store);
             trace('  Added Layer 0 snippet for current source IDs.');
         },
-    });
+        {
+            chatSave: 'deferred',
+            notify,
+            onRollback: () => {
+                chat.splice(0, chat.length, ...chatRollbackPoint);
+                debug('Layer 0 commit rolled back: post-save persistence failed.');
+            },
+        },
+    );
 
     return true;
 }
@@ -512,63 +513,26 @@ async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }
 
     const store = getChatStore();
     ensureLayer0(store);
-    const sourceMessageIds = snapshots.flatMap((snapshot) => snapshot.sourceMessageIds);
-
-    await executeLayer0Commit({
+    const chat = getChat();
+    const chatRollbackPoint = [...chat];
+    await commitSnippetMutation(
         store,
-        sourceMessageIds,
-        notify,
-        rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
-        onRollback: () => {
-            debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
-        },
-        mutate: () => {
+        () => {
             for (const snippet of pendingSnippets) {
                 store.layers[0].push(snippet);
             }
-            bumpSummaryStoreMutationEpoch(store);
         },
-    });
+        {
+            chatSave: 'deferred',
+            notify,
+            onRollback: () => {
+                chat.splice(0, chat.length, ...chatRollbackPoint);
+                debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
+            },
+        },
+    );
 
     return true;
-}
-
-async function executeLayer0Commit({
-    store,
-    sourceMessageIds,
-    notify,
-    mutate,
-    rollbackMessage,
-    onRollback,
-}) {
-    const chat = getChat();
-    const chatRollbackPoint = [...chat];
-    await executeLayer0StoreTransaction({
-        store,
-        mutate,
-        rollbackMessage,
-        onRollback: async () => {
-            chat.splice(0, chat.length, ...chatRollbackPoint);
-            onRollback?.();
-        },
-        persist: async () => {
-            await saveChatStore();
-            await updateCommittedInjection({ logMemoryStatus: true });
-            await ghostSourceMessageIds(sourceMessageIds, notify);
-            await persistChatState({ chatSave: 'deferred' });
-        },
-    });
-}
-
-async function ghostSourceMessageIds(sourceMessageIds, notify) {
-    const indices = resolveScIdsToIndices(getChat(), sourceMessageIds);
-    if (indices.length === 0) {
-        return;
-    }
-    await ghostMessagesInRange(indices[0], indices[indices.length - 1], {
-        chatSave: 'deferred',
-        notify,
-    });
 }
 
 function buildLayer0Snippet(snapshot, summary) {

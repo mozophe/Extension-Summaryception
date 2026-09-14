@@ -1,11 +1,6 @@
 import { INTERNAL_MAX_LAYER_DEPTH, NOTIFY_EVENTS } from '../foundation/constants.js';
 import { getContext } from '../foundation/context.js';
-import {
-    bumpSummaryStoreMutationEpoch,
-    getEffectiveSettings,
-    getChatStore,
-    saveChatStore,
-} from '../foundation/state.js';
+import { getEffectiveSettings, getChatStore } from '../foundation/state.js';
 import { debug, warn } from '../foundation/logger.js';
 import { buildFullContext } from './chatutils.js';
 import { getEffectiveMemoryUsage } from './memory-budget.js';
@@ -24,7 +19,8 @@ import {
     getPromotionSummaryTokenTarget,
 } from './layer0-compression.js';
 import { buildRepairDiagnostics } from './repair-diagnostics.js';
-import { commitWhenSafe, promptWorkGate, updateCommittedInjection } from './summarizer-commit.js';
+import { commitSnippetMutation } from './snippet-commit.js';
+import { commitWhenSafe, promptWorkGate } from './summarizer-commit.js';
 import { buildSnapshotBasis, isSnapshotStoreCurrent } from './summarizer-snapshot.js';
 import { countTextTokens, formatTokenValue } from './token-count.js';
 
@@ -629,24 +625,25 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
 
     const store = getChatStore();
     const layer = store.layers[layerIndex] || [];
-    const destLayer = store.layers[layerIndex + 1] || [];
-    const toMerge = layer.splice(0, snapshot.mergeCount);
-
-    if (toMerge.length !== snapshot.mergeCount) {
+    if (layer.length < snapshot.mergeCount) {
         return false;
     }
 
-    destLayer.push({
-        ...promotedSnippet,
-        fromLayer: layerIndex,
-        mergedCount: toMerge.length,
-        timestamp: Date.now(),
-    });
-    store.layers[layerIndex + 1] = destLayer;
-    bumpSummaryStoreMutationEpoch(store);
-
-    await saveChatStore();
-    await updateCommittedInjection({ logMemoryStatus: true });
+    await commitSnippetMutation(
+        store,
+        () => {
+            const toMerge = layer.splice(0, snapshot.mergeCount);
+            const destLayer = store.layers[layerIndex + 1] || [];
+            destLayer.push({
+                ...promotedSnippet,
+                fromLayer: layerIndex,
+                mergedCount: toMerge.length,
+                timestamp: Date.now(),
+            });
+            store.layers[layerIndex + 1] = destLayer;
+        },
+        { ghost: 'none' },
+    );
 
     return true;
 }

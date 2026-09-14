@@ -1,14 +1,13 @@
 import { getChat } from '../foundation/context.js';
 import { resolveScIdsToIndices } from '../foundation/message-identity.js';
-import { bumpSummaryStoreMutationEpoch, getChatStore, saveChatStore } from '../foundation/state.js';
+import { getChatStore } from '../foundation/state.js';
 import { buildPassageFromRangeWithStats } from '../core/chatutils.js';
-import { syncGhosting } from '../core/ghosting.js';
 import { validateSummarizerOutputIntegrity } from '../core/prompts.js';
+import { commitSnippetMutation } from '../core/snippet-commit.js';
 import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
 import { parseSnippet } from '../core/summarizer-state.js';
 import { callSummarizer, getIsSummarizing, setSummarizing } from '../core/summarizer.js';
 import { withUsageRun } from '../core/summarizer-usage.js';
-import { refreshExtensionState } from './persist.js';
 
 /**
  * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context?: string }} RegenerationTarget
@@ -82,11 +81,12 @@ export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
         return { status: 'unchanged' };
     }
 
-    snippet.text = newText;
-    if (layerIndex === 0) {
-        Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
-    }
-    await commitSnippetMutation(store);
+    await commitSnippetMutation(store, () => {
+        snippet.text = newText;
+        if (layerIndex === 0) {
+            Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
+        }
+    });
     return { status: 'updated' };
 }
 
@@ -103,13 +103,9 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
         return { status: 'missing' };
     }
 
-    layer.splice(snippetIndex, 1);
-
-    if (layerIndex === 0) {
-        await syncGhosting();
-    }
-
-    await commitSnippetMutation(store);
+    await commitSnippetMutation(store, () => {
+        layer.splice(snippetIndex, 1);
+    });
     return { status: 'deleted', layerIndex };
 }
 
@@ -177,11 +173,15 @@ async function regenerateSnippetWithTarget(target, notify) {
         return { status: 'failed' };
     }
 
-    target.snippet.text = newSummary;
-    target.snippet.timestamp = Date.now();
-    target.snippet.regenerated = true;
-    Object.assign(target.snippet, buildSnippetMetadataFromState(parseSnippet(newSummary).state));
-    await commitSnippetMutation(getChatStore());
+    await commitSnippetMutation(getChatStore(), () => {
+        target.snippet.text = newSummary;
+        target.snippet.timestamp = Date.now();
+        target.snippet.regenerated = true;
+        Object.assign(
+            target.snippet,
+            buildSnippetMetadataFromState(parseSnippet(newSummary).state),
+        );
+    });
     return { status: 'regenerated', range: target.range };
 }
 
@@ -230,22 +230,6 @@ function getSnippetAt(store, layerIndex, snippetIndex) {
         return null;
     }
     return store.layers[layerIndex]?.[snippetIndex] || null;
-}
-
-async function saveSnippetStore() {
-    await saveChatStore();
-    refreshExtensionState({ injection: true, ui: false });
-}
-
-/**
- * The Snippet Commit point: bump the Mutation Epoch, then persist the store.
- * Every snippet mutation routes through here.
- * @param {SummaryceptionStore} store
- * @returns {Promise<void>}
- */
-async function commitSnippetMutation(store) {
-    bumpSummaryStoreMutationEpoch(store);
-    await saveSnippetStore();
 }
 
 function buildSnippetContext(store, excludeLayerIndex, excludeSnippetIndex) {

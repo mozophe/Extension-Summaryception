@@ -10,6 +10,7 @@
 - Per-chat summaries live with chat metadata and survive extension reloads (ADR-0002).
 - Global configuration lives in extension settings.
 - Any summary layer or snippet mutation must bump the store mutation epoch (ADR-0003).
+- Snippet mutations cross the Snippet Commit seam (src/core/snippet-commit.js): mutate, Ghosting ownership, epoch bump, persist, gated injection refresh. Do not hand-roll the sequence.
 - Consumers cache derived data by mutation epoch.
 
 ## Memory
