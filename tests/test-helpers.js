@@ -314,6 +314,21 @@ export function installSummaryContext(opts = {}) {
     });
 }
 
+/**
+ * Install a context whose Layer 0 exceeds its token quota (24 ~150-char
+ * snippets vs. a 2400-token quota under the length-based test tokenizer).
+ */
+export function installOverflowingStore() {
+    const snippets = Array.from({ length: 24 }, (_, i) => ({
+        text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}\n[STATE]\nlocation: room${i}`,
+        sourceMessageIds: [`msg-${i}`],
+    }));
+    installSummaryContext({
+        metadata: { summaryception: makeSummaryStore({ layers: [snippets] }) },
+        settings: makeSummarySettings({ memoryTokenBudget: 4000 }),
+    });
+}
+
 /** Build a deferred promise for async coalescing tests. */
 export function deferred() {
     /** @type {(value?: unknown) => void} */

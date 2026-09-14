@@ -4,6 +4,7 @@ import {
     CACHE_TTL,
     MEMORY_MODE_PRESETS,
     MEMORY_MODES,
+    RETENTION_BUDGET_LIMITS,
     UI_MODES,
     applyMemoryModePreset,
     defaultSettings,
@@ -65,8 +66,8 @@ describe('memory mode budgets', () => {
             settings: { verbatimTokenBudget: 999, queuedTokenBudget: 999999 },
         });
         expect(getSettings()).toMatchObject({
-            verbatimTokenBudget: 4000,
-            queuedTokenBudget: 64000,
+            verbatimTokenBudget: RETENTION_BUDGET_LIMITS.MIN,
+            queuedTokenBudget: RETENTION_BUDGET_LIMITS.MAX,
         });
     });
 

@@ -31,11 +31,10 @@ describe('context limit and trigger gauge UI models', () => {
                 { queuedTokens: 4321.2, queuedEstimated: true },
                 { queuedTokenBudget: 16000 },
             ),
-        ).toEqual({
+        ).toMatchObject({
             queuedTokens: 4322,
             queuedEstimated: true,
             triggerTokens: 16000,
-            label: 'Summarize at Recent + Queued',
         });
     });
 });

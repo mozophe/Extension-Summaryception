@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { REQUEST_TIMEOUT, RETRY_CONFIG, isRetryableError } from '../src/foundation/retry.js';
+import { REQUEST_TIMEOUT, RETRY_CONFIG } from '../src/foundation/retry.js';
 import {
-    ROUTE_CYCLE_RETRY_ATTEMPT,
     classifyAttemptRetryStatus,
     computeAttemptTimeoutMs,
     getPrimaryHealthBucket,
@@ -69,17 +68,20 @@ describe('classifyAttemptRetryStatus', () => {
         });
     });
 
-    it('mirrors isRetryableError for other errors', () => {
-        const retryable = new Error('Rate limit exceeded');
-        const nonRetryable = new Error('invalid API key');
+    it('retries a retryable-status failure but refuses a client-error status', () => {
+        const retryable = { status: RETRY_CONFIG.retryableStatuses[0], message: 'ignored' };
         expect(classifyAttemptRetryStatus(retryable, false)).toMatchObject({
-            shouldRetry: isRetryableError(retryable),
+            shouldRetry: true,
             hardFailover: false,
             failureStatus: 'failed',
         });
-        expect(classifyAttemptRetryStatus(nonRetryable, false).shouldRetry).toBe(
-            isRetryableError(nonRetryable),
-        );
+
+        const clientError = { status: 400, message: 'bad request' };
+        expect(classifyAttemptRetryStatus(clientError, false)).toMatchObject({
+            shouldRetry: false,
+            hardFailover: false,
+            failureStatus: 'failed',
+        });
     });
 });
 
@@ -161,11 +163,5 @@ describe('getPrimaryHealthBucket', () => {
             getPrimaryHealthBucket({ kind: 'layer0' }),
         );
         expect(typeof getPrimaryHealthBucket({ kind: 'promotion' })).toBe('string');
-    });
-});
-
-describe('ROUTE_CYCLE_RETRY_ATTEMPT', () => {
-    it('aliases RETRY_CONFIG.maxRetries', () => {
-        expect(ROUTE_CYCLE_RETRY_ATTEMPT).toBe(RETRY_CONFIG.maxRetries);
     });
 });

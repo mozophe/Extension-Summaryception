@@ -218,6 +218,16 @@ export const CACHE_TTL = Object.freeze({
     STEP_MINUTES: 5,
     DEFAULT_MINUTES: 30,
 });
+
+// ─── Retention Budget Clamp ──────────────────────────────────────────
+// Read-time clamp bounds for the retention budgets (verbatimTokenBudget,
+// queuedTokenBudget). Enforced only by the settings normalizer; the
+// settings.html slider min/max/step are kept in sync manually.
+export const RETENTION_BUDGET_LIMITS = Object.freeze({
+    MIN: 4000,
+    MAX: 64000,
+    STEP: 1000,
+});
 // ─── Default Settings ────────────────────────────────────────────────
 
 export const defaultSettings = Object.freeze({

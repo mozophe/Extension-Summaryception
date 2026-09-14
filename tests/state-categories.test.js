@@ -67,18 +67,28 @@ describe('state-categories catalog', () => {
         expect(getEnabledCategories(allEnabled)).toHaveLength(6);
     });
 
-    it('getActiveLineCap sums enabled caps and clamps to the ceiling', () => {
-        expect(getActiveLineCap(allEnabled)).toBe(36);
+    it('getActiveLineCap sums enabled caps from the catalog and clamps to the ceiling', () => {
+        const catalogSum = STATE_CATEGORIES.reduce((sum, c) => sum + c.lineCapDefault, 0);
+        expect(getActiveLineCap(allEnabled)).toBe(catalogSum);
         expect(getActiveLineCap(allEnabled, 12)).toBe(12);
         expect(getActiveLineCap({})).toBe(2);
     });
 
-    it('buildStateSchemaText fills {cap} and emits category-format tokens', () => {
+    it('buildStateSchemaText fills {cap} and emits a header per enabled category key only', () => {
         const text = buildStateSchemaText(allEnabled);
         expect(text).not.toContain('{cap}');
-        expect(text).toContain('current_date_time:');
-        expect(text).toContain('BOND:');
-        expect(text).toContain('[BULLET:');
+        for (const category of STATE_CATEGORIES) {
+            expect(text).toContain(`${category.key}:`);
+        }
+
+        const partial = { ...allEnabled, stateCatBonds: false, stateCatChekhov: false };
+        const partialText = buildStateSchemaText(partial);
+        const enabledKeys = getEnabledStateKeys(partial);
+        for (const category of STATE_CATEGORIES) {
+            expect(partialText.includes(`${category.key}:`)).toBe(
+                enabledKeys.includes(category.key),
+            );
+        }
     });
 
     it('isCategoryEnabled handles unknown keys and always-on override of a falsey flag', () => {

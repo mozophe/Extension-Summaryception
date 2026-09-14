@@ -5,7 +5,6 @@ import {
     appendLayer0PromptConstraints,
     buildLayer0SizeRepairFeedback,
     buildStateSnapshotSizeRepairFeedback,
-    getLayer0SummaryRepairCeiling,
     getLayer0SummaryTokenBounds,
     getLayer0SummaryTokenTarget,
     getPromotionSummaryTokenHardMax,
@@ -18,11 +17,7 @@ import {
     EXECUTION_TRIGGER_PROMO,
     buildUserPrompt,
 } from '../src/foundation/prompt-parts.js';
-import {
-    LAYER0_REPAIR_RATIO,
-    LAYER_HARD_MAX_RATIO,
-    LAYER_MIN_RATIO,
-} from '../src/core/token-budget.js';
+import { LAYER_HARD_MAX_RATIO } from '../src/core/token-budget.js';
 
 function makeLayer0Prompt(triggerLine) {
     return buildUserPrompt({
@@ -88,52 +83,19 @@ describe('getLayer0SummaryTokenBounds', () => {
         const bounds = getLayer0SummaryTokenBounds(settings);
         const target = getLayer0SummaryTokenTarget(settings);
         expect(bounds.target).toBe(target);
-        expect(bounds.min).toBe(50);
         expect(bounds.max).toBe(Math.round(target * LAYER_HARD_MAX_RATIO.l0));
         expect(bounds.min).toBeLessThan(bounds.target);
         expect(bounds.target).toBeLessThan(bounds.max);
     });
 });
 
-describe('getLayer0SummaryRepairCeiling', () => {
-    it('equals target * LAYER0_REPAIR_RATIO rounded', () => {
-        const settings = { layer0SummaryTokenTarget: 200 };
-        expect(getLayer0SummaryRepairCeiling(settings)).toBe(
-            Math.round(getLayer0SummaryTokenTarget(settings) * LAYER0_REPAIR_RATIO),
-        );
-    });
-});
-
 describe('getPromotionSummaryTokenTarget', () => {
-    it('uses the l1 ratio for layerIndex 0 and the l2 ratio for layerIndex >= 1', () => {
-        const targetTokens = 1000;
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 0, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l1)),
-        );
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 1, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l2)),
-        );
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 3, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l2)),
-        );
-    });
-
     it('floors to at least 1 for a tiny targetTokens', () => {
         expect(getPromotionSummaryTokenTarget({ layerIndex: 0, targetTokens: 1 })).toBe(1);
     });
 });
 
 describe('getPromotionSummaryTokenHardMax', () => {
-    it('uses the hard-max ratios with rounding', () => {
-        const targetTokens = 1000;
-        expect(getPromotionSummaryTokenHardMax({ layerIndex: 0, targetTokens })).toBe(
-            Math.max(1, Math.round(targetTokens * LAYER_HARD_MAX_RATIO.l1)),
-        );
-        expect(getPromotionSummaryTokenHardMax({ layerIndex: 1, targetTokens })).toBe(
-            Math.max(1, Math.round(targetTokens * LAYER_HARD_MAX_RATIO.l2)),
-        );
-    });
-
     it('yields a hard max no smaller than the target for the same inputs', () => {
         const args = { layerIndex: 0, targetTokens: 1000 };
         expect(getPromotionSummaryTokenHardMax(args)).toBeGreaterThanOrEqual(

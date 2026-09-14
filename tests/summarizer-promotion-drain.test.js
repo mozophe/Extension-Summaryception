@@ -8,7 +8,15 @@ import {
     resetCommitStateForTests,
 } from '../src/core/summarizer-commit.js';
 import { drainPromotionOverflow } from '../src/core/summarizer-promotion.js';
-import { installSummaryContext, makeSummarySettings, makeSummaryStore } from './test-helpers.js';
+import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
+import {
+    installBrowserRuntimeStub,
+    installOverflowingStore,
+    installSummaryContext,
+    makeNotifyRecorder,
+    makeSummarySettings,
+    makeSummaryStore,
+} from './test-helpers.js';
 
 /**
  * drainPromotionOverflow is the single owner of overflow clearing: one loop,
@@ -20,23 +28,8 @@ describe('drainPromotionOverflow', () => {
         vi.restoreAllMocks();
         callSummarizer.mockReset();
         resetCommitStateForTests();
+        delete globalThis.toastr;
     });
-
-    /**
-     * Install a context whose Layer 0 exceeds its token quota (24 ~150-char
-     * snippets vs. a 2400-token quota under the length-based test tokenizer).
-     */
-    function installOverflowingStore() {
-        const snippets = Array.from({ length: 24 }, (_, i) => ({
-            text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}\n[STATE]\nlocation: room${i}`,
-            sourceMessageIds: [`msg-${i}`],
-        }));
-        installSummaryContext({
-            metadata: { summaryception: makeSummaryStore({ layers: [snippets] }) },
-            settings: makeSummarySettings({ memoryTokenBudget: 4000 }),
-        });
-    }
-
     function installSettledStore() {
         installSummaryContext({
             metadata: { summaryception: makeSummaryStore() },
@@ -104,5 +97,30 @@ describe('drainPromotionOverflow', () => {
         });
 
         expect(callSummarizer).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits one structured promotion-started event and never calls toastr', async () => {
+        const { toastr } = installBrowserRuntimeStub();
+        const recorder = makeNotifyRecorder();
+        installOverflowingStore();
+        callSummarizer.mockResolvedValue({ status: 'failed' });
+
+        await expect(
+            drainPromotionOverflow({ maxConsecutiveFailures: 1, notify: recorder }),
+        ).resolves.toEqual({
+            status: 'failed',
+            attempts: 1,
+        });
+
+        expect(toastr.info).not.toHaveBeenCalled();
+        expect(recorder.events).toEqual([
+            {
+                type: 'transient',
+                kind: NOTIFY_EVENTS.PROMOTION_STARTED,
+                mergedCount: 3,
+                fromLayer: 0,
+                toLayer: 1,
+            },
+        ]);
     });
 });

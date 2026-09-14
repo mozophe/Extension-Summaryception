@@ -10,6 +10,7 @@ import {
     MODULE_NAME,
     PROMPT_SETTING_KEYS,
     REQUEST_TIMEOUT,
+    RETENTION_BUDGET_LIMITS,
     UI_MODES,
     defaultSettings,
 } from './constants.js';
@@ -256,9 +257,18 @@ function normalizeVerbatimWindowSettings(settings) {
         L0_SOURCE_LIMITS.MAX,
         L0_SOURCE_LIMITS.STEP,
     );
-    enforceRetentionInvariants(settings);
-    settings.verbatimTokenBudget = clampToStep(settings.verbatimTokenBudget, 4000, 64000, 1000);
-    settings.queuedTokenBudget = clampToStep(settings.queuedTokenBudget, 4000, 64000, 1000);
+    settings.verbatimTokenBudget = clampToStep(
+        settings.verbatimTokenBudget,
+        RETENTION_BUDGET_LIMITS.MIN,
+        RETENTION_BUDGET_LIMITS.MAX,
+        RETENTION_BUDGET_LIMITS.STEP,
+    );
+    settings.queuedTokenBudget = clampToStep(
+        settings.queuedTokenBudget,
+        RETENTION_BUDGET_LIMITS.MIN,
+        RETENTION_BUDGET_LIMITS.MAX,
+        RETENTION_BUDGET_LIMITS.STEP,
+    );
     settings.memoryTokenBudget = clampToStep(settings.memoryTokenBudget, 4000, 32000, 1000);
     settings.snippetsPerLayer = clampInteger(settings.snippetsPerLayer, 20, 40);
     settings.snippetsPerPromotion = clampInteger(settings.snippetsPerPromotion, 3, 4);
@@ -268,6 +278,7 @@ function normalizeVerbatimWindowSettings(settings) {
         CACHE_TTL.MAX_MINUTES,
         CACHE_TTL.STEP_MINUTES,
     );
+    enforceRetentionInvariants(settings);
 }
 
 /**
