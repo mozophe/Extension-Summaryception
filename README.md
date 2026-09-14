@@ -142,15 +142,6 @@ Older major versions are still available as branches. Open SillyTavern's extensi
 
 - **v22:** Big code refactor
 
-- **v20:** Stop now pauses. Modular [STATE] experiment
-- **v19:** Changed prompts so less repair needed (second LLM pass).
-- **v18:** Improved UI + tooltip.
-- **v17:** Replaced ever-growing accumulated state with bounded rolling snapshots, shortened chronology anchors to spend fewer tokens on bookkeeping, and made compression repair section-aware. Failed output can now be repaired one bad section at a time instead of taking the whole summary back to the workshop. Layer 0 and promotion paths also gained stricter size checks and type guards.
-- **v16:** Refactored summarization routes, split memory style from memory placement, added Macro Only placement, and added assistant-role masking for outgoing chat-completion requests. Retry and atomic commit handling were pulled into dedicated helpers, Layer 0 gained a size-repair guard, and the tuning UI was cleaned up around context estimates and cache behavior.
-- **v15:** UI and prompt tweaks.
-- **v14:** Easy mode. ~~Less~~ Fewer controls up front, ~~saner~~ safer defaults.
-- **v13:** Memory pyramid tuning, temporal anchors, stricter summary integrity checks, and better promotion compression repair. This is the line that stopped long memories from collapsing into tiny broken outputs or promoting into barely smaller summaries.
-
 ## Troubleshooting
 
 Extension refuses to update: remove and install it again.
