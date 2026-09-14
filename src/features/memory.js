@@ -1,9 +1,9 @@
 import { MODULE_NAME } from '../foundation/constants.js';
 import { getChat, getChatMetadata, saveChat, saveMetadata } from '../foundation/context.js';
 import { info } from '../foundation/logger.js';
+import { refreshUi } from '../foundation/refresh.js';
 import { getChatStore } from '../foundation/state.js';
 import { commitSnippetMutation } from '../core/snippet-commit.js';
-import { refreshExtensionState } from './persist.js';
 
 // ─── Memory Clear Workflow ───────────────────────────────────────────
 
@@ -23,7 +23,9 @@ export async function clearSummaryceptionMemory(
         },
         { ghost: 'clear', chatSave: 'none' },
     );
-    refreshExtensionState({ injection: false, ui: updateUi });
+    if (updateUi) {
+        refreshUi();
+    }
 
     delete getChatMetadata()[MODULE_NAME];
     for (const message of getChat()) {

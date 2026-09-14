@@ -22,6 +22,7 @@ export const SETTING_SLIDER_SELECTOR = 'input[type="range"][data-sc-slider-setti
  * @typedef {object} SliderSettingBindingOptions
  * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [beforeSave] - Optional hook before saving the slider value.
  * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [afterSave] - Optional hook after saving the slider value.
+ * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [afterSavePartner] - Optional hook after saving from the partner input; defaults to afterSave.
  */
 
 /**
@@ -105,13 +106,14 @@ export function syncDataSettingElements(selector, settings = getSettings()) {
  * @returns {void}
  */
 export function bindSliderSettingPairs(selector = SETTING_SLIDER_SELECTOR, options = {}) {
+    const partnerOptions = { ...options, afterSave: options.afterSavePartner ?? options.afterSave };
     for (const binding of collectSliderSettingBindings(selector)) {
         $(document).on('input', binding.sliderSelector, function () {
             writeSliderSetting(binding, $(this), options);
         });
 
         $(document).on('change blur', binding.partnerSelector, function () {
-            writeSliderSetting(binding, $(this), options);
+            writeSliderSetting(binding, $(this), partnerOptions);
         });
 
         $(document).on('focus', binding.partnerSelector, function () {

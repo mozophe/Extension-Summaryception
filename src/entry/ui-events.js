@@ -17,6 +17,7 @@ import {
 } from '../foundation/constants.js';
 import { error, warn } from '../foundation/logger.js';
 import { clampInteger } from '../foundation/numeric.js';
+import { refreshFull, refreshPreview, refreshUi } from '../foundation/refresh.js';
 import {
     deriveAdvancedEngineTuning,
     enforceRetentionInvariants,
@@ -37,9 +38,8 @@ import {
     runManual,
 } from '../core/summarizer.js';
 import { updateInjection } from '../features/injection.js';
-import { refreshExtensionState } from '../features/persist.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
-import { updateUI, syncLLMContextPreview } from './ui.js';
+import { updateUI } from './ui.js';
 import {
     clearManualProgressToast,
     confirmSlopBreaker,
@@ -109,8 +109,7 @@ const PROMPT_FIELDS = PROMPT_SETTING_KEYS.map(({ presetKey, settingKey }) => ({
  */
 export function saveAndRefreshUi() {
     saveSettings();
-    updateInjection();
-    updateUI();
+    refreshFull();
 }
 
 // Event bindings
@@ -195,7 +194,7 @@ function bindToggleHandlers() {
         selector: '#sc_inject_current_state',
         key: 'injectCurrentState',
         read: readChecked,
-        afterSave: refreshInjectionPreview,
+        afterSave: refreshPreview,
     });
     bindDocumentSetting({
         eventName: 'change',
@@ -237,7 +236,7 @@ function bindCustomPlacementHandlers() {
     // settings.html, so the engine reads and writes them identically.
     bindDataSettingElements('#sc_custom_memory_position, #sc_custom_memory_role', {
         eventName: 'change',
-        afterSave: refreshEffectiveSettings,
+        afterSave: refreshFull,
     });
     // Depth clamps to 0..10000 and saves on both input and change, so it stays
     // hand-bound: the engine has no clamped reader or dual-event binding.
@@ -246,16 +245,8 @@ function bindCustomPlacementHandlers() {
         selector: '#sc_custom_memory_depth',
         key: 'customMemoryDepth',
         read: ($element) => clampInteger($element.val(), 0, 10000),
-        afterSave: refreshEffectiveSettings,
+        afterSave: refreshFull,
     });
-}
-
-/**
- *
- */
-export function refreshEffectiveSettings() {
-    updateInjection();
-    updateUI();
 }
 
 function requestAutoSummaryRefresh(reason) {
@@ -267,22 +258,14 @@ function requestAutoSummaryRefresh(reason) {
 }
 
 /**
- * Re-render the injection preview after a saved setting changes it.
- * @returns {void}
- */
-function refreshInjectionPreview() {
-    updateInjection();
-    syncLLMContextPreview(getEffectiveSettings());
-}
-
-/**
  * Bind handlers for slider inputs.
  * @returns {void}
  */
 function bindSliderHandlers() {
     bindSliderSettingPairs(SETTING_SLIDER_SELECTOR, {
         beforeSave: (_settings, _value, _source, key) => enforceRetentionConstraints(key),
-        afterSave: refreshInjectionPreview,
+        afterSave: refreshPreview,
+        afterSavePartner: refreshFull,
     });
 }
 
@@ -568,7 +551,7 @@ function triggerImport() {
                 },
                 { notify: notifyAdapter, chatSave: 'immediate' },
             );
-            refreshExtensionState({ injection: false, ui: true });
+            refreshUi();
             toastr.success(
                 `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded.`,
                 TOAST_TITLE,

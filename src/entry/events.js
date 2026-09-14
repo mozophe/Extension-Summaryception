@@ -2,6 +2,7 @@ import { getChat, isDryRunEvent } from '../foundation/context.js';
 import { debug, info, isDebugEnabled, warn } from '../foundation/logger.js';
 import { ensureChatScIds } from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
+import { refreshFull, refreshUi } from '../foundation/refresh.js';
 import { syncGhosting } from '../core/ghosting.js';
 import { maskUserRoleAsAssistantInGenerateData } from '../core/assistant-role-mask.js';
 import { evaluateStaleCacheAdvice, isProviderCacheMode } from '../core/cache-staleness.js';
@@ -19,7 +20,6 @@ import { updateInjection } from '../features/injection.js';
 import { repairOrphanedMessages } from '../features/maintenance.js';
 import { persistChatState } from '../core/persist-state.js';
 import { showStaleCacheAdvice } from './ui-dialogs.js';
-import { updateUI } from './ui.js';
 
 let previousPromptSectionHashes = [];
 
@@ -140,7 +140,7 @@ export function onMessageReceived(messageIndex) {
             debug('New assistant message at index', messageIndex);
             setTimeout(async () => {
                 await requestSummarization();
-                updateUI();
+                refreshUi();
             }, 500);
         }
     } catch (e) {
@@ -225,8 +225,7 @@ export function onGenerationEnded() {
             warn('Error while ending foreground generation:', error);
         })
         .finally(() => {
-            updateInjection();
-            updateUI();
+            refreshFull();
         });
 }
 
@@ -262,7 +261,7 @@ function onVisibilityChange() {
 }
 
 function recoverPromptFreeze(reason) {
-    void recoverStalePromptFreeze(reason, { refreshUi: updateUI }).catch((error) => {
+    void recoverStalePromptFreeze(reason, { refreshUi }).catch((error) => {
         warn('Error while recovering foreground generation freeze:', error);
     });
 }
@@ -319,7 +318,7 @@ async function drainReconciliationQueue() {
     do {
         reconcileQueued = false;
         await reconcileLoadedChatState();
-        updateUI();
+        refreshUi();
     } while (reconcileQueued);
     await checkStaleCacheAdvice();
 }

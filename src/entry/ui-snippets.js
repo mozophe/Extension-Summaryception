@@ -1,4 +1,5 @@
 import { TOAST_TITLE, layerLabel, listNonEmptyLayers } from '../foundation/constants.js';
+import { refreshUi } from '../foundation/refresh.js';
 import { getChatStore } from '../foundation/state.js';
 import { getSnippetDisplayMeta } from '../core/snippet-metadata.js';
 import {
@@ -12,25 +13,15 @@ import {
 import { showBusySummaryToast } from './ui-dialogs.js';
 import { ensureChild } from './ui-dom.js';
 
-let uiRefresher = null;
 let notifyAdapter = null;
 
 /**
- * Register the callback used to re-render the full UI after snippet mutations.
- * Registered by index.js to avoid a circular import with ui.js.
- * @param {() => void} callback
- * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for regeneration notices.
+ * Register the notify adapter used for snippet regeneration notices.
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
  * @returns {void}
  */
-export function initSnippetBrowser(callback, notify) {
-    uiRefresher = callback;
+export function initSnippetBrowser(notify) {
     notifyAdapter = notify;
-}
-
-function refreshUI() {
-    if (typeof uiRefresher === 'function') {
-        uiRefresher();
-    }
 }
 
 /**
@@ -418,7 +409,7 @@ async function onSnippetDeleteClick() {
 
     const result = await deleteSnippetAt(position.layerIdx, position.snippetIdx);
     if (result.status === 'deleted') {
-        refreshUI();
+        refreshUi();
         toastr.info(`Snippet removed from Layer ${result.layerIndex}`, TOAST_TITLE);
     }
 }
@@ -453,7 +444,7 @@ async function runSnippetRegeneration(btn, position) {
 
 function handleRegenerationResult(result) {
     if (result.status === 'regenerated') {
-        refreshUI();
+        refreshUi();
         toastr.success(
             `Snippet regenerated for turns ${result.range[0]}-${result.range[1]}`,
             TOAST_TITLE,

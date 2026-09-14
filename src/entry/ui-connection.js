@@ -1,7 +1,7 @@
 import { populateProfileDropdown } from '../core/connectionutil.js';
+import { refreshFull } from '../foundation/refresh.js';
 import { getSettings } from '../foundation/state.js';
 import { bindDataSettingElements, bindElementSetting, readString } from './ui-bind.js';
-import { refreshEffectiveSettings } from './ui-events.js';
 
 // Connection settings UI - jQuery-based DOM access consistent with the rest of the UI layer.
 
@@ -78,7 +78,7 @@ function bindConnectionSource(settings, binding) {
         eventName: 'change',
         key: binding.sourceKey,
         read: readString,
-        afterSave: refreshEffectiveSettings,
+        afterSave: refreshFull,
     });
 }
 

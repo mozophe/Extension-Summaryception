@@ -4,6 +4,7 @@ import { SummarizerQueue } from './summarizer-queue.js';
 import { withUsageRun } from './summarizer-usage.js';
 import { flushPendingChatSave } from './persist-state.js';
 import { runElasticAutoCycle, runManual as runEngineManual } from './summarizer-engine.js';
+import { refreshUi } from '../foundation/refresh.js';
 import { sleep } from '../foundation/retry.js';
 import {
     beginForegroundGeneration as beginCommitFreeze,
@@ -18,15 +19,13 @@ export { recoverStalePromptFreeze, resetPromptMutationGuard } from './summarizer
 /** @typedef {import('./summarizer-engine.js').ManualRunOptions} ManualRunOptions */
 /** @typedef {import('./summarizer-engine.js').ManualRunOutcome} ManualRunOutcome */
 
-let uiUpdater = null;
 /** @type {import('./notify.js').NotifyAdapter} */
 let notifyAdapter = silentAdapter;
 
 const summarizerQueue = new SummarizerQueue({
-    drainOneCycle: (queue) =>
-        runElasticAutoCycle(queue, { refreshUi: refreshUI, notify: notifyAdapter }),
+    drainOneCycle: (queue) => runElasticAutoCycle(queue, { refreshUi, notify: notifyAdapter }),
     abort: abortCurrentSummarizerRequest,
-    refreshUi: refreshUI,
+    refreshUi,
     withUsageRun,
     yieldCycle: async () => {
         await sleep(0);
@@ -46,15 +45,6 @@ setCommitCallbacks({
  */
 export function hasFrozenPromptMutations() {
     return isPromptMutationFrozen();
-}
-
-/**
- * Register the settings UI refresh callback.
- * @param {() => void} callback
- * @returns {void}
- */
-export function setUiUpdater(callback) {
-    uiUpdater = callback;
 }
 
 /**
@@ -113,7 +103,7 @@ export function setInjectionUpdater(updateInjection, reassertInjection) {
  */
 export function beginForegroundGeneration() {
     beginCommitFreeze();
-    refreshUI();
+    refreshUi();
 }
 
 /**
@@ -126,7 +116,7 @@ export async function endForegroundGeneration() {
         await flushPendingChatSave();
         await requestSummarization();
     } finally {
-        refreshUI();
+        refreshUi();
     }
 }
 
@@ -151,23 +141,13 @@ export async function runManual(strategy, options = {}) {
 }
 
 /**
- * Refresh the settings UI if an updater is registered.
- * @returns {void}
- */
-function refreshUI() {
-    if (typeof uiUpdater === 'function') {
-        uiUpdater();
-    }
-}
-
-/**
  * Build dependencies for manual runner calls.
  * @returns {import('./summarizer-engine.js').ManualRunnerDeps}
  */
 function getManualRunnerDeps() {
     return {
         queue: summarizerQueue,
-        refreshUi: refreshUI,
+        refreshUi,
         withUsageRun,
     };
 }

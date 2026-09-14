@@ -55,6 +55,10 @@ The structured result at every run level — summarizer request, batch commit, p
 The display-side receiver of core notify events. Entry owns the instance and all notice text; core receives it only by argument.
 _Avoid_: Notify registry
 
+**Refresh Port**:
+The one interface that syncs visible UI and prompt injection after state changes. Entry registers the effects once at the composition root; callers pick a scope: ui, full, or preview.
+_Avoid_: UI refresher, refresh registry
+
 **Engine Gate**:
 The single gate that owns all automatic summarization work and its guards.
 
