@@ -14,6 +14,9 @@ import {
     makeSummaryStore,
 } from './test-helpers.js';
 
+/** Minimal valid summary passage returned by the stubbed request layer. */
+const VALID_SUMMARY = `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`;
+
 describe('Layer 0 deferred cleanup commit', () => {
     afterEach(() => {
         vi.restoreAllMocks();
@@ -27,6 +30,11 @@ describe('Layer 0 deferred cleanup commit', () => {
         ];
     }
 
+    /** Run one single-turn batch through the default entry. */
+    function runBatch(recorder) {
+        return summarizeBatchFromTurns([{ index: 1 }], {}, recorder);
+    }
+
     it('notifies one batch progress lifecycle and closes it with success', async () => {
         const recorder = makeNotifyRecorder();
         const chat = buildChat();
@@ -36,11 +44,11 @@ describe('Layer 0 deferred cleanup commit', () => {
             progressOpenAtRequest = recorder.events.some((event) => event.type === 'progress');
             return {
                 status: 'completed',
-                text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+                text: VALID_SUMMARY,
             };
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+        await expect(runBatch(recorder)).resolves.toEqual({
             status: 'completed',
             completed: 1,
         });
@@ -59,41 +67,31 @@ describe('Layer 0 deferred cleanup commit', () => {
         expect(clears[0].event).toEqual({ kind: 'batch-memory-updated' });
     });
 
-    it('closes the batch progress with an aborted terminal when the request is aborted', async () => {
-        const recorder = makeNotifyRecorder();
-        const chat = buildChat();
-        installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
-        callSummarizer.mockResolvedValue({ status: 'aborted' });
-
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
-            status: 'failed',
-        });
-
-        const progress = recorder.events.filter((event) => event.type === 'progress');
-        expect(progress).toHaveLength(1);
-        expect(progress[0].label).toBe('batch-memory');
-        expect(recorder.events.filter((event) => event.type === 'update')).toHaveLength(0);
-        const clears = recorder.events.filter((event) => event.type === 'clear');
-        expect(clears).toHaveLength(1);
-        expect(clears[0].handle).toBe(progress[0].handle);
-        expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
-    });
-
-    it.each([['blocked'], ['failed']])(
-        'closes the batch progress with a warning terminal when the request is %s',
-        async (status) => {
+    it.each([
+        ['aborted', 'batch-memory-aborted'],
+        ['blocked', 'batch-memory-failed'],
+        ['failed', 'batch-memory-failed'],
+    ])(
+        'closes the batch progress with a %s terminal and skips the commit',
+        async (status, terminalKind) => {
             const recorder = makeNotifyRecorder();
             const chat = buildChat();
-            installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+            const metadata = { summaryception: makeSummaryStore() };
+            installSummaryContext({ chat, metadata });
             callSummarizer.mockResolvedValue({ status });
 
-            await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
-                status: 'failed',
-            });
+            await expect(runBatch(recorder)).resolves.toEqual({ status: 'failed' });
 
+            const progress = recorder.events.filter((event) => event.type === 'progress');
+            expect(progress).toHaveLength(1);
+            expect(progress[0].label).toBe('batch-memory');
+            expect(recorder.events.filter((event) => event.type === 'update')).toHaveLength(0);
             const clears = recorder.events.filter((event) => event.type === 'clear');
             expect(clears).toHaveLength(1);
-            expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+            expect(clears[0].handle).toBe(progress[0].handle);
+            expect(clears[0].event).toEqual({ kind: terminalKind });
+            expect(metadata.summaryception.layers[0]).toEqual([]);
+            expect(metadata.summaryception.mutationEpoch).toBe(0);
         },
     );
 
@@ -106,10 +104,10 @@ describe('Layer 0 deferred cleanup commit', () => {
         installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
         callSummarizer.mockResolvedValue({
             status: 'completed',
-            text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+            text: VALID_SUMMARY,
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], {}, recorder)).resolves.toEqual({
+        await expect(runBatch(recorder)).resolves.toEqual({
             status: 'idle',
         });
 
@@ -124,10 +122,10 @@ describe('Layer 0 deferred cleanup commit', () => {
         installSummaryContext({ chat, metadata });
         callSummarizer.mockResolvedValue({
             status: 'completed',
-            text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+            text: VALID_SUMMARY,
         });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toEqual({
+        await expect(runBatch()).resolves.toEqual({
             status: 'completed',
             completed: 1,
         });
@@ -159,14 +157,14 @@ describe('Layer 0 deferred cleanup commit', () => {
             reloadCurrentChat,
         });
 
-        const resultPromise = summarizeBatchFromTurns([{ index: 1 }]);
+        const resultPromise = runBatch();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'assistant-id']);
         expect(saveChat).not.toHaveBeenCalled();
         resolveSummary({
             status: 'completed',
-            text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+            text: VALID_SUMMARY,
         });
         await expect(resultPromise).resolves.toEqual({ status: 'completed', completed: 1 });
 
@@ -190,11 +188,9 @@ describe('Layer 0 deferred cleanup commit', () => {
         installSummaryContext({ chat, metadata, saveMetadata });
         callSummarizer.mockResolvedValue({
             status: 'completed',
-            text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+            text: VALID_SUMMARY,
         });
-        await expect(summarizeBatchFromTurns([{ index: 1 }])).rejects.toThrow(
-            'metadata write failed',
-        );
+        await expect(runBatch()).rejects.toThrow('metadata write failed');
 
         expect(chat).toEqual(originalChat);
         expect(metadata.summaryception.layers[0]).toEqual([]);
@@ -220,7 +216,7 @@ describe('Layer 0 atomic multi-partition progress', () => {
         callSummarizer
             .mockResolvedValueOnce({
                 status: 'completed',
-                text: `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+                text: VALID_SUMMARY,
             })
             .mockResolvedValueOnce({ status: 'aborted' });
         const partitions = [
@@ -246,31 +242,4 @@ describe('Layer 0 atomic multi-partition progress', () => {
         expect(clears[0].handle).toBe(progress[0].handle);
         expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
     });
-});
-
-describe('Layer 0 request outcome handling', () => {
-    afterEach(() => {
-        vi.restoreAllMocks();
-        callSummarizer.mockReset();
-    });
-
-    it.each([['aborted'], ['blocked'], ['failed']])(
-        'skips the commit when the request outcome is %s',
-        async (status) => {
-            const chat = [
-                makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
-                makeMessage({ scId: 'assistant-id', mes: 'Assistant scene.' }),
-            ];
-            const metadata = { summaryception: makeSummaryStore() };
-            installSummaryContext({ chat, metadata });
-            callSummarizer.mockResolvedValue({ status });
-
-            await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toEqual({
-                status: 'failed',
-            });
-
-            expect(metadata.summaryception.layers[0]).toEqual([]);
-            expect(metadata.summaryception.mutationEpoch).toBe(0);
-        },
-    );
 });

@@ -11,11 +11,7 @@ vi.mock('../src/core/request-attempt.js', () => attemptMocks);
 
 import { RequestRunner } from '../src/core/request-runner.js';
 import { RETRY_CONFIG } from '../src/foundation/retry.js';
-import {
-    installBrowserRuntimeStub,
-    makeNotifyRecorder,
-    makeSummarySettings,
-} from './test-helpers.js';
+import { makeNotifyRecorder, makeSummarySettings } from './test-helpers.js';
 
 describe('RequestRunner.run outcomes', () => {
     afterEach(() => {
@@ -23,8 +19,6 @@ describe('RequestRunner.run outcomes', () => {
         for (const mock of Object.values(attemptMocks)) {
             mock.mockReset();
         }
-        delete globalThis.toastr;
-        delete globalThis.$;
     });
 
     function makeRequest({ signal, notify } = {}) {
@@ -40,7 +34,6 @@ describe('RequestRunner.run outcomes', () => {
     }
 
     it('returns completed with the summary text on a first-attempt success', async () => {
-        installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: true,
             result: 'THE SUMMARY',
@@ -56,7 +49,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns aborted for an already-aborted signal without attempting', async () => {
         const recorder = makeNotifyRecorder();
-        installBrowserRuntimeStub();
         const controller = new AbortController();
         controller.abort();
 
@@ -71,7 +63,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns blocked when the Easy context guard rejects the request', async () => {
         const recorder = makeNotifyRecorder();
-        installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
             error: Object.assign(new Error('blocked'), { easyContextGuard: true }),
@@ -89,7 +80,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns failed on a non-retryable error without the guard', async () => {
         const recorder = makeNotifyRecorder();
-        installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
             error: new Error('bad request'),
@@ -115,7 +105,6 @@ describe('RequestRunner.run outcomes', () => {
 
     it('returns failed after exhausting retries for retryable errors', async () => {
         const recorder = makeNotifyRecorder();
-        installBrowserRuntimeStub();
         attemptMocks.runSingleAttempt.mockResolvedValue({
             success: false,
             error: new Error('timeout'),

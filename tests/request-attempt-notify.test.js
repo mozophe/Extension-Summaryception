@@ -34,8 +34,6 @@ describe('request attempt notify events', () => {
         for (const mock of Object.values(connectionMocks)) {
             mock.mockReset();
         }
-        delete globalThis.toastr;
-        delete globalThis.$;
     });
 
     function makeAttemptParams(overrides = {}) {
@@ -79,7 +77,6 @@ describe('request attempt notify events', () => {
     });
 
     it('emits the retry event before waiting and abort cuts the wait short', async () => {
-        installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
         vi.useFakeTimers();
         const controller = new AbortController();
@@ -110,7 +107,6 @@ describe('request attempt notify events', () => {
     });
 
     it('emits the route-cycle event and abort cuts that wait short too', async () => {
-        installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
         vi.useFakeTimers();
         const controller = new AbortController();

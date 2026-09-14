@@ -38,20 +38,33 @@ import { installSummaryContext } from './test-helpers.js';
 const TARGET_INDEX = 5;
 let boundary = 0;
 
-describe('manual run progress callbacks', () => {
-    /** Build manual runner deps with a stub queue. */
-    function makeDeps() {
-        return {
-            queue: {
-                setPhase: vi.fn(),
-                setSummarizing: vi.fn(),
-                getIsSummarizing: vi.fn(() => true),
-            },
-            refreshUi: vi.fn(),
-            withUsageRun: vi.fn(async (_label, work) => await work()),
-        };
-    }
+/** Build manual runner deps with a stub queue. */
+function makeDeps() {
+    return {
+        queue: {
+            setPhase: vi.fn(),
+            setSummarizing: vi.fn(),
+            getIsSummarizing: vi.fn(() => true),
+        },
+        refreshUi: vi.fn(),
+        withUsageRun: vi.fn(async (_label, work) => await work()),
+    };
+}
 
+/** Build a ready single-batch force route plan. */
+function forceRoutePlan() {
+    return {
+        ready: true,
+        reason: 'ready',
+        commitMode: 'TURNS',
+        batchTurns: [{ index: 2 }],
+        partitions: [{}],
+        totalBatches: 1,
+        targetIndex: TARGET_INDEX,
+    };
+}
+
+describe('manual run progress callbacks', () => {
     /** Build a ready route plan; unready once the boundary reaches the target. */
     function stubRoutePlan(mock, plan) {
         mock.mockImplementation(async () => ({
@@ -77,15 +90,7 @@ describe('manual run progress callbacks', () => {
     });
 
     it('reports start and progress for force summarize', async () => {
-        stubRoutePlan(routeMocks.buildForceSummaryRoutePlan, {
-            ready: true,
-            reason: 'ready',
-            commitMode: 'TURNS',
-            batchTurns: [{ index: 2 }],
-            partitions: [{}],
-            totalBatches: 1,
-            targetIndex: TARGET_INDEX,
-        });
+        stubRoutePlan(routeMocks.buildForceSummaryRoutePlan, forceRoutePlan());
         const onStart = vi.fn();
         const onProgress = vi.fn();
 
@@ -131,15 +136,7 @@ describe('manual run progress callbacks', () => {
     });
 
     it('cancels before any batch when the signal is already aborted', async () => {
-        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue({
-            ready: true,
-            reason: 'ready',
-            commitMode: 'TURNS',
-            batchTurns: [{ index: 2 }],
-            partitions: [{}],
-            totalBatches: 1,
-            targetIndex: TARGET_INDEX,
-        });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
         const controller = new AbortController();
         controller.abort();
 
@@ -153,19 +150,6 @@ describe('manual run progress callbacks', () => {
 });
 
 describe('manual run failure limit', () => {
-    /** Build manual runner deps with a stub queue. */
-    function makeDeps() {
-        return {
-            queue: {
-                setPhase: vi.fn(),
-                setSummarizing: vi.fn(),
-                getIsSummarizing: vi.fn(() => true),
-            },
-            refreshUi: vi.fn(),
-            withUsageRun: vi.fn(async (_label, work) => await work()),
-        };
-    }
-
     beforeEach(() => {
         vi.clearAllMocks();
         resetCommitStateForTests();
@@ -175,15 +159,7 @@ describe('manual run failure limit', () => {
         stateMocks.getCurrentSummarizedBoundary.mockReturnValue(0);
         // Every batch commit fails without moving the summarized boundary.
         batchMocks.summarizeBatchFromTurns.mockResolvedValue({ status: 'failed' });
-        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue({
-            ready: true,
-            reason: 'ready',
-            commitMode: 'TURNS',
-            batchTurns: [{ index: 2 }],
-            partitions: [{}],
-            totalBatches: 1,
-            targetIndex: TARGET_INDEX,
-        });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
     });
 
     it('stops the run after three consecutive batch failures', async () => {

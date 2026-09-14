@@ -38,7 +38,6 @@ describe('toastr notify adapter mapping', () => {
     });
 
     it('renders hide progress on every processed count', () => {
-        installBrowserRuntimeStub();
         const writes = installTextCapture();
         const adapter = createToastrNotifyAdapter();
         const handle = adapter.progress({ label: 'ghost-hide', total: 4 });
@@ -51,7 +50,6 @@ describe('toastr notify adapter mapping', () => {
     });
 
     it('throttles unhide progress to every tenth processed item', () => {
-        installBrowserRuntimeStub();
         const writes = installTextCapture();
         const adapter = createToastrNotifyAdapter();
         const handle = adapter.progress({ label: 'ghost-unhide', total: 12 });
@@ -94,7 +92,6 @@ describe('toastr notify adapter mapping', () => {
     });
 
     it('ignores processed counts for the batch progress view', () => {
-        installBrowserRuntimeStub();
         const writes = installTextCapture();
         const adapter = createToastrNotifyAdapter();
         const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 3 });
@@ -116,7 +113,7 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.clear).toHaveBeenCalledTimes(1);
         expect(toastr.clear).toHaveBeenCalledWith(toast);
         expect(toastr.success).toHaveBeenCalledTimes(1);
-        expect(toastr.success.mock.calls[0][2]).toEqual({ timeOut: 3000 });
+        expect(toastr.success.mock.calls[0][2].timeOut).toBeGreaterThan(0);
         expect(toastr.warning).not.toHaveBeenCalled();
     });
 
@@ -128,7 +125,7 @@ describe('toastr notify adapter mapping', () => {
         adapter.clear(handle, { kind: BATCH_PROGRESS.FAILED });
 
         expect(toastr.warning).toHaveBeenCalledTimes(1);
-        expect(toastr.warning.mock.calls[0][2]).toEqual({ timeOut: 3000 });
+        expect(toastr.warning.mock.calls[0][2].timeOut).toBeGreaterThan(0);
         expect(toastr.success).not.toHaveBeenCalled();
     });
 
@@ -143,58 +140,68 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning).not.toHaveBeenCalled();
         expect(toastr.error).not.toHaveBeenCalled();
     });
+    // Severity, fragments, and non-persistence are the adapter contract; the
+    // exact display durations are entry-owned (ADR-0004).
+    it.each([
+        {
+            event: { kind: 'run-aborted' },
+            method: 'warning',
+            fragments: [],
+        },
+        {
+            event: { kind: 'run-failed', retriesExhausted: true, attempts: 3, status: 500 },
+            method: 'error',
+            fragments: ['3', '500'],
+        },
+        {
+            event: {
+                kind: 'easy-guard-blocked',
+                label: 'Layer 0 batch',
+                tokens: 12345,
+                estimated: false,
+                limit: 8000,
+            },
+            method: 'error',
+            fragments: [formatTokenValue(12345, false), formatTokenValue(8000, false)],
+        },
+        {
+            event: { kind: 'route-cycle-wait', delayMs: 60000 },
+            method: 'warning',
+            fragments: [],
+        },
+        {
+            event: { kind: 'language-mix-retry', percent: '23.4' },
+            method: 'warning',
+            fragments: ['23.4'],
+        },
+        {
+            event: { kind: 'promotion-started', mergedCount: 3, fromLayer: 0, toLayer: 1 },
+            method: 'info',
+            fragments: ['3', 'Layer 0', 'Layer 1'],
+            options: { progressBar: true },
+        },
+    ])(
+        'maps the $event.kind transient event onto toastr.$method',
+        ({ event, method, fragments, options }) => {
+            const { toastr } = installBrowserRuntimeStub();
+            const adapter = createToastrNotifyAdapter();
 
-    it('shows a short stop notice for a run abort', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
+            adapter.transient(event);
 
-        adapter.transient({ kind: 'run-aborted' });
-
-        expect(toastr.warning).toHaveBeenCalledTimes(1);
-        const [, title, opts] = toastr.warning.mock.calls[0];
-        expect(String(title)).toContain(TOAST_TITLE);
-        expect(opts.timeOut).toBeGreaterThan(0);
-        expect(opts.timeOut).toBeLessThan(10000);
-    });
-
-    it('shows a failure notice for a failed run', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
-
-        adapter.transient({
-            kind: 'run-failed',
-            retriesExhausted: true,
-            attempts: 3,
-            status: 500,
-        });
-
-        expect(toastr.error).toHaveBeenCalledTimes(1);
-        const [text, title, opts] = toastr.error.mock.calls[0];
-        expect(String(title)).toContain(TOAST_TITLE);
-        expect(String(text)).toContain('3');
-        expect(String(text)).toContain('500');
-        expect(opts.timeOut).toBeGreaterThan(0);
-    });
-
-    it('shows a guard notice built from structured token fields', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
-
-        adapter.transient({
-            kind: 'easy-guard-blocked',
-            label: 'Layer 0 batch',
-            tokens: 12345,
-            estimated: false,
-            limit: 8000,
-        });
-
-        expect(toastr.error).toHaveBeenCalledTimes(1);
-        const [text, title, opts] = toastr.error.mock.calls[0];
-        expect(String(title)).toContain(TOAST_TITLE);
-        expect(String(text)).toContain(formatTokenValue(12345, false));
-        expect(String(text)).toContain(formatTokenValue(8000, false));
-        expect(opts.timeOut).toBeGreaterThan(0);
-    });
+            expect(toastr[method]).toHaveBeenCalledTimes(1);
+            const [text, title, opts] = toastr[method].mock.calls[0];
+            expect(String(title)).toContain(TOAST_TITLE);
+            for (const fragment of fragments) {
+                expect(String(text)).toContain(fragment);
+            }
+            for (const [name, value] of Object.entries(options ?? {})) {
+                expect(opts[name]).toBe(value);
+            }
+            // Transient notices auto-dismiss; only the persistent progress
+            // toasts pin timeOut to zero.
+            expect(opts.timeOut).toBeGreaterThan(0);
+        },
+    );
 
     it('shows retry warnings for a fixed duration that ignores the wait', () => {
         const { toastr } = installBrowserRuntimeStub();
@@ -208,42 +215,5 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning).toHaveBeenCalledTimes(2);
         expect(longWait).toBe(shortWait);
         expect(longWait).toBeLessThan(60000);
-    });
-
-    it('shows a route-cycle warning for a fixed duration', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
-
-        adapter.transient({ kind: 'route-cycle-wait', delayMs: 60000 });
-
-        expect(toastr.warning).toHaveBeenCalledTimes(1);
-        expect(toastr.warning.mock.calls[0][2].timeOut).toBeLessThan(60000);
-    });
-
-    it('shows a language-mix warning for a fixed duration', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
-
-        adapter.transient({ kind: 'language-mix-retry', percent: '23.4' });
-
-        expect(toastr.warning).toHaveBeenCalledTimes(1);
-        expect(toastr.warning.mock.calls[0][2].timeOut).toBe(5000);
-        expect(String(toastr.warning.mock.calls[0][0])).toContain('23.4');
-    });
-
-    it('shows a promotion notice for a fixed duration', () => {
-        const { toastr } = installBrowserRuntimeStub();
-        const adapter = createToastrNotifyAdapter();
-
-        adapter.transient({ kind: 'promotion-started', mergedCount: 3, fromLayer: 0, toLayer: 1 });
-
-        expect(toastr.info).toHaveBeenCalledTimes(1);
-        const [text, title, opts] = toastr.info.mock.calls[0];
-        expect(String(title)).toContain(TOAST_TITLE);
-        expect(String(text)).toContain('3');
-        expect(String(text)).toContain('Layer 0');
-        expect(String(text)).toContain('Layer 1');
-        expect(opts.timeOut).toBe(3000);
-        expect(opts.progressBar).toBe(true);
     });
 });

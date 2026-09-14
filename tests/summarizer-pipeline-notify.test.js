@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
 import { processSummarizerResponse } from '../src/core/summarizer-pipeline.js';
@@ -14,10 +14,6 @@ import {
  * retry warning.
  */
 describe('summarizer pipeline notify events', () => {
-    afterEach(() => {
-        delete globalThis.toastr;
-    });
-
     it('emits a structured language-mix event when the CN policy rejects a response', async () => {
         const { toastr } = installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();

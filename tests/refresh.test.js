@@ -51,20 +51,19 @@ describe('refresh port', () => {
 });
 
 describe('unregistered refresh port', () => {
-    it('scope functions stay silent no-ops before any registration', async () => {
+    it('treats unregistered and missing port effects as silent no-ops', async () => {
         vi.resetModules();
         const unregistered = await import('../src/foundation/refresh.js');
 
         expect(() => unregistered.refreshUi()).not.toThrow();
         expect(() => unregistered.refreshFull()).not.toThrow();
         expect(() => unregistered.refreshPreview()).not.toThrow();
-    });
 
-    it('a partially registered port treats missing effects as silent no-ops', () => {
+        // A partially registered port still runs the effects it has.
         const updateUI = vi.fn();
-        initRefreshPort({ updateUI });
+        unregistered.initRefreshPort({ updateUI });
 
-        expect(() => refreshFull()).not.toThrow();
+        expect(() => unregistered.refreshFull()).not.toThrow();
         expect(updateUI).toHaveBeenCalledTimes(1);
     });
 });

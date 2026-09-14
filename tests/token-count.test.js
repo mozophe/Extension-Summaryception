@@ -161,28 +161,15 @@ describe('countMessageTokens', () => {
         expect(second).toEqual(first);
     });
 
-    it('recomputes when the combined line length changes', async () => {
+    it('recomputes when raw and final lines differ', async () => {
         const getTokenCountAsync = vi.fn(async (text) => String(text).length);
         installSummaryContext({ getTokenCountAsync });
         const message = makeMessage();
 
+        // The identical-lines call counts once (cache test owns the repeat
+        // contract); differing raw/final lines each hit the tokenizer.
         await countMessageTokens(message, 'hello', 'hello');
-        const callsAfterFirst = getTokenCountAsync.mock.calls.length;
-        await countMessageTokens(message, 'a different longer line', 'a different longer line');
-        expect(getTokenCountAsync.mock.calls.length).toBeGreaterThan(callsAfterFirst);
-    });
-
-    it('counts once when raw and final lines are identical', async () => {
-        const getTokenCountAsync = vi.fn(async (text) => String(text).length);
-        installSummaryContext({ getTokenCountAsync });
-        await countMessageTokens(makeMessage(), 'same', 'same');
-        expect(getTokenCountAsync).toHaveBeenCalledTimes(1);
-    });
-
-    it('counts twice when raw and final lines differ', async () => {
-        const getTokenCountAsync = vi.fn(async (text) => String(text).length);
-        installSummaryContext({ getTokenCountAsync });
-        await countMessageTokens(makeMessage(), 'raw line', 'final line');
-        expect(getTokenCountAsync).toHaveBeenCalledTimes(2);
+        await countMessageTokens(message, 'raw line', 'final line');
+        expect(getTokenCountAsync).toHaveBeenCalledTimes(3);
     });
 });

@@ -230,6 +230,13 @@ export function createJQueryHarness({ attributes = {}, collections = {} } = {}) 
             if (Object.hasOwn(collections, target)) {
                 return createJQueryHarnessCollection(collections[target].map(element));
             }
+            const selectors = String(target)
+                .split(',')
+                .map((part) => part.trim())
+                .filter(Boolean);
+            if (selectors.length > 1) {
+                return createJQueryHarnessCollection(selectors.map(element));
+            }
             if (target.startsWith('<')) {
                 return createJQueryHarnessElement({
                     selector: target,
@@ -428,6 +435,9 @@ function createJQueryHarnessElement({ selector, attributes = {}, handlers, visib
             }
             state.props[name] = nextValue;
             return api;
+        },
+        is(selector) {
+            return selector === ':checkbox' && state.attrs.type === 'checkbox';
         },
         attr(name, nextValue) {
             if (arguments.length === 1) {

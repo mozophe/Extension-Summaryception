@@ -1,4 +1,4 @@
-import { beforeEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 
 import { installSummaryContext } from './test-helpers.js';
 
@@ -222,4 +222,14 @@ globalThis.summaryceptionFoundationMocks = foundationMocks;
 beforeEach(() => {
     foundationMocks.reset();
     installSummaryContext();
+});
+
+// Host display mocks are installed per test; clear only what a test installed.
+afterEach(() => {
+    if ('toastr' in globalThis) {
+        delete globalThis.toastr;
+    }
+    if ('$' in globalThis) {
+        delete globalThis.$;
+    }
 });

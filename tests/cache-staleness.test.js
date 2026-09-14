@@ -19,27 +19,24 @@ const planWithQueue = (turns = 5) => ({
 const minutesAgo = (minutes) => new Date(NOW - minutes * 60_000).toISOString();
 
 describe('evaluateStaleCacheAdvice', () => {
-    it.each([MEMORY_MODES.PREFIX_CACHE])(
-        '%s advises summarizing when the cache is stale',
-        (memoryMode) => {
-            const chat = [makeMessage({ sendDate: minutesAgo(75) })];
-            const advice = evaluateStaleCacheAdvice({
-                chat,
-                plan: planWithQueue(),
-                settings: cacheSettings({ memoryMode }),
-                now: NOW,
-            });
+    it('advises summarizing when the cache is stale under the prefix-cache mode', () => {
+        const chat = [makeMessage({ sendDate: minutesAgo(75) })];
+        const advice = evaluateStaleCacheAdvice({
+            chat,
+            plan: planWithQueue(),
+            settings: cacheSettings({ memoryMode: MEMORY_MODES.PREFIX_CACHE }),
+            now: NOW,
+        });
 
-            expect(advice).toMatchObject({
-                advise: true,
-                reason: 'stale',
-                staleMinutes: 75,
-                ttlMinutes: TTL_MINUTES,
-                queuedTurns: 5,
-                queuedTokens: 4000,
-            });
-        },
-    );
+        expect(advice).toMatchObject({
+            advise: true,
+            reason: 'stale',
+            staleMinutes: 75,
+            ttlMinutes: TTL_MINUTES,
+            queuedTurns: 5,
+            queuedTokens: 4000,
+        });
+    });
 
     it('withholds advice outside the cache modes', () => {
         const chat = [makeMessage({ sendDate: minutesAgo(75) })];
@@ -131,8 +128,10 @@ describe('getMessageTimestampMs', () => {
 });
 
 describe('isProviderCacheMode', () => {
-    it.each([MEMORY_MODES.PREFIX_CACHE])('%s relies on the provider cache', (memoryMode) => {
-        expect(isProviderCacheMode(cacheSettings({ memoryMode }))).toBe(true);
+    it('treats the prefix-cache mode as provider-cached', () => {
+        expect(isProviderCacheMode(cacheSettings({ memoryMode: MEMORY_MODES.PREFIX_CACHE }))).toBe(
+            true,
+        );
     });
 
     it('rejects the default mode', () => {
