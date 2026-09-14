@@ -1,5 +1,6 @@
 import { getChat } from '../foundation/context.js';
 import { resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { collectSnippetSourceIds } from '../foundation/state.js';
 import { parseSnippet } from './summarizer-state.js';
 import { LEADING_NARRATIVE_HEADER_RE } from './structural-headers.js';
 
@@ -21,20 +22,11 @@ export function buildSnippetMetadataFromState(state = {}) {
 
 /**
  * Build persisted metadata for a promoted snippet.
- * @param {Array<object>} snippets
+ * @param {Array<SummaryceptionSnippet>} snippets
  * @returns {{ sourceMessageIds: string[], currentDateTime?: string }}
  */
 export function buildPromotedSnippetMetadata(snippets = []) {
-    const sourceMessageIds = [];
-    const seen = new Set();
-    for (const snippet of snippets) {
-        for (const id of snippet?.sourceMessageIds || []) {
-            if (typeof id === 'string' && id.trim() !== '' && !seen.has(id)) {
-                seen.add(id);
-                sourceMessageIds.push(id);
-            }
-        }
-    }
+    const sourceMessageIds = collectSnippetSourceIds([snippets]);
     const currentDateTime = lastKnown(
         snippets.map((snippet) => knownStateValue(snippet?.currentDateTime)),
     );

@@ -10,6 +10,7 @@ import {
 } from '../src/foundation/constants.js';
 import {
     bumpSummaryStoreMutationEpoch,
+    collectSnippetSourceIds,
     getChatStore,
     getCurrentSummarizedBoundary,
     getEffectiveSettings,
@@ -147,6 +148,41 @@ describe('summary store mutation epoch', () => {
     it('normalizes a bad epoch value to 0 without throwing', () => {
         expect(getSummaryStoreMutationEpoch({ mutationEpoch: 'bad' })).toBe(0);
         expect(getSummaryStoreMutationEpoch(undefined)).toBe(0);
+    });
+});
+
+describe('collectSnippetSourceIds', () => {
+    it('flattens provenance across all layers, deduping in first-seen order', () => {
+        const layers = [
+            [
+                { text: 'a', sourceMessageIds: ['m-2', 'm-1'] },
+                { text: 'b', sourceMessageIds: ['m-1', 'm-3'] },
+            ],
+            [{ text: 'c', sourceMessageIds: ['m-3', 'm-4'] }],
+            [],
+        ];
+        expect(collectSnippetSourceIds(layers)).toEqual(['m-2', 'm-1', 'm-3', 'm-4']);
+    });
+
+    it('skips non-string and blank ids and dedupes on the raw value', () => {
+        const layers = [[{ text: 'a', sourceMessageIds: ['', '   ', 7, null, ' m-1 ', ' m-1 '] }]];
+        expect(collectSnippetSourceIds(layers)).toEqual([' m-1 ']);
+    });
+
+    it('reads only the requested layer when layerIndex is given', () => {
+        const layers = [
+            [{ text: 'a', sourceMessageIds: ['m-1'] }],
+            [{ text: 'b', sourceMessageIds: ['m-2', 'm-1'] }],
+        ];
+        expect(collectSnippetSourceIds(layers, { layerIndex: 0 })).toEqual(['m-1']);
+        expect(collectSnippetSourceIds(layers, { layerIndex: 1 })).toEqual(['m-2', 'm-1']);
+    });
+
+    it('tolerates missing layers and snippets without provenance', () => {
+        expect(collectSnippetSourceIds(undefined)).toEqual([]);
+        expect(collectSnippetSourceIds([[{ text: 'no ids' }], null], { layerIndex: 1 })).toEqual(
+            [],
+        );
     });
 });
 

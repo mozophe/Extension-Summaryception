@@ -5,7 +5,12 @@ import {
     rangesFromSortedIndices,
     resolveScIdsToIndices,
 } from '../foundation/message-identity.js';
-import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
+import {
+    bumpSummaryStoreMutationEpoch,
+    collectSnippetSourceIds,
+    getChatStore,
+    getEffectiveSettings,
+} from '../foundation/state.js';
 import { debug, error, warn } from '../foundation/logger.js';
 import { persistChatState } from './persist-state.js';
 import { canStartPromptMutation, queuePromptEffect, runPromptEffect } from './summarizer-commit.js';
@@ -32,6 +37,24 @@ export async function repairGhostingForRange(startIdx, endIdx, options = {}) {
 }
 
 /**
+ * Assign Ghosting ownership and bump the Mutation Epoch when the owned id
+ * list actually changed (order-sensitive element-wise compare): ownership is
+ * store state, so consumers must see it move (ADR-0003).
+ * @param {SummaryceptionStore} store
+ * @param {string[]} nextIds
+ * @returns {void}
+ */
+function setGhostedMessageIds(store, nextIds) {
+    const current = store.ghostedMessageIds || [];
+    const changed =
+        current.length !== nextIds.length || nextIds.some((id, index) => current[index] !== id);
+    store.ghostedMessageIds = nextIds;
+    if (changed) {
+        bumpSummaryStoreMutationEpoch(store);
+    }
+}
+
+/**
  * Reconcile Ghosting ownership with Snippet provenance. The desired id set is
  * every sourceMessageId across all layers: desired messages that still need
  * ownership or visual hide are hidden through the ranged hide engine, owned
@@ -44,16 +67,17 @@ export async function repairGhostingForRange(startIdx, endIdx, options = {}) {
 export async function syncGhosting(options = {}) {
     const chat = getChat();
     const store = getChatStore();
-    const desired = collectDesiredGhostIds(store);
+    const desired = collectSnippetSourceIds(store.layers);
     const desiredOwned = new Set(desired);
 
     const staleIds = store.ghostedMessageIds.filter((id) => !desiredOwned.has(id));
     const staleRanges = rangesFromSortedIndices(resolveScIdsToIndices(chat, staleIds));
+
+    let hidden = 0;
     if (staleRanges.length > 0) {
         await unhideRanges({ chat, store, ranges: staleRanges, notify: options.notify });
     }
 
-    let hidden = 0;
     for (const range of rangesFromSortedIndices(resolveScIdsToIndices(chat, desired))) {
         if (collectHideRanges(chat, store, range).length === 0) {
             continue;
@@ -62,29 +86,8 @@ export async function syncGhosting(options = {}) {
         hidden += getRangeSize(range);
     }
 
-    store.ghostedMessageIds = desired;
+    setGhostedMessageIds(store, desired);
     return { hidden, unhidden: countRangeMessages(staleRanges) };
-}
-
-/**
- * Derive the desired ghost id set from Snippet provenance across all layers.
- * @param {SummaryceptionStore} store
- * @returns {string[]} Unique source message ids in first-seen order.
- */
-function collectDesiredGhostIds(store) {
-    const desired = [];
-    const seen = new Set();
-    for (const layer of store.layers || []) {
-        for (const snippet of layer || []) {
-            for (const id of snippet.sourceMessageIds || []) {
-                if (!seen.has(id)) {
-                    seen.add(id);
-                    desired.push(id);
-                }
-            }
-        }
-    }
-    return desired;
 }
 
 /**
@@ -100,7 +103,7 @@ export async function clearAllGhosting(_options = {}) {
             showOutput: false,
         });
     }
-    getChatStore().ghostedMessageIds = [];
+    setGhostedMessageIds(getChatStore(), []);
 }
 
 /**
@@ -326,7 +329,7 @@ function markGhostedRange(chat, store, range) {
             owned.add(id);
         }
     }
-    store.ghostedMessageIds = [...owned];
+    setGhostedMessageIds(store, [...owned]);
 }
 
 /**
@@ -366,7 +369,10 @@ function clearGhostedRange(chat, store, range) {
             ids.add(chat[i].sc_id);
         }
     }
-    store.ghostedMessageIds = store.ghostedMessageIds.filter((id) => !ids.has(id));
+    setGhostedMessageIds(
+        store,
+        store.ghostedMessageIds.filter((id) => !ids.has(id)),
+    );
 }
 
 /**

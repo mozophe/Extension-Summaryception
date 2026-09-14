@@ -101,7 +101,7 @@ export async function saveChatStore() {
 }
 
 /**
- * Get the current summary-layer mutation epoch.
+ * Get the current summary-store mutation epoch.
  * @param {SummaryceptionStore} store
  * @returns {number}
  */
@@ -110,7 +110,7 @@ export function getSummaryStoreMutationEpoch(store) {
 }
 
 /**
- * Advance the summary-layer mutation epoch after changing stored snippets.
+ * Advance the summary-store mutation epoch after any store mutation.
  * @param {SummaryceptionStore} store
  * @returns {number}
  */
@@ -120,15 +120,39 @@ export function bumpSummaryStoreMutationEpoch(store) {
 }
 
 /**
+ * Collect unique snippet provenance ids across summary layers, keeping
+ * first-seen order. Non-string and blank ids are skipped; ids are compared
+ * and kept raw (never trimmed).
+ * @param {Array<Array<SummaryceptionSnippet>> | null | undefined} layers
+ * @param {{ layerIndex?: number }} [options] - Read only this layer when given.
+ * @returns {string[]}
+ */
+export function collectSnippetSourceIds(layers, { layerIndex } = {}) {
+    const sources = layerIndex === undefined ? layers || [] : [layers?.[layerIndex] || []];
+    const ids = [];
+    const seen = new Set();
+    for (const layer of sources) {
+        for (const snippet of layer || []) {
+            for (const id of snippet?.sourceMessageIds || []) {
+                if (typeof id !== 'string' || id.trim() === '' || seen.has(id)) {
+                    continue;
+                }
+                seen.add(id);
+                ids.push(id);
+            }
+        }
+    }
+    return ids;
+}
+
+/**
  * Resolve the highest current chat index owned by a Layer 0 snippet.
  * @param {ChatMessage[]} chat
  * @param {SummaryceptionStore} store
  * @returns {number}
  */
 export function getCurrentSummarizedBoundary(chat, store) {
-    const sourceMessageIds = (store?.layers?.[0] || []).flatMap(
-        (snippet) => snippet.sourceMessageIds || [],
-    );
+    const sourceMessageIds = collectSnippetSourceIds(store?.layers, { layerIndex: 0 });
     const indices = resolveScIdsToIndices(chat, sourceMessageIds);
     return indices.length > 0 ? indices[indices.length - 1] : -1;
 }

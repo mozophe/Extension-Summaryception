@@ -334,3 +334,92 @@ describe('countGhostedMessages', () => {
         }
     });
 });
+
+/**
+ * Ghosting owns its ownership-array mutation epoch bump: any ownership change
+ * bumps, an assignment that changes nothing must not (ADR-0003).
+ */
+describe('ghosting mutation epoch', () => {
+    it('bumps the epoch when ownership sync picks up changed provenance', async () => {
+        resetCommitStateForTests();
+        const runtime = installSummaryContext({
+            chat: [makeMessage({ scId: 'message-0', isHidden: true })],
+            metadata: {
+                summaryception: makeSummaryStore({
+                    ghostedMessageIds: ['message-0'],
+                    mutationEpoch: 2,
+                    layers: [[{ text: 'summary', sourceMessageIds: ['message-0', 'gone-id'] }]],
+                }),
+            },
+        });
+
+        await syncGhosting();
+
+        expect(runtime.chatMetadata.summaryception.ghostedMessageIds).toEqual([
+            'message-0',
+            'gone-id',
+        ]);
+        expect(runtime.chatMetadata.summaryception.mutationEpoch).toBe(3);
+    });
+
+    it('does not bump the epoch when ownership already matches provenance', async () => {
+        resetCommitStateForTests();
+        const runtime = installSummaryContext({
+            chat: [makeMessage({ scId: 'message-0', isHidden: true })],
+            metadata: {
+                summaryception: makeSummaryStore({
+                    ghostedMessageIds: ['message-0'],
+                    mutationEpoch: 2,
+                    layers: [[{ text: 'summary', sourceMessageIds: ['message-0'] }]],
+                }),
+            },
+        });
+
+        await syncGhosting();
+
+        expect(runtime.chatMetadata.summaryception.mutationEpoch).toBe(2);
+    });
+
+    it('bumps the epoch when range ghosting takes ownership', async () => {
+        resetCommitStateForTests();
+        const runtime = installSummaryContext({ chat: makeMessages(2) });
+
+        await ghostMessagesInRange(0, 1);
+
+        expect(runtime.chatMetadata.summaryception.ghostedMessageIds).toEqual([
+            'message-0',
+            'message-1',
+        ]);
+        expect(runtime.chatMetadata.summaryception.mutationEpoch).toBe(1);
+    });
+
+    it('bumps the epoch when clearing releases owned ids', async () => {
+        resetCommitStateForTests();
+        const runtime = installSummaryContext({
+            chat: makeMessages(1),
+            metadata: {
+                summaryception: makeSummaryStore({
+                    ghostedMessageIds: ['message-0'],
+                    mutationEpoch: 2,
+                }),
+            },
+        });
+
+        await clearAllGhosting();
+
+        expect(runtime.chatMetadata.summaryception.ghostedMessageIds).toEqual([]);
+        expect(runtime.chatMetadata.summaryception.mutationEpoch).toBe(3);
+    });
+
+    it('does not bump the epoch when clearing an already-empty ownership list', async () => {
+        resetCommitStateForTests();
+        const runtime = installSummaryContext({
+            chat: makeMessages(1),
+            metadata: { summaryception: makeSummaryStore({ mutationEpoch: 2 }) },
+        });
+
+        await clearAllGhosting();
+
+        expect(runtime.chatMetadata.summaryception.mutationEpoch).toBe(2);
+    });
+});

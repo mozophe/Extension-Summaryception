@@ -36,7 +36,7 @@ The recent chat range kept in model context without summarization.
 A bounded rolling snapshot of roleplay state. Only the newest snapshot reaches the prompt.
 
 **Mutation Epoch**:
-A counter bumped on every summary layer or snippet mutation. Consumers use it to detect stale derived data.
+A counter bumped on every summary store mutation, including Ghosting ownership. Consumers use it to detect stale derived data.
 
 **Effective Settings**:
 Runtime settings with the extension-Off mode resolved to `enabled: false`. Runtime behavior reads these, never raw settings.

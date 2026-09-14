@@ -63,7 +63,6 @@ const foundationMocks = vi.hoisted(() => {
         trace: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
-        debugVisibleTurns: vi.fn(),
     };
 
     function resetContext() {
@@ -202,12 +201,6 @@ const foundationMocks = vi.hoisted(() => {
         });
         logger.error.mockImplementation((...args) => {
             console.error(LOG_PREFIX, ...args);
-        });
-        logger.debugVisibleTurns.mockImplementation((chat, store) => {
-            logger.trace('=== DEBUG VISIBLE TURNS ===');
-            logger.trace('  store.ghostedMessageIds:', store.ghostedMessageIds);
-            logger.trace('  Total chat messages:', chat.length);
-            logger.trace('=== END DEBUG ===');
         });
     }
 

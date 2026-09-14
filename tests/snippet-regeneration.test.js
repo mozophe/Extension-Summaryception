@@ -45,7 +45,8 @@ describe('snippet regeneration request outcomes', () => {
 
         expect(snippet.text).toContain('A fresh summary.');
         expect(snippet.regenerated).toBe(true);
-        expect(store.mutationEpoch).toBe(1);
+        // Ghost step acquires snippet ownership (bump) + the Snippet Commit's own bump.
+        expect(store.mutationEpoch).toBe(2);
     });
 
     it('returns aborted without mutating the store when the outcome is aborted', async () => {
