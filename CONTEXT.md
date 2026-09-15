@@ -92,3 +92,8 @@ Code: `runManual` (src/core/summarizer-engine.js)
 The single ask that decides whether prompt-affecting work may run. Open only when no foreground freeze, no stale recovery, and no queued commits or prompt effects. The Engine Gate decides when to summarize; the Foreground Gate decides when prompt mutations are safe.
 Code: `promptWorkGate` (src/core/summarizer-commit.js)
 _Avoid_: Stop guard
+
+**Prompt Profile**:
+One preset select plus prompt textarea pair, joined by a `(presetKey, settingKey)` binding. Picking a preset fills the textarea; editing the textarea flips the profile to `custom`.
+Code: `bindPromptProfiles` / `resetPromptFields` (src/entry/ui-prompts.js)
+_Avoid_: prompt field, preset pair

@@ -92,6 +92,7 @@
 - Sliders save on input. Text and numeric controls save on change or blur.
 - Operating mode gates runtime behavior. Complexity mode selects the visible panel.
 - Bind plain settings through the data-attribute engine. Hand-bind only controls with special semantics.
+- Prompt Profiles bind and reset through src/entry/ui-prompts.js.
 - One layer-label helper serves status panel, snippet browser, and slash commands.
 - Keep the selected panel editable while the extension is Off.
 - Show the Off banner beside the selected panel.

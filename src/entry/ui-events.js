@@ -3,14 +3,7 @@ import {
     TOAST_TITLE,
     MASK_USER_ROLE_MODES,
     applyMemoryModePreset,
-    PROMOTION_PROMPT_PRESETS,
-    PROMOTION_REPAIR_PROMPT_PRESETS,
-    PROMOTION_SYSTEM_PROMPT_PRESETS,
-    PROMPT_PRESETS,
-    PROMPT_SETTING_KEYS,
     RECALL_REPEAT_INJECTION_TEMPLATE,
-    SUMMARIZER_REPAIR_PROMPT_PRESETS,
-    SUMMARIZER_SYSTEM_PROMPT_PRESETS,
     UI_MODES,
     defaultSettings,
 } from '../foundation/constants.js';
@@ -39,48 +32,7 @@ import {
     syncRoleMaskModeControl,
 } from './ui-bind.js';
 import { bindManualRunControls, reloadPage } from './ui-manual-run.js';
-
-// UI-specific metadata for each shared prompt pair, keyed by presetKey. The
-// (presetKey, settingKey) pairs themselves live in PROMPT_SETTING_KEYS.
-const PROMPT_FIELD_UI = {
-    summarizerSystemPromptPreset: {
-        presetSelect: '#sc_summarizer_system_prompt_preset',
-        textarea: '#sc_summarizer_system_prompt',
-        presets: SUMMARIZER_SYSTEM_PROMPT_PRESETS,
-    },
-    promptPreset: {
-        presetSelect: '#sc_prompt_preset',
-        textarea: '#sc_summarizer_user_prompt',
-        presets: PROMPT_PRESETS,
-    },
-    summarizerRepairPromptPreset: {
-        presetSelect: '#sc_summarizer_repair_prompt_preset',
-        textarea: '#sc_summarizer_repair_prompt',
-        presets: SUMMARIZER_REPAIR_PROMPT_PRESETS,
-    },
-    promotionSystemPromptPreset: {
-        presetSelect: '#sc_promotion_system_prompt_preset',
-        textarea: '#sc_promotion_system_prompt',
-        presets: PROMOTION_SYSTEM_PROMPT_PRESETS,
-    },
-    promotionPromptPreset: {
-        presetSelect: '#sc_promotion_prompt_preset',
-        textarea: '#sc_promotion_user_prompt',
-        presets: PROMOTION_PROMPT_PRESETS,
-    },
-    promotionRepairPromptPreset: {
-        presetSelect: '#sc_promotion_repair_prompt_preset',
-        textarea: '#sc_promotion_repair_prompt',
-        presets: PROMOTION_REPAIR_PROMPT_PRESETS,
-    },
-};
-
-const PROMPT_FIELDS = PROMPT_SETTING_KEYS.map(({ presetKey, settingKey }) => ({
-    presetKey,
-    settingKey,
-    ...PROMPT_FIELD_UI[presetKey],
-    defaultPreset: defaultSettings[presetKey],
-}));
+import { bindPromptProfiles, resetPromptFields } from './ui-prompts.js';
 
 /**
  * Save settings, then update injection and the UI.
@@ -105,7 +57,7 @@ export function bindUIEvents(notify) {
     bindTextareaHandlers();
     bindClickHandlers(notify);
     bindManualRunControls({ notify });
-    bindPromptProfileHandlers();
+    bindPromptProfiles();
 }
 
 function bindModeHandlers() {
@@ -411,17 +363,6 @@ function onResetDefaults() {
     );
 }
 
-function resetPromptFields(settings) {
-    for (const field of PROMPT_FIELDS) {
-        if (settings[field.presetKey] === 'custom') {
-            continue;
-        }
-        settings[field.presetKey] = field.defaultPreset;
-        settings[field.settingKey] =
-            field.presets[field.defaultPreset] || defaultSettings[field.settingKey];
-    }
-}
-
 /**
  * Bind action button click handlers (clear, refresh, export, import, reset).
  * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for the import commit.
@@ -488,57 +429,4 @@ function bindClickHandlers(notify) {
         $('#sc_injection_template').val(defaultSettings.injectionTemplate).trigger('change');
         toastr.success('Default injection template restored.', TOAST_TITLE);
     });
-}
-
-/**
- * Bind preset and edit handlers for prompt fields.
- * @returns {void}
- */
-function bindPromptProfileHandlers() {
-    for (const field of PROMPT_FIELDS) {
-        bindPromptPresetSelect(field);
-        bindPromptTextarea(field);
-    }
-}
-
-function bindPromptPresetSelect(field) {
-    $(document).on('change', field.presetSelect, function () {
-        const selected = String($(this).val());
-        if (!Object.hasOwn(field.presets, selected)) {
-            $(field.presetSelect).val(field.defaultPreset);
-            return;
-        }
-
-        const s = getSettings();
-
-        s[field.presetKey] = selected;
-
-        if (selected !== 'custom') {
-            const presetText = field.presets[selected] || field.presets[field.defaultPreset];
-            $(field.textarea).val(presetText);
-            s[field.settingKey] = presetText;
-        }
-
-        saveSettings();
-    });
-}
-
-function bindPromptTextarea(field) {
-    $(document).on('input change', field.textarea, function () {
-        const s = getSettings();
-        const currentText = $(this).val();
-        s[field.settingKey] = currentText;
-
-        switchPromptFieldToCustom(field, s);
-        saveSettings();
-    });
-}
-
-function switchPromptFieldToCustom(field, settings) {
-    if (settings[field.presetKey] === 'custom') {
-        return;
-    }
-
-    settings[field.presetKey] = 'custom';
-    $(field.presetSelect).val('custom');
 }
