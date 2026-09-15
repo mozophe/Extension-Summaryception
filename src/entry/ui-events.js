@@ -17,7 +17,7 @@ import {
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
-import { requestSummarization } from '../core/summarizer.js';
+import { requestSummarization } from '../core/summarizer-queue.js';
 import { clearSummaryceptionMemory, importSummaryceptionMemory } from '../features/memory.js';
 import { updateUI } from './ui.js';
 import {
@@ -46,15 +46,17 @@ function saveAndRefreshUi() {
 /**
  * Bind document event handlers for the Summaryception UI.
  * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
+ * @param {import('../core/summarizer-engine.js').ManualRunnerDeps} manualRunnerDeps - Engine deps for manual runs.
+ * @param {import('../core/summarizer-engine.js').PauseLatchDeps} pauseLatchDeps - Engine deps for the pause latch.
  * @returns {void}
  */
-export function bindUIEvents(notify) {
+export function bindUIEvents(notify, manualRunnerDeps, pauseLatchDeps) {
     bindModeHandlers();
     bindToggleHandlers();
     bindSliderHandlers();
     bindTextareaHandlers();
     bindClickHandlers(notify);
-    bindManualRunControls({ notify });
+    bindManualRunControls({ notify, manualRunnerDeps, pauseLatchDeps });
     bindPromptProfiles();
 }
 

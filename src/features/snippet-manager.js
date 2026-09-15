@@ -6,7 +6,8 @@ import { validateSummarizerOutputIntegrity } from '../core/summarizer-output.js'
 import { commitSnippetMutation } from '../core/snippet-commit.js';
 import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
 import { parseSnippet } from '../core/summarizer-state.js';
-import { callSummarizer, getIsSummarizing, setSummarizing } from '../core/summarizer.js';
+import { callSummarizer } from '../core/summarizer-request.js';
+import { getIsSummarizing, setSummarizing } from '../core/summarizer-queue.js';
 import { withUsageRun } from '../core/summarizer-usage.js';
 
 /**

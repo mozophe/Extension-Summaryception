@@ -5,7 +5,10 @@ const summarizerMocks = vi.hoisted(() => ({
     getIsSummarizing: vi.fn(() => false),
     setSummarizing: vi.fn(),
 }));
-vi.mock('../src/core/summarizer.js', () => summarizerMocks);
+vi.mock('../src/core/summarizer-request.js', () => ({
+    callSummarizer: summarizerMocks.callSummarizer,
+}));
+vi.mock('../src/core/summarizer-queue.js', () => summarizerMocks);
 
 import {
     isRegenerationCandidate,

@@ -2,14 +2,13 @@ import { MEMORY_MODES, TOAST_TITLE } from '../foundation/constants.js';
 import { error } from '../foundation/logger.js';
 import { getEffectiveSettings } from '../foundation/state.js';
 import {
-    abortSummarization,
     describeManualRun,
     ELASTIC_STRATEGIES,
-    getIsSummarizing,
     pauseAutoSummarization,
     resumeAutoSummarization,
     runManual,
-} from '../core/summarizer.js';
+} from '../core/summarizer-engine.js';
+import { abortSummarization, getIsSummarizing } from '../core/summarizer-queue.js';
 import { updateInjection } from '../features/injection.js';
 import { updateUI } from './ui.js';
 import {
@@ -22,6 +21,11 @@ import {
     showSlopBreakerOutcome,
     updateManualProgressToast,
 } from './ui-dialogs.js';
+
+/** @type {import('../core/summarizer-engine.js').ManualRunnerDeps} */
+let manualRunnerDeps;
+/** @type {import('../core/summarizer-engine.js').PauseLatchDeps} */
+let pauseLatchDeps;
 
 /**
  * Abort a manual summarization run from its progress toast.
@@ -124,12 +128,11 @@ async function executeForceSummarize($button, notify) {
                     toastr.info('Nothing eligible to summarize.', TOAST_TITLE);
                     return;
                 }
-
                 toastr.info(`${preview.backlog} turns ready to process. Starting...`, TOAST_TITLE, {
                     timeOut: 2000,
                 });
 
-                return runManual(ELASTIC_STRATEGIES.FORCE, options);
+                return runManual(manualRunnerDeps, ELASTIC_STRATEGIES.FORCE, options);
             },
             report: showCatchupOutcome,
             notify,
@@ -162,7 +165,7 @@ async function onSlopBreaker(buttonEl, notify) {
         $(buttonEl),
         '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
         {
-            run: (options) => runManual(ELASTIC_STRATEGIES.SLOP, options),
+            run: (options) => runManual(manualRunnerDeps, ELASTIC_STRATEGIES.SLOP, options),
             report: showSlopBreakerOutcome,
             notify,
         },
@@ -208,7 +211,7 @@ export function reloadPage() {
  * @returns {Promise<void>}
  */
 async function onStopSummarize() {
-    const status = await pauseAutoSummarization();
+    const status = await pauseAutoSummarization(pauseLatchDeps);
     if (status === 'already-paused') {
         toastr.info('Already paused.', TOAST_TITLE);
         return;
@@ -230,7 +233,7 @@ async function onStopSummarize() {
  * @returns {Promise<void>}
  */
 async function onResumeSummarize() {
-    const status = await resumeAutoSummarization();
+    const status = await resumeAutoSummarization(pauseLatchDeps);
     if (status === 'not-paused') {
         toastr.info('Not paused.', TOAST_TITLE);
         return;
@@ -245,10 +248,16 @@ async function onResumeSummarize() {
  * Bind the manual-run controls: Force Summarize, Slop Breaker, the
  * stale-cache advice toast action that starts the same manual run, and the
  * Stop/Resume controls.
- * @param {{ notify: import('../core/notify.js').NotifyAdapter }} deps
+ * @param {{ notify: import('../core/notify.js').NotifyAdapter, manualRunnerDeps: import('../core/summarizer-engine.js').ManualRunnerDeps, pauseLatchDeps: import('../core/summarizer-engine.js').PauseLatchDeps }} deps
  * @returns {void}
  */
-export function bindManualRunControls({ notify }) {
+export function bindManualRunControls({
+    notify,
+    manualRunnerDeps: runnerDeps,
+    pauseLatchDeps: latchDeps,
+}) {
+    manualRunnerDeps = runnerDeps;
+    pauseLatchDeps = latchDeps;
     $(document).on('click', '#sc_force_summarize, #sc_easy_force_summarize', async function () {
         await executeForceSummarize($(this), notify);
     });

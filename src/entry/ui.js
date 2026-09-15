@@ -14,7 +14,7 @@ import {
     getCurrentSummarizedBoundary,
 } from '../foundation/state.js';
 import { countGhostedMessages } from '../core/ghosting.js';
-import { getIsSummarizing } from '../core/summarizer.js';
+import { getIsSummarizing } from '../core/summarizer-queue.js';
 import { countTextTokens, formatCompactTokenCount } from '../core/token-count.js';
 
 import { describeAutoWork } from '../core/summarization-routes.js';

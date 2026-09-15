@@ -10,14 +10,14 @@ import { buildChatWindowPlan } from '../core/chat-window-planner.js';
 import {
     beginForegroundGeneration,
     endForegroundGeneration,
-    hasActiveAbortController,
-    hasFrozenPromptMutations,
+    isPromptMutationFrozen,
     recoverStalePromptFreeze,
-    requestSummarization,
     resetPromptMutationGuard,
-} from '../core/summarizer.js';
+} from '../core/summarizer-commit.js';
+import { hasActiveAbortController } from '../core/summarizer-request.js';
+import { requestSummarization } from '../core/summarizer-queue.js';
 import { updateInjection } from '../features/injection.js';
-import { persistChatState } from '../core/persist-state.js';
+import { flushPendingChatSave, persistChatState } from '../core/persist-state.js';
 import { showStaleCacheAdvice } from './ui-dialogs.js';
 
 let previousPromptSectionHashes = [];
@@ -201,6 +201,7 @@ export function onGenerationStarted(...args) {
     }
     info('Foreground generation start detected; freezing Summaryception prompt mutations.');
     beginForegroundGeneration();
+    refreshUi();
 }
 
 /**
@@ -208,7 +209,7 @@ export function onGenerationStarted(...args) {
  */
 export function onGenerationEnded() {
     const hasActiveSummaryRequest = hasActiveAbortController();
-    const hasFrozenMutations = hasFrozenPromptMutations();
+    const hasFrozenMutations = isPromptMutationFrozen();
 
     if (hasActiveSummaryRequest && !hasFrozenMutations) {
         debug('Ignoring generation end from active Summaryception request.');
@@ -220,7 +221,15 @@ export function onGenerationEnded() {
         `activeSummaryRequest=${hasActiveSummaryRequest}`,
         `frozen=${hasFrozenMutations}`,
     );
-    void endForegroundGeneration()
+    void (async () => {
+        try {
+            await endForegroundGeneration();
+            await flushPendingChatSave();
+            await requestSummarization();
+        } finally {
+            refreshUi();
+        }
+    })()
         .catch((error) => {
             warn('Error while ending foreground generation:', error);
         })

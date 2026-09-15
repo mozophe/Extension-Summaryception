@@ -13,7 +13,7 @@ const summarizerMocks = vi.hoisted(() => ({
     runManual: vi.fn(),
 }));
 
-vi.mock('../src/core/summarizer.js', async (importOriginal) => ({
+vi.mock('../src/core/summarizer-engine.js', async (importOriginal) => ({
     ...(await importOriginal()),
     describeManualRun: summarizerMocks.describeManualRun,
     runManual: summarizerMocks.runManual,
@@ -32,7 +32,7 @@ describe('manual run failure handling', () => {
         globalThis.$ = dom.$;
         summarizerMocks.describeManualRun.mockResolvedValue({ ready: true, backlog: 2 });
         summarizerMocks.runManual.mockRejectedValue(new Error('provider exploded'));
-        bindManualRunControls({ notify: null });
+        bindManualRunControls({ notify: null, manualRunnerDeps: {}, pauseLatchDeps: {} });
         button = dom.element('#sc_force_summarize');
     });
 

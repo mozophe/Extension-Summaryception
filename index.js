@@ -10,10 +10,13 @@
 
 import { LOG_PREFIX } from './src/foundation/constants.js';
 import { getContext } from './src/foundation/context.js';
-import { initRefreshPort } from './src/foundation/refresh.js';
+import { initRefreshPort, refreshUi } from './src/foundation/refresh.js';
 import { getSettings } from './src/foundation/state.js';
 import { initSnippetBrowser } from './src/entry/ui-snippets.js';
-import { setInjectionUpdater, setNotify } from './src/core/summarizer.js';
+import { requestSummarization, setNotify, summarizerQueue } from './src/core/summarizer-queue.js';
+import { initCommitCallbacks } from './src/core/summarizer-commit.js';
+import { hasActiveAbortController } from './src/core/summarizer-request.js';
+import { withUsageRun } from './src/core/summarizer-usage.js';
 import { createToastrNotifyAdapter } from './src/entry/ui-dialogs.js';
 import { syncLLMContextPreview, updateUI } from './src/entry/ui.js';
 import { bindUIEvents } from './src/entry/ui-events.js';
@@ -45,9 +48,17 @@ import { registerSlashCommands } from './src/entry/commands.js';
     }
 
     getSettings();
-    setInjectionUpdater(updateInjection, reassertInjectionSnapshot);
+    initCommitCallbacks({
+        updateInjection,
+        reassertInjection: reassertInjectionSnapshot,
+        requeue: () => {
+            void requestSummarization();
+        },
+    });
     const notify = createToastrNotifyAdapter();
     setNotify(notify);
+    const manualRunnerDeps = { queue: summarizerQueue, refreshUi, withUsageRun };
+    const pauseLatchDeps = { queue: summarizerQueue, hasActiveAbortController };
     initRefreshPort({ updateInjection, updateUI, updatePreview: syncLLMContextPreview });
     initSnippetBrowser(notify);
 
@@ -59,7 +70,7 @@ import { registerSlashCommands } from './src/entry/commands.js';
     $('#extensions_settings2').append(html);
 
     initSettingsHelp();
-    bindUIEvents(notify);
+    bindUIEvents(notify, manualRunnerDeps, pauseLatchDeps);
     bindPromptFreezeRecoveryEvents();
     initSettingsTabs();
     initConnectionUI();

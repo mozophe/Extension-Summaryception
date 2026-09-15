@@ -93,6 +93,11 @@ _Avoid_: UI refresher, refresh registry
 The single gate that owns all automatic summarization work and its guards.
 Code: module src/core/summarizer-engine.js
 
+**Summarizer Queue**:
+The coalescing worker that owns automatic summarization work: request, drain, and phase. One instance exists; its wrappers are the only way to start, poll, or abort a cycle.
+Code: `SummarizerQueue` (src/core/summarizer-queue.js)
+_Avoid_: job runner, work queue
+
 **Pause Latch**:
 The persisted `autoPaused` flag. Stop and Resume transitions cross the engine seam: core aborts, latches, and kicks the resume cycle; entry maps returned statuses to notices. Automatic cycles respect it; manual runs do not.
 Code: `autoPaused` (src/foundation/constants.js)
@@ -103,7 +108,7 @@ Code: `runManual` (src/core/summarizer-engine.js)
 
 **Foreground Gate**:
 The single ask that decides whether prompt-affecting work may run. Open only when no foreground freeze, no stale recovery, and no queued commits or prompt effects. The Engine Gate decides when to summarize; the Foreground Gate decides when prompt mutations are safe.
-Code: `promptWorkGate` (src/core/summarizer-commit.js)
+Code: `promptWorkGate`, `initCommitCallbacks` (src/core/summarizer-commit.js)
 _Avoid_: Stop guard
 
 **Prompt Profile**:
