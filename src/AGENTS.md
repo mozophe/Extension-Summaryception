@@ -120,5 +120,5 @@
 - Context preview numbers come from one core estimator.
 - Memory below steady-state use silently truncates injected memory.
 - Cache TTL applies to Prefix Cache mode only.
-- Stale-cache advice needs a queue at or above Min Turns per Batch and a readable last-message time.
+- Stale-cache advice needs a queue at or above Min Turns per Batch, filling at least a quarter of the queued-token budget, and a readable last-message time.
 - Numeric bounds declare once in SLIDER_LIMITS (src/foundation/constants.js); the read-time normalizer is the only enforcement. tests/settings-bounds.test.js pins settings.html attributes to the map, and the UI slider snap is an affordance fed by the same map, not a second enforcement.

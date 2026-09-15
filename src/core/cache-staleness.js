@@ -1,9 +1,12 @@
 import { MEMORY_MODES } from '../foundation/constants.js';
 
+/** Fraction of the queued chat budget the queue must fill before stale-cache advice fires. */
+const STALE_ADVICE_MIN_QUEUE_FILL = 0.25;
+
 /**
  * @typedef {object} StaleCacheAdvice
  * @property {boolean} advise True when summarizing now is cheaper than waiting.
- * @property {'cache-mode' | 'queue-small' | 'unknown-time' | 'fresh' | 'stale'} reason Why the advice was given or withheld.
+ * @property {'cache-mode' | 'queue-small' | 'queue-thin' | 'unknown-time' | 'fresh' | 'stale'} reason Why the advice was given or withheld.
  * @property {number} staleMinutes Minutes since the last chat message, 0 when unknown.
  * @property {number} ttlMinutes Configured provider cache TTL in minutes.
  * @property {number} queuedTurns Assistant turns waiting in the summarize queue.
@@ -49,13 +52,14 @@ export function getMessageTimestampMs(message) {
 export function evaluateStaleCacheAdvice({ chat, plan, settings, now = Date.now() }) {
     const ttlMinutes = Number(settings?.cacheTtlMinutes) || 0;
     const queuedTurns = plan?.eligibleTurns?.length ?? 0;
+    const queuedTokens = plan?.queuedTokens ?? 0;
     const advice = /** @type {StaleCacheAdvice} */ ({
         advise: false,
         reason: 'stale',
         staleMinutes: 0,
         ttlMinutes,
         queuedTurns,
-        queuedTokens: plan?.queuedTokens ?? 0,
+        queuedTokens,
     });
 
     if (!isProviderCacheMode(settings)) {
@@ -63,6 +67,9 @@ export function evaluateStaleCacheAdvice({ chat, plan, settings, now = Date.now(
     }
     if (!hasSummarizableQueue(queuedTurns, settings)) {
         return { ...advice, reason: 'queue-small' };
+    }
+    if (!hasQueueTokenFill(queuedTokens, settings)) {
+        return { ...advice, reason: 'queue-thin' };
     }
 
     const lastTimestampMs = getMessageTimestampMs(chat?.at(-1));
@@ -85,6 +92,18 @@ export function evaluateStaleCacheAdvice({ chat, plan, settings, now = Date.now(
  */
 function hasSummarizableQueue(queuedTurns, settings) {
     return queuedTurns >= Math.max(1, Number(settings?.minSummaryTurns) || 0);
+}
+
+/**
+ * Check whether queued tokens fill at least the advice fraction of the
+ * queued chat budget.
+ * @param {number} queuedTokens
+ * @param {ExtensionSettings} settings
+ * @returns {boolean}
+ */
+function hasQueueTokenFill(queuedTokens, settings) {
+    const queuedBudget = Number(settings?.queuedTokenBudget) || 0;
+    return queuedTokens >= STALE_ADVICE_MIN_QUEUE_FILL * queuedBudget;
 }
 
 /**
