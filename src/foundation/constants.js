@@ -107,28 +107,34 @@ export const UI_MODES = Object.freeze({
     ADVANCED: 'advanced',
 });
 
-export const EASY_CONTEXT_LIMITS = Object.freeze({
-    MIN: 8000,
-    MAX: 64000,
-    STEP: 1000,
-});
-
-export const EASY_MEMORY_LIMITS = Object.freeze({
-    MIN: 4000,
-    MAX: 16000,
-    STEP: 1000,
-});
-
-export const L0_SOURCE_LIMITS = Object.freeze({
-    MIN: 8000,
-    MAX: 64000,
-    STEP: 1000,
-});
-
-export const BATCH_TRIGGER_LIMITS = Object.freeze({
-    MIN: 4000,
-    MAX: 32000,
-    STEP: 1000,
+/**
+ * Slider and numeric-stepper bounds, keyed by setting id. Single source of
+ * truth for the min/max/step attributes in settings.html and for the
+ * read-time clamps in the settings normalizer; declaration↔template
+ * agreement is enforced by tests/settings-bounds.test.js.
+ * Bounds only: initial values live in defaultSettings. A `MAX` of null means
+ * the template declares no upper bound (number input without a max attribute).
+ */
+export const SLIDER_LIMITS = Object.freeze({
+    advancedModelContext: Object.freeze({ MIN: 8000, MAX: 64000, STEP: 1000 }),
+    maxL0SourceTokens: Object.freeze({ MIN: 8000, MAX: 64000, STEP: 1000 }),
+    minSummaryBudget: Object.freeze({ MIN: 4000, MAX: 32000, STEP: 1000 }),
+    verbatimTokenBudget: Object.freeze({ MIN: 4000, MAX: 64000, STEP: 1000 }),
+    queuedTokenBudget: Object.freeze({ MIN: 4000, MAX: 64000, STEP: 1000 }),
+    memoryTokenBudget: Object.freeze({ MIN: 4000, MAX: 32000, STEP: 1000 }),
+    layer0SummaryTokenTarget: Object.freeze({ MIN: 80, MAX: 700, STEP: 10 }),
+    minSummaryTurns: Object.freeze({ MIN: 2, MAX: 10, STEP: 1 }),
+    maxSummaryTurns: Object.freeze({ MIN: 3, MAX: 20, STEP: 1 }),
+    snippetsPerLayer: Object.freeze({ MIN: 20, MAX: 40, STEP: 1 }),
+    snippetsPerPromotion: Object.freeze({ MIN: 3, MAX: 4, STEP: 1 }),
+    cacheTtlMinutes: Object.freeze({ MIN: 5, MAX: 240, STEP: 5 }),
+    requestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
+    mergeRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
+    fallbackRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
+    summarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
+    mergeSummarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
+    fallbackSummarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
+    customMemoryDepth: Object.freeze({ MIN: 0, MAX: 10000, STEP: 1 }),
 });
 
 export const MASK_USER_ROLE_MODES = Object.freeze({
@@ -194,40 +200,6 @@ export function listNonEmptyLayers(store) {
     return result;
 }
 
-// ─── Request Timeout Configuration ─────────────────────────────────
-// Per-route summarizer request timeouts in seconds. Stored on settings as
-// requestTimeoutSeconds / mergeRequestTimeoutSeconds / fallbackRequestTimeoutSeconds.
-// The policy converts to milliseconds; the retry attempt runs at 75% of the first.
-export const REQUEST_TIMEOUT = Object.freeze({
-    MIN_SECONDS: 60,
-    MAX_SECONDS: 300,
-    STEP_SECONDS: 10,
-    DEFAULT_SECONDS: 120, // Layer 0 / regenerate / fallback
-    MERGE_DEFAULT_SECONDS: 90, // L1+ promotions (smaller payloads)
-    RETRY_ATTEMPT_RATIO: 0.75,
-});
-
-// ─── Provider Cache TTL ─────────────────────────────────────────────
-// Minutes a provider keeps a cached prompt prefix alive in Prefix Cache mode.
-// Stored on settings as cacheTtlMinutes. Older chats make
-// the cache stale; the stale-cache advisor uses this to suggest an early
-// Force Summarize on chat load.
-export const CACHE_TTL = Object.freeze({
-    MIN_MINUTES: 5,
-    MAX_MINUTES: 240,
-    STEP_MINUTES: 5,
-    DEFAULT_MINUTES: 30,
-});
-
-// ─── Retention Budget Clamp ──────────────────────────────────────────
-// Read-time clamp bounds for the retention budgets (verbatimTokenBudget,
-// queuedTokenBudget). Enforced only by the settings normalizer; the
-// settings.html slider min/max/step are kept in sync manually.
-export const RETENTION_BUDGET_LIMITS = Object.freeze({
-    MIN: 4000,
-    MAX: 64000,
-    STEP: 1000,
-});
 // ─── Default Settings ────────────────────────────────────────────────
 
 export const defaultSettings = Object.freeze({
@@ -235,7 +207,7 @@ export const defaultSettings = Object.freeze({
     // Latched by Stop; blocks only automatic cycles. Manual runs ignore it.
     autoPaused: false,
     memoryMode: MEMORY_MODES.BALANCED,
-    cacheTtlMinutes: CACHE_TTL.DEFAULT_MINUTES, // provider cache lifetime, Prefix Cache only
+    cacheTtlMinutes: 30, // provider cache lifetime, Prefix Cache only
     // Decoupled from uiMode: which complexity panel (Easy/Advanced) to render,
     // shown even when the extension is off so config stays editable.
     configMode: UI_MODES.EASY,
@@ -309,19 +281,19 @@ export const defaultSettings = Object.freeze({
     connectionSource: 'default', // 'default' | 'profile'
     summarizerResponseLength: 0, // 0 = provider/profile default
     connectionProfileId: '', // ID of selected ST Connection Profile
-    requestTimeoutSeconds: REQUEST_TIMEOUT.DEFAULT_SECONDS, // Layer 0 / regenerate, in seconds
+    requestTimeoutSeconds: 120, // Layer 0 / regenerate, in seconds
 
     // Optional Layer 1+ promotion merge connection. 'inherit' uses the Layer 0 connection above.
     mergeConnectionSource: 'inherit', // 'inherit' | 'default' | 'profile'
     mergeSummarizerResponseLength: 0,
     mergeConnectionProfileId: '',
-    mergeRequestTimeoutSeconds: REQUEST_TIMEOUT.MERGE_DEFAULT_SECONDS, // L1+ promotions, in seconds
+    mergeRequestTimeoutSeconds: 90, // L1+ promotions, in seconds
 
     // Optional fallback connection used after the primary route exhausts retryable failures.
     fallbackConnectionSource: 'disabled', // 'disabled' | 'default' | 'profile'
     fallbackSummarizerResponseLength: 0,
     fallbackConnectionProfileId: '',
-    fallbackRequestTimeoutSeconds: REQUEST_TIMEOUT.DEFAULT_SECONDS, // fallback route, in seconds
+    fallbackRequestTimeoutSeconds: 120, // fallback route, in seconds
 });
 
 // ─── Prompt Presets ──────────────────────────────────────────────────
@@ -386,6 +358,8 @@ export const PROMPT_SETTING_KEYS = Object.freeze([
 ]);
 
 // ─── Retry Configuration ─────────────────────────────────────────────
+
+export const RETRY_ATTEMPT_RATIO = 0.75; // retries run at this fraction of the first attempt's timeout
 
 export const RETRY_CONFIG = {
     maxRetries: 3,

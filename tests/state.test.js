@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-    CACHE_TTL,
     MEMORY_MODE_PRESETS,
     MEMORY_MODES,
-    RETENTION_BUDGET_LIMITS,
+    SLIDER_LIMITS,
     UI_MODES,
     applyMemoryModePreset,
     defaultSettings,
@@ -67,8 +66,8 @@ describe('memory mode budgets', () => {
             settings: { verbatimTokenBudget: 999, queuedTokenBudget: 999999 },
         });
         expect(getSettings()).toMatchObject({
-            verbatimTokenBudget: RETENTION_BUDGET_LIMITS.MIN,
-            queuedTokenBudget: RETENTION_BUDGET_LIMITS.MAX,
+            verbatimTokenBudget: SLIDER_LIMITS.verbatimTokenBudget.MIN,
+            queuedTokenBudget: SLIDER_LIMITS.queuedTokenBudget.MAX,
         });
     });
 
@@ -82,10 +81,10 @@ describe('memory mode budgets', () => {
 
     it('defaults and clamps the provider cache TTL', () => {
         installSummaryContext({ settings: { cacheTtlMinutes: 9999 } });
-        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.MAX_MINUTES);
+        expect(getSettings().cacheTtlMinutes).toBe(SLIDER_LIMITS.cacheTtlMinutes.MAX);
 
         installSummaryContext({ settings: {} });
-        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.DEFAULT_MINUTES);
+        expect(getSettings().cacheTtlMinutes).toBe(defaultSettings.cacheTtlMinutes);
     });
 });
 

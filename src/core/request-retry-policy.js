@@ -1,5 +1,5 @@
 import {
-    REQUEST_TIMEOUT,
+    RETRY_ATTEMPT_RATIO,
     RETRY_CONFIG,
     isRetryableError,
     parseRetryAfter,
@@ -38,7 +38,7 @@ export function computeAttemptTimeoutMs(metadata = {}, attempt = 0, settings = {
         return fallbackTimeoutMs(metadata, attempt);
     }
     const firstMs = configuredSeconds * 1000;
-    return attempt === 0 ? firstMs : Math.round(firstMs * REQUEST_TIMEOUT.RETRY_ATTEMPT_RATIO);
+    return attempt === 0 ? firstMs : Math.round(firstMs * RETRY_ATTEMPT_RATIO);
 }
 
 /**

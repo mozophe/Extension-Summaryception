@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { REQUEST_TIMEOUT, RETRY_CONFIG } from '../src/foundation/retry.js';
+import { RETRY_ATTEMPT_RATIO, RETRY_CONFIG } from '../src/foundation/retry.js';
 import {
     classifyAttemptRetryStatus,
     computeAttemptTimeoutMs,
@@ -15,7 +15,7 @@ describe('computeAttemptTimeoutMs', () => {
         const settings = { requestTimeoutSeconds: 30 };
         expect(computeAttemptTimeoutMs({ kind: 'layer0' }, 0, settings)).toBe(30000);
         expect(computeAttemptTimeoutMs({ kind: 'layer0' }, 1, settings)).toBe(
-            Math.round(30000 * REQUEST_TIMEOUT.RETRY_ATTEMPT_RATIO),
+            Math.round(30000 * RETRY_ATTEMPT_RATIO),
         );
     });
 

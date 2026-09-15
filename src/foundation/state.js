@@ -1,8 +1,4 @@
 import {
-    BATCH_TRIGGER_LIMITS,
-    CACHE_TTL,
-    EASY_CONTEXT_LIMITS,
-    L0_SOURCE_LIMITS,
     MASK_USER_ROLE_MODES,
     MEMORY_MODE_PRESETS,
     MEMORY_MODES,
@@ -14,8 +10,7 @@ import {
     PROMOTION_SYSTEM_PROMPT_PRESETS,
     PROMPT_PRESETS,
     PROMPT_SETTING_KEYS,
-    REQUEST_TIMEOUT,
-    RETENTION_BUDGET_LIMITS,
+    SLIDER_LIMITS,
     SUMMARIZER_REPAIR_PROMPT_PRESETS,
     SUMMARIZER_SYSTEM_PROMPT_PRESETS,
     UI_MODES,
@@ -299,7 +294,11 @@ function normalizeMemorySettings(settings) {
         settings.customMemoryRole = defaultSettings.customMemoryRole;
         changed = true;
     }
-    const customMemoryDepth = clampInteger(settings.customMemoryDepth, 0, 10000);
+    const customMemoryDepth = clampInteger(
+        settings.customMemoryDepth,
+        SLIDER_LIMITS.customMemoryDepth.MIN,
+        SLIDER_LIMITS.customMemoryDepth.MAX,
+    );
     if (settings.customMemoryDepth !== customMemoryDepth) {
         settings.customMemoryDepth = customMemoryDepth;
         changed = true;
@@ -341,39 +340,64 @@ function isSettingValue(values, value) {
 function normalizeVerbatimWindowSettings(settings) {
     settings.advancedModelContext = clampToStep(
         settings.advancedModelContext,
-        EASY_CONTEXT_LIMITS.MIN,
-        EASY_CONTEXT_LIMITS.MAX,
-        EASY_CONTEXT_LIMITS.STEP,
+        SLIDER_LIMITS.advancedModelContext.MIN,
+        SLIDER_LIMITS.advancedModelContext.MAX,
+        SLIDER_LIMITS.advancedModelContext.STEP,
     );
-    settings.minSummaryTurns = clampInteger(settings.minSummaryTurns, 2, 10);
-    settings.maxSummaryTurns = clampInteger(settings.maxSummaryTurns, 3, 20);
-    settings.layer0SummaryTokenTarget = clampInteger(settings.layer0SummaryTokenTarget, 80, 700);
+    settings.minSummaryTurns = clampInteger(
+        settings.minSummaryTurns,
+        SLIDER_LIMITS.minSummaryTurns.MIN,
+        SLIDER_LIMITS.minSummaryTurns.MAX,
+    );
+    settings.maxSummaryTurns = clampInteger(
+        settings.maxSummaryTurns,
+        SLIDER_LIMITS.maxSummaryTurns.MIN,
+        SLIDER_LIMITS.maxSummaryTurns.MAX,
+    );
+    settings.layer0SummaryTokenTarget = clampInteger(
+        settings.layer0SummaryTokenTarget,
+        SLIDER_LIMITS.layer0SummaryTokenTarget.MIN,
+        SLIDER_LIMITS.layer0SummaryTokenTarget.MAX,
+    );
     settings.maxL0SourceTokens = clampToStep(
         settings.maxL0SourceTokens,
-        L0_SOURCE_LIMITS.MIN,
-        L0_SOURCE_LIMITS.MAX,
-        L0_SOURCE_LIMITS.STEP,
+        SLIDER_LIMITS.maxL0SourceTokens.MIN,
+        SLIDER_LIMITS.maxL0SourceTokens.MAX,
+        SLIDER_LIMITS.maxL0SourceTokens.STEP,
     );
     settings.verbatimTokenBudget = clampToStep(
         settings.verbatimTokenBudget,
-        RETENTION_BUDGET_LIMITS.MIN,
-        RETENTION_BUDGET_LIMITS.MAX,
-        RETENTION_BUDGET_LIMITS.STEP,
+        SLIDER_LIMITS.verbatimTokenBudget.MIN,
+        SLIDER_LIMITS.verbatimTokenBudget.MAX,
+        SLIDER_LIMITS.verbatimTokenBudget.STEP,
     );
     settings.queuedTokenBudget = clampToStep(
         settings.queuedTokenBudget,
-        RETENTION_BUDGET_LIMITS.MIN,
-        RETENTION_BUDGET_LIMITS.MAX,
-        RETENTION_BUDGET_LIMITS.STEP,
+        SLIDER_LIMITS.queuedTokenBudget.MIN,
+        SLIDER_LIMITS.queuedTokenBudget.MAX,
+        SLIDER_LIMITS.queuedTokenBudget.STEP,
     );
-    settings.memoryTokenBudget = clampToStep(settings.memoryTokenBudget, 4000, 32000, 1000);
-    settings.snippetsPerLayer = clampInteger(settings.snippetsPerLayer, 20, 40);
-    settings.snippetsPerPromotion = clampInteger(settings.snippetsPerPromotion, 3, 4);
+    settings.memoryTokenBudget = clampToStep(
+        settings.memoryTokenBudget,
+        SLIDER_LIMITS.memoryTokenBudget.MIN,
+        SLIDER_LIMITS.memoryTokenBudget.MAX,
+        SLIDER_LIMITS.memoryTokenBudget.STEP,
+    );
+    settings.snippetsPerLayer = clampInteger(
+        settings.snippetsPerLayer,
+        SLIDER_LIMITS.snippetsPerLayer.MIN,
+        SLIDER_LIMITS.snippetsPerLayer.MAX,
+    );
+    settings.snippetsPerPromotion = clampInteger(
+        settings.snippetsPerPromotion,
+        SLIDER_LIMITS.snippetsPerPromotion.MIN,
+        SLIDER_LIMITS.snippetsPerPromotion.MAX,
+    );
     settings.cacheTtlMinutes = clampToStep(
         settings.cacheTtlMinutes,
-        CACHE_TTL.MIN_MINUTES,
-        CACHE_TTL.MAX_MINUTES,
-        CACHE_TTL.STEP_MINUTES,
+        SLIDER_LIMITS.cacheTtlMinutes.MIN,
+        SLIDER_LIMITS.cacheTtlMinutes.MAX,
+        SLIDER_LIMITS.cacheTtlMinutes.STEP,
     );
     enforceRetentionInvariants(settings);
 }
@@ -390,14 +414,14 @@ export function enforceRetentionInvariants(settings) {
         settings.maxSummaryTurns = settings.minSummaryTurns;
     }
     const sourceCap = Math.max(
-        L0_SOURCE_LIMITS.MIN,
+        SLIDER_LIMITS.maxL0SourceTokens.MIN,
         Number(settings.maxL0SourceTokens) || defaultSettings.maxL0SourceTokens,
     );
     settings.minSummaryBudget = clampToStep(
         settings.minSummaryBudget,
-        BATCH_TRIGGER_LIMITS.MIN,
-        Math.min(BATCH_TRIGGER_LIMITS.MAX, sourceCap),
-        BATCH_TRIGGER_LIMITS.STEP,
+        SLIDER_LIMITS.minSummaryBudget.MIN,
+        Math.min(SLIDER_LIMITS.minSummaryBudget.MAX, sourceCap),
+        SLIDER_LIMITS.minSummaryBudget.STEP,
     );
 }
 
@@ -411,21 +435,21 @@ export function enforceRetentionInvariants(settings) {
 function normalizeRequestTimeouts(settings) {
     settings.requestTimeoutSeconds = clampToStep(
         settings.requestTimeoutSeconds,
-        REQUEST_TIMEOUT.MIN_SECONDS,
-        REQUEST_TIMEOUT.MAX_SECONDS,
-        REQUEST_TIMEOUT.STEP_SECONDS,
+        SLIDER_LIMITS.requestTimeoutSeconds.MIN,
+        SLIDER_LIMITS.requestTimeoutSeconds.MAX,
+        SLIDER_LIMITS.requestTimeoutSeconds.STEP,
     );
     settings.mergeRequestTimeoutSeconds = clampToStep(
         settings.mergeRequestTimeoutSeconds,
-        REQUEST_TIMEOUT.MIN_SECONDS,
-        REQUEST_TIMEOUT.MAX_SECONDS,
-        REQUEST_TIMEOUT.STEP_SECONDS,
+        SLIDER_LIMITS.mergeRequestTimeoutSeconds.MIN,
+        SLIDER_LIMITS.mergeRequestTimeoutSeconds.MAX,
+        SLIDER_LIMITS.mergeRequestTimeoutSeconds.STEP,
     );
     settings.fallbackRequestTimeoutSeconds = clampToStep(
         settings.fallbackRequestTimeoutSeconds,
-        REQUEST_TIMEOUT.MIN_SECONDS,
-        REQUEST_TIMEOUT.MAX_SECONDS,
-        REQUEST_TIMEOUT.STEP_SECONDS,
+        SLIDER_LIMITS.fallbackRequestTimeoutSeconds.MIN,
+        SLIDER_LIMITS.fallbackRequestTimeoutSeconds.MAX,
+        SLIDER_LIMITS.fallbackRequestTimeoutSeconds.STEP,
     );
 }
 
@@ -455,13 +479,13 @@ function normalizeModeSettings(settings, hadMode) {
 function deriveEasySourceCap(contextTokens) {
     const context = clampToStep(
         contextTokens,
-        EASY_CONTEXT_LIMITS.MIN,
-        EASY_CONTEXT_LIMITS.MAX,
-        EASY_CONTEXT_LIMITS.STEP,
+        SLIDER_LIMITS.advancedModelContext.MIN,
+        SLIDER_LIMITS.advancedModelContext.MAX,
+        SLIDER_LIMITS.advancedModelContext.STEP,
     );
     return Math.min(
-        L0_SOURCE_LIMITS.MAX,
-        Math.max(L0_SOURCE_LIMITS.MIN, Math.floor(context * 0.5)),
+        SLIDER_LIMITS.maxL0SourceTokens.MAX,
+        Math.max(SLIDER_LIMITS.maxL0SourceTokens.MIN, Math.floor(context * 0.5)),
     );
 }
 
@@ -474,12 +498,12 @@ function deriveEasySourceCap(contextTokens) {
 export function deriveAdvancedEngineTuning(settings) {
     const sourceCap = deriveEasySourceCap(settings.advancedModelContext);
     settings.maxL0SourceTokens = sourceCap;
-    settings.minSummaryBudget = Math.min(BATCH_TRIGGER_LIMITS.MAX, sourceCap);
+    settings.minSummaryBudget = Math.min(SLIDER_LIMITS.minSummaryBudget.MAX, sourceCap);
     settings.layer0SummaryTokenTarget = clampToStep(
         Number(settings.memoryTokenBudget) * 0.02,
-        80,
-        700,
-        10,
+        SLIDER_LIMITS.layer0SummaryTokenTarget.MIN,
+        SLIDER_LIMITS.layer0SummaryTokenTarget.MAX,
+        SLIDER_LIMITS.layer0SummaryTokenTarget.STEP,
     );
 }
 
