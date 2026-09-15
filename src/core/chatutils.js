@@ -107,10 +107,28 @@ export function isSummarizerConversationMessage(message) {
     if (!message?.mes || !String(message.mes).trim()) {
         return false;
     }
+    // Only an explicit host system flag makes a message system; never infer from role or content.
     if (message.is_system || message.is_hidden || message.extra?.type) {
         return false;
     }
     return true;
+}
+
+/**
+ * Collect assistant turns matching a predicate, carrying their chat indices.
+ * @param {ChatMessage[]} chat - The SillyTavern chat array
+ * @param {(message: ChatMessage) => boolean} predicate - Inclusion predicate
+ * @returns {AssistantTurn[]} Matching assistant turns
+ */
+export function collectAssistantTurns(chat, predicate) {
+    const turns = [];
+    for (let i = 0; i < chat.length; i++) {
+        const m = chat[i];
+        if (predicate(m)) {
+            turns.push(toAssistantTurn(m, i));
+        }
+    }
+    return turns;
 }
 
 /**
@@ -119,14 +137,7 @@ export function isSummarizerConversationMessage(message) {
  * @returns {AssistantTurn[]} Assistant turns
  */
 export function getAssistantTurns(chat) {
-    const turns = [];
-    for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (isSummarizerConversationMessage(m) && !m.is_user) {
-            turns.push(toAssistantTurn(m, i));
-        }
-    }
-    return turns;
+    return collectAssistantTurns(chat, (m) => isSummarizerConversationMessage(m) && !m.is_user);
 }
 
 /**
@@ -135,20 +146,15 @@ export function getAssistantTurns(chat) {
  * @returns {AssistantTurn[]} Visible assistant turns
  */
 export function getVisibleAssistantTurns(chat) {
-    const turns = [];
-    for (let i = 0; i < chat.length; i++) {
-        const m = chat[i];
-        if (
+    return collectAssistantTurns(chat, (m) =>
+        Boolean(
             !m.is_user &&
             !m.is_system &&
             !isSummaryceptionOwnedMessage(m) &&
             m.mes &&
-            m.mes.trim().length > 0
-        ) {
-            turns.push(toAssistantTurn(m, i));
-        }
-    }
-    return turns;
+            m.mes.trim().length > 0,
+        ),
+    );
 }
 
 /**

@@ -1,5 +1,6 @@
 import { getChat } from '../foundation/context.js';
 import { resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { collectSnippetSourceIds } from '../foundation/state.js';
 import { parseSnippet } from './summarizer-state.js';
 import { LEADING_NARRATIVE_HEADER_RE } from './structural-headers.js';
 
@@ -21,20 +22,11 @@ export function buildSnippetMetadataFromState(state = {}) {
 
 /**
  * Build persisted metadata for a promoted snippet.
- * @param {Array<object>} snippets
+ * @param {Array<SummaryceptionSnippet>} snippets
  * @returns {{ sourceMessageIds: string[], currentDateTime?: string }}
  */
 export function buildPromotedSnippetMetadata(snippets = []) {
-    const sourceMessageIds = [];
-    const seen = new Set();
-    for (const snippet of snippets) {
-        for (const id of snippet?.sourceMessageIds || []) {
-            if (typeof id === 'string' && id.trim() !== '' && !seen.has(id)) {
-                seen.add(id);
-                sourceMessageIds.push(id);
-            }
-        }
-    }
+    const sourceMessageIds = collectSnippetSourceIds([snippets]);
     const currentDateTime = lastKnown(
         snippets.map((snippet) => knownStateValue(snippet?.currentDateTime)),
     );
@@ -60,13 +52,35 @@ export function extractSnippetMetadata(snippet = {}) {
 }
 
 /**
- * Format a snippet as anchored narrative for chronology or promotion input.
+ * Derive structured display metadata for a snippet. Entry layers compose
+ * user-facing strings from these fields; this module returns data only.
  * @param {object} snippet
+ * @param {string[]} [snippet.sourceMessageIds] - Stable source message identifiers.
+ * @param {number} [snippet.mergedCount] - How many child snippets were merged in.
+ * @param {number} [snippet.fromLayer] - Layer the merged children came from.
+ * @param {boolean} [snippet.promoted] - Whether promotion created this snippet.
+ * @returns {{ sourceCount: number, mergedCount: number, fromLayer: number | undefined, promoted: boolean }}
+ */
+export function getSnippetDisplayMeta(snippet) {
+    return {
+        sourceCount: snippet.sourceMessageIds?.length || 0,
+        mergedCount: snippet.mergedCount || 0,
+        fromLayer: snippet.fromLayer,
+        promoted: Boolean(snippet.promoted),
+    };
+}
+
+/**
+ * Format a snippet as anchored narrative for chronology or promotion input.
+ * Parses the snippet, strips any stored leading anchor from the narrative when
+ * an anchor was produced, and joins anchor + narrative with single spaces.
+ * @param {object} snippet
+ * @param {(snippet: object) => string} [formatAnchor] - Anchor formatter; defaults to the persisted anchor
  * @returns {string}
  */
-export function formatAnchoredSnippetNarrative(snippet = {}) {
+export function formatAnchoredSnippetNarrative(snippet = {}, formatAnchor = formatSnippetAnchor) {
     const parsed = parseSnippet(snippet?.text || '');
-    const anchor = formatSnippetAnchor(snippet);
+    const anchor = formatAnchor(snippet);
     const narrative = anchor
         ? stripLeadingSnippetAnchor(parsed.narrative)
         : parsed.narrative.trim();

@@ -3,13 +3,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const callSummarizer = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/summarizer-request.js', () => ({ callSummarizer }));
 
-import { summarizeBatchFromTurns } from '../src/core/summarizer-batch.js';
 import {
-    installBrowserRuntimeStub,
+    summarizeAtomicLayer0Partitions,
+    summarizeBatchFromTurns,
+} from '../src/core/summarizer-batch.js';
+import {
     installSummaryContext,
     makeMessage,
+    makeNotifyRecorder,
     makeSummaryStore,
 } from './test-helpers.js';
+
+/** Minimal valid summary passage returned by the stubbed request layer. */
+const VALID_SUMMARY = `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`;
 
 describe('Layer 0 deferred cleanup commit', () => {
     afterEach(() => {
@@ -24,35 +30,89 @@ describe('Layer 0 deferred cleanup commit', () => {
         ];
     }
 
-    it('shows one start toast and a completion toast after commit', async () => {
-        const { toastr } = installBrowserRuntimeStub();
+    /** Run one single-turn batch through the default entry. */
+    function runBatch(recorder) {
+        return summarizeBatchFromTurns([{ index: 1 }], {}, recorder);
+    }
+
+    it('notifies one batch progress lifecycle and closes it with success', async () => {
+        const recorder = makeNotifyRecorder();
         const chat = buildChat();
         installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
-        callSummarizer.mockResolvedValue(
-            `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
-        );
+        let progressOpenAtRequest = false;
+        callSummarizer.mockImplementation(async () => {
+            progressOpenAtRequest = recorder.events.some((event) => event.type === 'progress');
+            return {
+                status: 'completed',
+                text: VALID_SUMMARY,
+            };
+        });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }], { showToasts: true })).resolves.toBe(
-            true,
-        );
+        await expect(runBatch(recorder)).resolves.toEqual({
+            status: 'completed',
+            completed: 1,
+        });
 
-        expect(toastr.info).toHaveBeenCalledOnce();
-        expect(toastr.info).toHaveBeenCalledWith(
-            'Updating conversation memory…',
-            'Summaryception',
-            {
-                timeOut: 0,
-                extendedTimeOut: 0,
-                tapToDismiss: false,
-                progressBar: true,
-            },
-        );
-        expect(toastr.clear).toHaveBeenCalledOnce();
-        expect(toastr.success).toHaveBeenCalledWith(
-            'Conversation memory updated.',
-            'Summaryception',
-            { timeOut: 3000 },
-        );
+        expect(progressOpenAtRequest).toBe(true);
+        const progress = recorder.events.filter((event) => event.type === 'progress');
+        expect(progress).toHaveLength(1);
+        expect(progress[0].label).toBe('batch-memory');
+        expect(progress[0].total).toBe(1);
+        const updates = recorder.events.filter((event) => event.type === 'update');
+        expect(updates.map((event) => event.processed)).toEqual([1]);
+        expect(updates[0].handle).toBe(progress[0].handle);
+        const clears = recorder.events.filter((event) => event.type === 'clear');
+        expect(clears).toHaveLength(1);
+        expect(clears[0].handle).toBe(progress[0].handle);
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-updated' });
+    });
+
+    it.each([
+        ['aborted', 'batch-memory-aborted'],
+        ['blocked', 'batch-memory-failed'],
+        ['failed', 'batch-memory-failed'],
+    ])(
+        'closes the batch progress with a %s terminal and skips the commit',
+        async (status, terminalKind) => {
+            const recorder = makeNotifyRecorder();
+            const chat = buildChat();
+            const metadata = { summaryception: makeSummaryStore() };
+            installSummaryContext({ chat, metadata });
+            callSummarizer.mockResolvedValue({ status });
+
+            await expect(runBatch(recorder)).resolves.toEqual({ status: 'failed' });
+
+            const progress = recorder.events.filter((event) => event.type === 'progress');
+            expect(progress).toHaveLength(1);
+            expect(progress[0].label).toBe('batch-memory');
+            expect(recorder.events.filter((event) => event.type === 'update')).toHaveLength(0);
+            const clears = recorder.events.filter((event) => event.type === 'clear');
+            expect(clears).toHaveLength(1);
+            expect(clears[0].handle).toBe(progress[0].handle);
+            expect(clears[0].event).toEqual({ kind: terminalKind });
+            expect(metadata.summaryception.layers[0]).toEqual([]);
+            expect(metadata.summaryception.mutationEpoch).toBe(0);
+        },
+    );
+
+    it('emits no progress events when the passage never validates', async () => {
+        const recorder = makeNotifyRecorder();
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: '' }),
+            makeMessage({ scId: 'assistant-id', mes: '' }),
+        ];
+        installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+        callSummarizer.mockResolvedValue({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+
+        await expect(runBatch(recorder)).resolves.toEqual({
+            status: 'idle',
+        });
+
+        expect(callSummarizer).not.toHaveBeenCalled();
+        expect(recorder.events).toEqual([]);
     });
     it('assigns missing IDs on the live chat before capturing the source snapshot', async () => {
         vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('assistant-id');
@@ -60,11 +120,15 @@ describe('Layer 0 deferred cleanup commit', () => {
         delete chat[1].sc_id;
         const metadata = { summaryception: makeSummaryStore() };
         installSummaryContext({ chat, metadata });
-        callSummarizer.mockResolvedValue(
-            `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
-        );
+        callSummarizer.mockResolvedValue({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
 
-        await expect(summarizeBatchFromTurns([{ index: 1 }])).resolves.toBe(true);
+        await expect(runBatch()).resolves.toEqual({
+            status: 'completed',
+            completed: 1,
+        });
 
         expect(metadata.summaryception.layers[0][0].sourceMessageIds).toEqual([
             'user-id',
@@ -93,17 +157,19 @@ describe('Layer 0 deferred cleanup commit', () => {
             reloadCurrentChat,
         });
 
-        const resultPromise = summarizeBatchFromTurns([{ index: 1 }]);
+        const resultPromise = runBatch();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'assistant-id']);
         expect(saveChat).not.toHaveBeenCalled();
-        resolveSummary(`[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`);
-        await expect(resultPromise).resolves.toBe(true);
+        resolveSummary({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        await expect(resultPromise).resolves.toEqual({ status: 'completed', completed: 1 });
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'assistant-id']);
         expect(metadata.summaryception.layers[0]).toHaveLength(1);
-        expect(saveChat).not.toHaveBeenCalled();
         expect(reloadCurrentChat).not.toHaveBeenCalled();
         expect(saveMetadata).toHaveBeenCalled();
     });
@@ -115,15 +181,120 @@ describe('Layer 0 deferred cleanup commit', () => {
         let metadataSaves = 0;
         const saveMetadata = vi.fn(async () => {
             metadataSaves++;
-            if (metadataSaves === 2) {
+            if (metadataSaves === 1) {
                 throw new Error('metadata write failed');
             }
         });
         installSummaryContext({ chat, metadata, saveMetadata });
-        callSummarizer.mockResolvedValue(
-            `[NARRATIVE]\nA concise summary.\n[STATE]\nlocation: room`,
+        callSummarizer.mockResolvedValue({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        await expect(runBatch()).rejects.toThrow('metadata write failed');
+
+        expect(chat).toEqual(originalChat);
+        expect(metadata.summaryception.layers[0]).toEqual([]);
+        expect(metadata.summaryception.mutationEpoch).toBe(0);
+    });
+});
+
+describe('Layer 0 atomic multi-partition progress', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        callSummarizer.mockReset();
+    });
+
+    it('closes the shared progress exactly once when a later partition fails validation', async () => {
+        const recorder = makeNotifyRecorder();
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
+            makeMessage({ scId: 'assistant-id', mes: 'First assistant scene.' }),
+            makeMessage({ isUser: true, scId: 'user-id-2', mes: 'User scene two.' }),
+            makeMessage({ scId: 'assistant-id-2', mes: 'Second assistant scene.' }),
+        ];
+        installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+        callSummarizer
+            .mockResolvedValueOnce({
+                status: 'completed',
+                text: VALID_SUMMARY,
+            })
+            .mockResolvedValueOnce({ status: 'aborted' });
+        const partitions = [
+            { turns: [{ index: 1 }], sourceStartIdx: 1, sourceEndIdx: 1 },
+            { turns: [{ index: 3 }], sourceStartIdx: 3, sourceEndIdx: 3 },
+        ];
+
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, recorder)).resolves.toEqual({
+            status: 'failed',
+            completed: 1,
+            failed: 1,
+        });
+
+        const progress = recorder.events.filter((event) => event.type === 'progress');
+        expect(progress).toHaveLength(1);
+        expect(progress[0].label).toBe('batch-memory');
+        expect(progress[0].total).toBe(2);
+        const updates = recorder.events.filter((event) => event.type === 'update');
+        expect(updates.map((event) => event.processed)).toEqual([1]);
+        expect(updates[0].handle).toBe(progress[0].handle);
+        const clears = recorder.events.filter((event) => event.type === 'clear');
+        expect(clears).toHaveLength(1);
+        expect(clears[0].handle).toBe(progress[0].handle);
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
+    });
+
+    it('settles the shared progress when a later partition fails to capture its snapshot', async () => {
+        const recorder = makeNotifyRecorder();
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
+            makeMessage({ scId: 'assistant-id', mes: 'First assistant scene.' }),
+            makeMessage({ isUser: true, scId: 'user-id-2', mes: 'User scene two.' }),
+            makeMessage({ scId: undefined, mes: 'Second assistant scene.' }),
+        ];
+        installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+        callSummarizer.mockResolvedValueOnce({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        const partitions = [
+            { turns: [{ index: 1 }], sourceStartIdx: 1, sourceEndIdx: 1 },
+            { turns: [{ index: 3 }], sourceStartIdx: 3, sourceEndIdx: 3 },
+        ];
+
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, recorder)).rejects.toThrow(
+            'Cannot summarize messages without stable Summaryception IDs.',
         );
-        await expect(summarizeBatchFromTurns([{ index: 1 }])).rejects.toThrow(
+
+        const progress = recorder.events.filter((event) => event.type === 'progress');
+        expect(progress).toHaveLength(1);
+        const clears = recorder.events.filter((event) => event.type === 'clear');
+        expect(clears).toHaveLength(1);
+        expect(clears[0].handle).toBe(progress[0].handle);
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+    });
+
+    it('restores chat and Layer 0 when atomic post-mutation persistence fails', async () => {
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
+            makeMessage({ scId: 'assistant-id', mes: 'Assistant scene.' }),
+        ];
+        const originalChat = [...chat];
+        const metadata = { summaryception: makeSummaryStore() };
+        let metadataSaves = 0;
+        const saveMetadata = vi.fn(async () => {
+            metadataSaves++;
+            if (metadataSaves === 1) {
+                throw new Error('metadata write failed');
+            }
+        });
+        installSummaryContext({ chat, metadata, saveMetadata });
+        callSummarizer.mockResolvedValue({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        const partitions = [{ turns: [{ index: 1 }], sourceStartIdx: 1, sourceEndIdx: 1 }];
+
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, undefined)).rejects.toThrow(
             'metadata write failed',
         );
 

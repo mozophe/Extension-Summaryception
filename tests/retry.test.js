@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { RETRY_CONFIG, isRetryableError, parseRetryAfter, sleep } from '../src/foundation/retry.js';
+import { RETRY_CONFIG, isRetryableError, parseRetryAfter } from '../src/foundation/retry.js';
 
 describe('parseRetryAfter', () => {
     it('converts a numeric retry-after header string to milliseconds', () => {
@@ -60,18 +60,5 @@ describe('isRetryableError', () => {
     it('matches retryable message patterns case-insensitively and rejects unrelated messages', () => {
         expect(isRetryableError({ message: 'Rate limit exceeded' })).toBe(true);
         expect(isRetryableError({ message: 'invalid API key' })).toBe(false);
-    });
-});
-
-describe('sleep', () => {
-    it('resolves a promise with no real-timing assertion', async () => {
-        // Race sleep(0) against an already-settled promise to prove sleep returns
-        // a thenable that resolves; we do not assert wall-clock duration.
-        const marker = Promise.resolve('marker');
-        const result = await Promise.race([sleep(0).then(() => 'slept'), marker]);
-        // sleep(0) resolves on the microtask queue; we expect it to win or at
-        // least match; assert that sleep() itself returns a thenable.
-        expect(typeof sleep(0).then).toBe('function');
-        expect(['slept', 'marker']).toContain(result);
     });
 });

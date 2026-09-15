@@ -21,42 +21,50 @@ vi.mock('../src/core/summarization-routes.js', async (importOriginal) => ({
 vi.mock('../src/core/summarizer-batch.js', () => batchMocks);
 vi.mock('../src/foundation/state.js', () => stateMocks);
 vi.mock('../src/core/summarizer-promotion.js', () => ({
-    hasPromotionOverflow: vi.fn(async () => false),
-    maybePromoteLayer: vi.fn(async () => true),
-    drainPromotionOverflow: vi.fn(async () => 'normalized'),
+    drainPromotionOverflow: vi.fn(async () => ({ status: 'completed', attempts: 0 })),
 }));
 vi.mock('../src/core/persist-state.js', () => ({
     flushPendingChatSave: vi.fn(async () => {}),
     persistChatState: vi.fn(async () => {}),
 }));
-vi.mock('../src/core/summarizer-commit.js', () => ({
-    recoverStalePromptFreeze: vi.fn(async () => {}),
-    shouldStopPromptWork: vi.fn(() => false),
-}));
 vi.mock('../src/core/summary-preflight.js', () => ({
     prepareSummaryCycle: vi.fn(async () => ({ chat: [], store: {} })),
 }));
 
-import { runCatchup, runSlopBreaker } from '../src/core/summarizer-engine.js';
+import { resetCommitStateForTests } from '../src/core/summarizer-commit.js';
+import { ELASTIC_STRATEGIES, runManual } from '../src/core/summarizer-engine.js';
 import { installSummaryContext } from './test-helpers.js';
 
 const TARGET_INDEX = 5;
 let boundary = 0;
 
-describe('manual run progress callbacks', () => {
-    /** Build manual runner deps with a stub queue. */
-    function makeDeps() {
-        return {
-            queue: {
-                setPhase: vi.fn(),
-                setSummarizing: vi.fn(),
-                getIsSummarizing: vi.fn(() => true),
-            },
-            refreshUi: vi.fn(),
-            withUsageRun: vi.fn(async (_label, work) => await work()),
-        };
-    }
+/** Build manual runner deps with a stub queue. */
+function makeDeps() {
+    return {
+        queue: {
+            setPhase: vi.fn(),
+            setSummarizing: vi.fn(),
+            getIsSummarizing: vi.fn(() => true),
+        },
+        refreshUi: vi.fn(),
+        withUsageRun: vi.fn(async (_label, work) => await work()),
+    };
+}
 
+/** Build a ready single-batch force route plan. */
+function forceRoutePlan() {
+    return {
+        ready: true,
+        reason: 'ready',
+        commitMode: 'TURNS',
+        batchTurns: [{ index: 2 }],
+        partitions: [{}],
+        totalBatches: 1,
+        targetIndex: TARGET_INDEX,
+    };
+}
+
+describe('manual run progress callbacks', () => {
     /** Build a ready route plan; unready once the boundary reaches the target. */
     function stubRoutePlan(mock, plan) {
         mock.mockImplementation(async () => ({
@@ -68,6 +76,7 @@ describe('manual run progress callbacks', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        resetCommitStateForTests();
         installSummaryContext({ chat: [] });
         boundary = 0;
         stateMocks.getChatStore.mockReturnValue({});
@@ -76,24 +85,19 @@ describe('manual run progress callbacks', () => {
         // Committing one batch advances the summarized boundary to the target.
         batchMocks.summarizeBatchFromTurns.mockImplementation(async () => {
             boundary = TARGET_INDEX;
-            return true;
+            return { status: 'completed' };
         });
     });
 
     it('reports start and progress for force summarize', async () => {
-        stubRoutePlan(routeMocks.buildForceSummaryRoutePlan, {
-            ready: true,
-            reason: 'ready',
-            commitMode: 'TURNS',
-            batchTurns: [{ index: 2 }],
-            partitions: [{}],
-            totalBatches: 1,
-            rawPlan: { queuedEndIdx: TARGET_INDEX, visibleTurnCount: 4 },
-        });
+        stubRoutePlan(routeMocks.buildForceSummaryRoutePlan, forceRoutePlan());
         const onStart = vi.fn();
         const onProgress = vi.fn();
 
-        const outcome = await runCatchup(makeDeps(), { onStart, onProgress });
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {
+            onStart,
+            onProgress,
+        });
 
         expect(onStart).toHaveBeenCalledWith({
             completed: 0,
@@ -116,11 +120,10 @@ describe('manual run progress callbacks', () => {
             totalBatches: 1,
             sourceEndIdx: TARGET_INDEX,
             targetIndex: TARGET_INDEX,
-            rawPlan: {},
         });
         const onStart = vi.fn();
 
-        const outcome = await runSlopBreaker(makeDeps(), { onStart });
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.SLOP, { onStart });
 
         expect(onStart).toHaveBeenCalledWith({
             completed: 0,
@@ -133,23 +136,57 @@ describe('manual run progress callbacks', () => {
     });
 
     it('cancels before any batch when the signal is already aborted', async () => {
-        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue({
-            ready: true,
-            reason: 'ready',
-            commitMode: 'TURNS',
-            batchTurns: [{ index: 2 }],
-            partitions: [{}],
-            totalBatches: 1,
-            rawPlan: { queuedEndIdx: TARGET_INDEX, visibleTurnCount: 4 },
-        });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
         const controller = new AbortController();
         controller.abort();
 
-        const outcome = await runCatchup(makeDeps(), {
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {
             signal: controller.signal,
         });
 
         expect(outcome.cancelled).toBe(true);
         expect(batchMocks.summarizeBatchFromTurns).not.toHaveBeenCalled();
+    });
+});
+
+describe('manual run failure limit', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        resetCommitStateForTests();
+        installSummaryContext({ chat: [] });
+        stateMocks.getChatStore.mockReturnValue({});
+        stateMocks.getEffectiveSettings.mockReturnValue({});
+        stateMocks.getCurrentSummarizedBoundary.mockReturnValue(0);
+        // Every batch commit fails without moving the summarized boundary.
+        batchMocks.summarizeBatchFromTurns.mockResolvedValue({ status: 'failed' });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
+    });
+
+    it('stops the run after three consecutive batch failures', async () => {
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(outcome.failureLimitReached).toBe(true);
+        expect(outcome.failed).toBe(3);
+        expect(outcome.completed).toBe(0);
+        expect(outcome.fullyCommitted).toBe(false);
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(3);
+    });
+
+    it('halts as blocked when a completed batch does not move the boundary', async () => {
+        // Failure, then a completed batch whose boundary never moves, then two
+        // failures the halt must never reach.
+        batchMocks.summarizeBatchFromTurns
+            .mockResolvedValueOnce({ status: 'failed' })
+            .mockResolvedValueOnce({ status: 'completed' })
+            .mockResolvedValueOnce({ status: 'failed' })
+            .mockResolvedValueOnce({ status: 'failed' });
+
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(outcome.blocked).toBe(true);
+        expect(outcome.failureLimitReached).toBe(false);
+        expect(outcome.failed).toBe(1);
+        expect(outcome.completed).toBe(0);
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(2);
     });
 });

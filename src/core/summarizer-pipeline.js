@@ -1,16 +1,13 @@
-import { TOAST_TITLE, defaultSettings } from '../foundation/constants.js';
-import { warn, isTraceEnabled, trace } from '../foundation/logger.js';
+import { defaultSettings } from '../foundation/constants.js';
+import { isTraceEnabled, trace } from '../foundation/logger.js';
 import { getEffectiveSettings, getPlayerName } from '../foundation/state.js';
-import { appendLayer0PromptConstraints } from './layer0-compression.js';
 import {
-    applyChineseOutputPolicy,
-    cleanSummarizerOutput,
-    validateLayer0OutputSize,
-    validateSummarizerOutputIntegrity,
-} from './prompts.js';
+    appendLayer0PromptConstraints,
+    getLayer0SummaryTokenTarget,
+    isLayer0SizeGuardCall,
+} from './layer0-compression.js';
 import { estimateSummarizerUsage, recordSummarizerUsage } from './summarizer-usage.js';
 import { countTextTokens, formatTokenCount } from './token-count.js';
-import { getLayer0SummaryTokenTarget, isLayer0SizeGuardCall } from './layer0-compression.js';
 import {
     buildLayer0BudgetHint,
     countLayer0SourceBudget,
@@ -69,68 +66,6 @@ export async function buildSummarizerPipelineInput({
         prompt,
         repairPrompt,
         metadata: usageMetadata,
-    };
-}
-
-/**
- * Clean and validate a raw provider response.
- * @param {string} rawResult - Raw provider output
- * @param {ExtensionSettings} settings - Active settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata - Call metadata
- * @returns {Promise<{ status: 'success', text: string, error: null, repairFeedback: '' } | { status: 'empty' | 'cn-rejected' | 'integrity-rejected' | 'size-rejected', text: string, error: Error & { retryable?: boolean }, repairFeedback: string }>}
- */
-export async function processSummarizerResponse(rawResult, settings, metadata = {}) {
-    const cleanedResult = cleanSummarizerOutput((rawResult || '').trim(), {
-        stripStructuralMarkers: false,
-    });
-    const chinesePolicyResult = applyChineseOutputPolicy(cleanedResult, settings);
-
-    if (chinesePolicyResult.error) {
-        notifyChinesePolicyRejection(chinesePolicyResult.percent);
-        return {
-            status: 'cn-rejected',
-            text: '',
-            error: chinesePolicyResult.error,
-            repairFeedback: '',
-        };
-    }
-
-    if (!chinesePolicyResult.text) {
-        return {
-            status: 'empty',
-            text: '',
-            error: new Error('Empty response from summarizer'),
-            repairFeedback: '',
-        };
-    }
-
-    const integrityResult = validateSummarizerOutputIntegrity(chinesePolicyResult.text, metadata);
-    if (!integrityResult.valid) {
-        warn(integrityResult.error.message);
-        return {
-            status: 'integrity-rejected',
-            text: '',
-            error: integrityResult.error,
-            repairFeedback: '',
-        };
-    }
-
-    const sizeResult = await validateLayer0OutputSize(chinesePolicyResult.text, settings, metadata);
-    if (!sizeResult.valid) {
-        warn(sizeResult.error.message);
-        return {
-            status: 'size-rejected',
-            text: chinesePolicyResult.text,
-            error: sizeResult.error,
-            repairFeedback: sizeResult.repairFeedback,
-        };
-    }
-
-    return {
-        status: 'success',
-        text: sizeResult.text || chinesePolicyResult.text,
-        error: null,
-        repairFeedback: '',
     };
 }
 
@@ -306,6 +241,7 @@ function getStringSetting(value, fallback) {
  */
 function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metadata }) {
     const sourceState = metadata.sourceState || '(none)';
+    // replaceAll on purpose: every placeholder occurrence is replaced; user templates may repeat one.
     const prompt = template
         .replaceAll('{{player_name}}', getPlayerName())
         .replaceAll('{{context_str}}', contextStr || '(none yet)')
@@ -313,21 +249,4 @@ function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metad
         .replaceAll('{{story_txt}}', storyTxt)
         .replaceAll('{{state_schema}}', buildStateSchemaText(settings));
     return appendLayer0PromptConstraints(prompt, settings, metadata);
-}
-
-/**
- * Show the existing CN policy warning without coupling prompts.js to UI side effects.
- * @param {string | null} percent
- * @returns {void}
- */
-function notifyChinesePolicyRejection(percent) {
-    const displayPercent = percent || '?';
-    warn(
-        `Summarizer response rejected: CN ideographs were ${displayPercent}% of visible characters.`,
-    );
-    toastr.warning(
-        `Summarizer response contained too much CN text (${displayPercent}%). Retrying...`,
-        TOAST_TITLE,
-        { timeOut: 5000 },
-    );
 }

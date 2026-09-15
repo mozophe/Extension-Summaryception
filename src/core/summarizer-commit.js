@@ -35,37 +35,43 @@ import { getStreamingProcessor, isSendButtonInStopMode } from '../foundation/con
  * @property {string} kind - Human-readable effect type.
  * @property {(ctx: PromptEffectContext) => Promise<boolean> | boolean} apply - Applies the effect.
  */
+/** Silent default so pre-init gate calls stay no-ops. */
+const noOpCallback = () => {};
 
 let foregroundFrozen = false;
 let pendingCommits = [];
 let pendingPromptEffects = [];
-let updateInjectionCallback = null;
-let reassertInjectionCallback = null;
-let requeueCallback = null;
+/** @type {(options?: object) => void} */
+let updateInjectionCallback = noOpCallback;
+/** @type {() => void} */
+let reassertInjectionCallback = noOpCallback;
+/** @type {(reason: string) => void} */
+let requeueCallback = noOpCallback;
+let commitCallbacksInitialized = false;
 let generationEpoch = 0;
 let foregroundFreezeStartedAt = 0;
 let staleRecoveryPromise = null;
-
 const FOREGROUND_FREEZE_HEARTBEAT_GRACE_MS = 1000;
 
 /**
- * Register callbacks used by transaction commits.
+ * Register the callbacks used by transaction commits. The composition root
+ * initializes once; missing slots stay silent no-ops.
  * @param {object} callbacks
  * @param {(options?: object) => void} [callbacks.updateInjection]
  * @param {() => void} [callbacks.reassertInjection]
  * @param {(reason: string) => void} [callbacks.requeue]
  * @returns {void}
  */
-export function setCommitCallbacks({ updateInjection, reassertInjection, requeue } = {}) {
-    if (updateInjection) {
-        updateInjectionCallback = updateInjection;
+export function initCommitCallbacks({ updateInjection, reassertInjection, requeue }) {
+    if (commitCallbacksInitialized) {
+        throw new Error(
+            'initCommitCallbacks double init: wiring happens once at the composition root.',
+        );
     }
-    if (reassertInjection) {
-        reassertInjectionCallback = reassertInjection;
-    }
-    if (requeue) {
-        requeueCallback = requeue;
-    }
+    commitCallbacksInitialized = true;
+    updateInjectionCallback = updateInjection || noOpCallback;
+    reassertInjectionCallback = reassertInjection || noOpCallback;
+    requeueCallback = requeue || noOpCallback;
 }
 
 /**
@@ -193,8 +199,20 @@ export async function runPromptEffect(effect) {
  * Stop prompt-affecting work while foreground generation or queued effects need priority.
  * @returns {boolean}
  */
-export function shouldStopPromptWork() {
+function shouldStopPromptWork() {
     return isPromptMutationFrozen() || pendingCommits.length > 0 || pendingPromptEffects.length > 0;
+}
+
+/**
+ * Ask the foreground gate whether prompt-affecting work may start, first
+ * attempting to recover a stale freeze so a heal reopens the gate inline.
+ * @param {string} reason - Context for diagnostic logging
+ * @param {{ refreshUi?: () => void }} [options]
+ * @returns {Promise<'open'|'blocked'>}
+ */
+export async function promptWorkGate(reason, { refreshUi } = {}) {
+    await recoverStalePromptFreeze(reason, { refreshUi });
+    return shouldStopPromptWork() ? 'blocked' : 'open';
 }
 
 /**
@@ -246,9 +264,10 @@ export function resetPromptMutationGuard() {
  */
 export function resetCommitStateForTests() {
     resetPromptMutationGuard();
-    updateInjectionCallback = null;
-    reassertInjectionCallback = null;
-    requeueCallback = null;
+    updateInjectionCallback = noOpCallback;
+    reassertInjectionCallback = noOpCallback;
+    requeueCallback = noOpCallback;
+    commitCallbacksInitialized = false;
 }
 
 /**

@@ -11,35 +11,32 @@ import { cacheSettings, makeMessage } from './test-helpers.js';
 const NOW = Date.parse('2026-08-22T12:00:00Z');
 const TTL_MINUTES = 30;
 
-const planWithQueue = (turns = 5) => ({
+const planWithQueue = (turns = 5, queuedTokens = 4000) => ({
     eligibleTurns: Array.from({ length: turns }),
-    queuedTokens: 4000,
+    queuedTokens,
 });
 
 const minutesAgo = (minutes) => new Date(NOW - minutes * 60_000).toISOString();
 
 describe('evaluateStaleCacheAdvice', () => {
-    it.each([MEMORY_MODES.PREFIX_CACHE])(
-        '%s advises summarizing when the cache is stale',
-        (memoryMode) => {
-            const chat = [makeMessage({ sendDate: minutesAgo(75) })];
-            const advice = evaluateStaleCacheAdvice({
-                chat,
-                plan: planWithQueue(),
-                settings: cacheSettings({ memoryMode }),
-                now: NOW,
-            });
+    it('advises summarizing when the cache is stale under the prefix-cache mode', () => {
+        const chat = [makeMessage({ sendDate: minutesAgo(75) })];
+        const advice = evaluateStaleCacheAdvice({
+            chat,
+            plan: planWithQueue(),
+            settings: cacheSettings({ memoryMode: MEMORY_MODES.PREFIX_CACHE }),
+            now: NOW,
+        });
 
-            expect(advice).toMatchObject({
-                advise: true,
-                reason: 'stale',
-                staleMinutes: 75,
-                ttlMinutes: TTL_MINUTES,
-                queuedTurns: 5,
-                queuedTokens: 4000,
-            });
-        },
-    );
+        expect(advice).toMatchObject({
+            advise: true,
+            reason: 'stale',
+            staleMinutes: 75,
+            ttlMinutes: TTL_MINUTES,
+            queuedTurns: 5,
+            queuedTokens: 4000,
+        });
+    });
 
     it('withholds advice outside the cache modes', () => {
         const chat = [makeMessage({ sendDate: minutesAgo(75) })];
@@ -65,6 +62,31 @@ describe('evaluateStaleCacheAdvice', () => {
 
         expect(advice.advise).toBe(false);
         expect(advice.reason).toBe('queue-small');
+    });
+    it('withholds advice while queued tokens sit below a quarter of the queued budget', () => {
+        const chat = [makeMessage({ sendDate: minutesAgo(75) })];
+        const advice = evaluateStaleCacheAdvice({
+            chat,
+            plan: planWithQueue(5, 1000),
+            settings: cacheSettings(),
+            now: NOW,
+        });
+
+        expect(advice.advise).toBe(false);
+        expect(advice.reason).toBe('queue-thin');
+    });
+
+    it('advises once queued tokens reach exactly a quarter of the queued budget', () => {
+        const chat = [makeMessage({ sendDate: minutesAgo(75) })];
+        const advice = evaluateStaleCacheAdvice({
+            chat,
+            plan: planWithQueue(5, 1500),
+            settings: cacheSettings(),
+            now: NOW,
+        });
+
+        expect(advice.advise).toBe(true);
+        expect(advice.reason).toBe('stale');
     });
 
     it('treats the TTL boundary as stale', () => {
@@ -131,8 +153,10 @@ describe('getMessageTimestampMs', () => {
 });
 
 describe('isProviderCacheMode', () => {
-    it.each([MEMORY_MODES.PREFIX_CACHE])('%s relies on the provider cache', (memoryMode) => {
-        expect(isProviderCacheMode(cacheSettings({ memoryMode }))).toBe(true);
+    it('treats the prefix-cache mode as provider-cached', () => {
+        expect(isProviderCacheMode(cacheSettings({ memoryMode: MEMORY_MODES.PREFIX_CACHE }))).toBe(
+            true,
+        );
     });
 
     it('rejects the default mode', () => {

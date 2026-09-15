@@ -1,31 +1,27 @@
 import { TOAST_TITLE, layerLabel, listNonEmptyLayers } from '../foundation/constants.js';
+import { refreshUi } from '../foundation/refresh.js';
 import { getChatStore } from '../foundation/state.js';
+import { getSnippetDisplayMeta } from '../core/snippet-metadata.js';
 import {
     deleteSnippetAt,
     getSnippetRegenerationTarget,
     getSnippetTextAt,
+    isRegenerationCandidate,
     regenerateSnippetAt,
     updateSnippetTextAt,
 } from '../features/snippet-manager.js';
 import { showBusySummaryToast } from './ui-dialogs.js';
 import { ensureChild } from './ui-dom.js';
 
-let uiRefresher = null;
+let notifyAdapter = null;
 
 /**
- * Register the callback used to re-render the full UI after snippet mutations.
- * Registered by index.js to avoid a circular import with ui.js.
- * @param {() => void} callback
+ * Register the notify adapter used for snippet regeneration notices.
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
  * @returns {void}
  */
-export function initSnippetBrowser(callback) {
-    uiRefresher = callback;
-}
-
-function refreshUI() {
-    if (typeof uiRefresher === 'function') {
-        uiRefresher();
-    }
+export function initSnippetBrowser(notify) {
+    notifyAdapter = notify;
 }
 
 /**
@@ -105,18 +101,18 @@ function buildSnippetBrowserItem(snippet, layerIndex, snippetIndex) {
         snippetIndex,
         text: snippet.text,
         meta: getSnippetMeta(snippet),
-        canRedo: Boolean(layerIndex === 0 && snippet.sourceMessageIds?.length),
+        canRedo: isRegenerationCandidate(layerIndex, snippetIndex),
     };
 }
 
 function getSnippetMeta(snippet) {
-    const sourceCount = snippet.sourceMessageIds?.length || 0;
+    const { sourceCount, mergedCount, fromLayer, promoted } = getSnippetDisplayMeta(snippet);
     const rangeStr = sourceCount
         ? `${sourceCount} source messages`
-        : snippet.mergedCount
-          ? `merged ${snippet.mergedCount} from L${snippet.fromLayer}`
+        : mergedCount
+          ? `merged ${mergedCount} from L${fromLayer}`
           : '';
-    const seedStr = snippet.promoted ? ' promoted' : '';
+    const seedStr = promoted ? ' promoted' : '';
     return `${rangeStr}${seedStr}`;
 }
 
@@ -367,6 +363,7 @@ async function commitSnippetEdit(textarea, position) {
             timeOut: 1500,
         });
     }
+    // 'unchanged'/'missing'/'empty' stay silent: re-render restores truth; accidental Enter must not toast.
 }
 
 function resizeSnippetEdit(textarea) {
@@ -412,18 +409,15 @@ async function onSnippetDeleteClick() {
 
     const result = await deleteSnippetAt(position.layerIdx, position.snippetIdx);
     if (result.status === 'deleted') {
-        refreshUI();
+        refreshUi();
         toastr.info(`Snippet removed from Layer ${result.layerIndex}`, TOAST_TITLE);
     }
 }
 
 function handleRegenerationTargetStatus(target) {
-    if (target.status === 'ready') {
-        return true;
-    }
     if (target.status === 'busy') {
         showBusySummaryToast();
-        return false;
+        return;
     }
     if (target.status === 'unsupported') {
         toastr.warning(
@@ -432,13 +426,16 @@ function handleRegenerationTargetStatus(target) {
             { timeOut: 5000 },
         );
     }
-    return false;
 }
 
 async function runSnippetRegeneration(btn, position) {
     btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
     try {
-        const result = await regenerateSnippetAt(position.layerIdx, position.snippetIdx);
+        const result = await regenerateSnippetAt(
+            position.layerIdx,
+            position.snippetIdx,
+            notifyAdapter,
+        );
         handleRegenerationResult(result);
     } finally {
         btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-rotate-right');
@@ -447,7 +444,7 @@ async function runSnippetRegeneration(btn, position) {
 
 function handleRegenerationResult(result) {
     if (result.status === 'regenerated') {
-        refreshUI();
+        refreshUi();
         toastr.success(
             `Snippet regenerated for turns ${result.range[0]}-${result.range[1]}`,
             TOAST_TITLE,
@@ -457,6 +454,10 @@ function handleRegenerationResult(result) {
     }
     if (result.status === 'empty-source') {
         toastr.error('Source turns are empty - cannot regenerate.', TOAST_TITLE);
+    } else if (result.status === 'aborted') {
+        toastr.warning('Regeneration stopped - original snippet kept.', TOAST_TITLE);
+    } else if (result.status === 'blocked') {
+        toastr.warning('Regeneration blocked - original snippet kept.', TOAST_TITLE);
     } else if (result.status === 'failed') {
         toastr.error('Regeneration failed - original snippet kept.', TOAST_TITLE);
     } else if (result.status === 'busy') {

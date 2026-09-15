@@ -1,6 +1,11 @@
 /** @typedef {'idle' | 'layer0' | 'promoting' | 'yielding' | 'paused'} SummarizerQueuePhase */
 import { sleep } from '../foundation/retry.js';
-/** @typedef {'processed' | 'idle' | 'blocked' | 'failed'} SummarizerQueueCycleResult */
+import { refreshUi } from '../foundation/refresh.js';
+import { silentAdapter } from './notify.js';
+import { flushPendingChatSave } from './persist-state.js';
+import { runElasticAutoCycle } from './summarizer-engine.js';
+import { abortCurrentSummarizerRequest } from './summarizer-request.js';
+import { withUsageRun } from './summarizer-usage.js';
 
 /**
  * @typedef {object} SummarizerQueueContext
@@ -10,7 +15,7 @@ import { sleep } from '../foundation/retry.js';
 
 /**
  * @typedef {object} SummarizerQueueDependencies
- * @property {(ctx: SummarizerQueueContext) => Promise<SummarizerQueueCycleResult>} drainOneCycle - Runs one automatic queue cycle.
+ * @property {(ctx: SummarizerQueueContext) => Promise<import('./run-outcome.js').SummarizationRunOutcome>} drainOneCycle - Runs one automatic queue cycle.
  * @property {() => void} abort - Aborts the current summarizer request.
  * @property {() => void} refreshUi - Refreshes visible extension UI state.
  * @property {function(string, function(): Promise<*>): Promise<*>} withUsageRun - Runs work inside a usage accounting scope.
@@ -140,7 +145,7 @@ export class SummarizerQueue {
             this.pending = false;
             this.dirty = false;
             const result = await this.#drainReadyWork();
-            failed = result === 'failed';
+            failed = result.status === 'failed';
 
             if (failed) {
                 this.log?.('Summarization cycle failed; waiting for the next trigger.');
@@ -152,15 +157,15 @@ export class SummarizerQueue {
 
     /**
      * Drain ready automatic work until no immediate work remains.
-     * @returns {Promise<SummarizerQueueCycleResult>}
+     * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
      */
     async #drainReadyWork() {
         while (true) {
             const result = await this.drainOneCycle(this.context);
-            if (result === 'blocked') {
+            if (result.status === 'blocked') {
                 this.#setPhase('paused');
             }
-            if (result !== 'processed') {
+            if (result.status !== 'completed') {
                 return result;
             }
 
@@ -211,4 +216,64 @@ function isQueuePhase(phase) {
         phase === 'yielding' ||
         phase === 'paused'
     );
+}
+
+/** @type {import('./notify.js').NotifyAdapter} */
+let notifyAdapter = silentAdapter;
+
+/**
+ * The one summarizer queue instance, built from static core imports.
+ * @type {SummarizerQueue}
+ */
+export const summarizerQueue = new SummarizerQueue({
+    drainOneCycle: (queue) => runElasticAutoCycle(queue, { refreshUi, notify: notifyAdapter }),
+    abort: abortCurrentSummarizerRequest,
+    refreshUi,
+    withUsageRun,
+    yieldCycle: async () => {
+        await sleep(0);
+    },
+    afterDrain: flushPendingChatSave,
+});
+
+/**
+ * Queue or coalesce an automatic summarization request.
+ * @returns {Promise<void>}
+ */
+export function requestSummarization() {
+    return summarizerQueue.request();
+}
+
+/**
+ * Check whether a summarization cycle is currently running.
+ * @returns {boolean}
+ */
+export function getIsSummarizing() {
+    return summarizerQueue.getIsSummarizing();
+}
+
+/**
+ * Set the manual summarizing flag.
+ * @param {boolean} value
+ * @returns {void}
+ */
+export function setSummarizing(value) {
+    summarizerQueue.setSummarizing(value);
+}
+
+/**
+ * Abort the in-flight summarization request.
+ * @returns {void}
+ */
+export function abortSummarization() {
+    summarizerQueue.abort();
+}
+
+/**
+ * Register the notify adapter used by automatic summarization cycles.
+ * @param {import('./notify.js').NotifyAdapter | null | undefined} adapter - Toastr-backed adapter from entry, or a falsy value to reset to silent.
+ * @returns {void}
+ */
+export function setNotify(adapter) {
+    notifyAdapter = adapter || silentAdapter;
 }

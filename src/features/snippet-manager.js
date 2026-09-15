@@ -1,20 +1,20 @@
 import { getChat } from '../foundation/context.js';
-import { rangesFromSortedIndices, resolveScIdsToIndices } from '../foundation/message-identity.js';
-import { bumpSummaryStoreMutationEpoch, getChatStore, saveChatStore } from '../foundation/state.js';
+import { resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { getChatStore } from '../foundation/state.js';
 import { buildPassageFromRangeWithStats } from '../core/chatutils.js';
-import { unghostMessagesInRange } from '../core/ghosting.js';
-import { validateSummarizerOutputIntegrity } from '../core/prompts.js';
+import { validateSummarizerOutputIntegrity } from '../core/summarizer-output.js';
+import { commitSnippetMutation } from '../core/snippet-commit.js';
 import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
 import { parseSnippet } from '../core/summarizer-state.js';
-import { callSummarizer, getIsSummarizing, setSummarizing } from '../core/summarizer.js';
+import { callSummarizer } from '../core/summarizer-request.js';
+import { getIsSummarizing, setSummarizing } from '../core/summarizer-queue.js';
 import { withUsageRun } from '../core/summarizer-usage.js';
-import { refreshExtensionState } from './persist.js';
 
 /**
- * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, context: string }} RegenerationTarget
- * @typedef {{ status: 'missing' } | { status: 'unsupported' }} RegenerationUnavailable
- * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'empty-source' } | { status: 'unsupported' } | { status: 'failed' }} RegenerationRunResult
- * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' | 'empty-source' | 'failed' }} RegenerateSnippetResult
+ * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context?: string }} RegenerationTarget
+ * @typedef {{ status: 'missing' } | { status: 'unsupported' } | { status: 'busy' }} RegenerationUnavailable
+ * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'empty-source' } | { status: 'unsupported' } | { status: 'failed' } | { status: 'aborted' } | { status: 'blocked' }} RegenerationRunResult
+ * @typedef {{ status: 'regenerated', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' | 'empty-source' | 'failed' | 'aborted' | 'blocked' }} RegenerateSnippetResult
  */
 
 /**
@@ -32,29 +32,32 @@ export function getSnippetTextAt(layerIndex, snippetIndex) {
 }
 
 /**
- * Get the current source range that can be regenerated.
+ * Get the regeneration target for a snippet as seen by the UI.
  * @param {number} layerIndex
  * @param {number} snippetIndex
- * @returns {{ status: 'ready', range: [number, number] } | { status: 'missing' | 'unsupported' | 'busy' }}
+ * @returns {RegenerationTarget | RegenerationUnavailable}
  */
 export function getSnippetRegenerationTarget(layerIndex, snippetIndex) {
-    const snippet = getSnippetAt(getChatStore(), layerIndex, snippetIndex);
-    if (!snippet) {
-        return { status: 'missing' };
-    }
-    const indices = resolveScIdsToIndices(getChat(), snippet.sourceMessageIds);
-    if (
-        layerIndex !== 0 ||
-        indices.length === 0 ||
-        indices[indices.length - 1] - indices[0] + 1 !== indices.length
-    ) {
-        return { status: 'unsupported' };
-    }
-    if (getIsSummarizing()) {
-        return { status: 'busy' };
-    }
+    return resolveRegenerationTarget(getChatStore(), getChat(), { layerIndex, snippetIndex });
+}
 
-    return { status: 'ready', range: [indices[0], indices[indices.length - 1]] };
+/**
+ * Whether a snippet can be regenerated: a contiguous Layer 0 source range.
+ * True while summarization is busy; the click path reports busy.
+ * @param {number} layerIndex
+ * @param {number} snippetIndex
+ * @returns {boolean}
+ */
+export function isRegenerationCandidate(layerIndex, snippetIndex) {
+    const target = resolveRegenerationTarget(
+        getChatStore(),
+        getChat(),
+        { layerIndex, snippetIndex },
+        {
+            includeContext: false,
+        },
+    );
+    return target.status === 'ready' || target.status === 'busy';
 }
 
 /**
@@ -79,11 +82,12 @@ export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
         return { status: 'unchanged' };
     }
 
-    snippet.text = newText;
-    if (layerIndex === 0) {
-        Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
-    }
-    bumpSummaryStoreMutationEpoch(store);
+    await commitSnippetMutation(store, () => {
+        snippet.text = newText;
+        if (layerIndex === 0) {
+            Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
+        }
+    });
     return { status: 'updated' };
 }
 
@@ -100,25 +104,9 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
         return { status: 'missing' };
     }
 
-    const removed = layer[snippetIndex];
-    layer.splice(snippetIndex, 1);
-    bumpSummaryStoreMutationEpoch(store);
-
-    if (layerIndex === 0) {
-        const remainingIds = new Set(
-            store.layers.flatMap((snippets) =>
-                snippets.flatMap((snippet) => snippet.sourceMessageIds || []),
-            ),
-        );
-        const removedIds = new Set(removed.sourceMessageIds.filter((id) => !remainingIds.has(id)));
-        store.ghostedMessageIds = store.ghostedMessageIds.filter((id) => !removedIds.has(id));
-        const indices = resolveScIdsToIndices(getChat(), [...removedIds]);
-        for (const [start, end] of rangesFromSortedIndices(indices)) {
-            await unghostMessagesInRange(start, end);
-        }
-    }
-
-    await saveSnippetStore();
+    await commitSnippetMutation(store, () => {
+        layer.splice(snippetIndex, 1);
+    });
     return { status: 'deleted', layerIndex };
 }
 
@@ -126,22 +114,22 @@ export async function deleteSnippetAt(layerIndex, snippetIndex) {
  * Regenerate one Layer 0 snippet from its source turns.
  * @param {number} layerIndex
  * @param {number} snippetIndex
+ * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices; absent runs stay silent.
  * @returns {Promise<RegenerateSnippetResult>}
  */
-export async function regenerateSnippetAt(layerIndex, snippetIndex) {
-    const store = getChatStore();
-    const target = getRegenerationTarget(store, layerIndex, snippetIndex);
+export async function regenerateSnippetAt(layerIndex, snippetIndex, notify) {
+    const target = resolveRegenerationTarget(getChatStore(), getChat(), {
+        layerIndex,
+        snippetIndex,
+    });
     if (target.status !== 'ready') {
         return target;
-    }
-    if (getIsSummarizing()) {
-        return { status: 'busy' };
     }
 
     setSummarizing(true);
     try {
         return await withUsageRun('snippet regeneration', async () => {
-            return await regenerateSnippetWithTarget(target);
+            return await regenerateSnippetWithTarget(target, notify);
         });
     } finally {
         setSummarizing(false);
@@ -151,73 +139,90 @@ export async function regenerateSnippetAt(layerIndex, snippetIndex) {
 /**
  * Run the summarizer for a validated regeneration target.
  * @param {RegenerationTarget} target
+ * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices.
  * @returns {Promise<RegenerationRunResult>}
  */
-async function regenerateSnippetWithTarget(target) {
+async function regenerateSnippetWithTarget(target, notify) {
     const chat = getChat();
-    const indices = resolveScIdsToIndices(chat, target.snippet.sourceMessageIds);
-    if (indices.length === 0) {
-        return { status: 'empty-source' };
-    }
-    const rangeStart = indices[0];
-    const rangeEnd = indices[indices.length - 1];
-    if (rangeEnd - rangeStart + 1 !== indices.length) {
-        return { status: 'unsupported' };
-    }
-    const range = /** @type {[number, number]} */ ([rangeStart, rangeEnd]);
+    const [rangeStart, rangeEnd] = target.range;
     const passage = await buildPassageFromRangeWithStats(chat, rangeStart, rangeEnd);
     if (!passage.text.trim()) {
         return { status: 'empty-source' };
     }
 
-    const newSummary = await callSummarizer(passage.text, target.context, {
-        kind: 'regenerate',
-        sourceRange: range,
-        regexStats: passage.stats,
-    });
+    const outcome = await callSummarizer(
+        passage.text,
+        /** @type {string} */ (target.context),
+        {
+            kind: 'regenerate',
+            sourceRange: target.range,
+            regexStats: passage.stats,
+        },
+        notify,
+    );
 
-    if (!newSummary) {
-        return { status: 'failed' };
+    if (outcome.status !== 'completed') {
+        return { status: outcome.status };
     }
+    const newSummary = /** @type {string} */ (outcome.text);
     const integrityResult = validateSummarizerOutputIntegrity(newSummary, {
         kind: 'regenerate',
-        sourceRange: range,
+        sourceRange: target.range,
         regexStats: passage.stats,
     });
     if (!integrityResult.valid) {
         return { status: 'failed' };
     }
 
-    target.snippet.text = newSummary;
-    target.snippet.timestamp = Date.now();
-    target.snippet.regenerated = true;
-    Object.assign(target.snippet, buildSnippetMetadataFromState(parseSnippet(newSummary).state));
-    bumpSummaryStoreMutationEpoch(getChatStore());
-
-    await saveSnippetStore();
-    return { status: 'regenerated', range };
+    await commitSnippetMutation(getChatStore(), () => {
+        target.snippet.text = newSummary;
+        target.snippet.timestamp = Date.now();
+        target.snippet.regenerated = true;
+        Object.assign(
+            target.snippet,
+            buildSnippetMetadataFromState(parseSnippet(newSummary).state),
+        );
+    });
+    return { status: 'regenerated', range: target.range };
 }
 
 /**
- * Resolve a snippet into a regeneration target.
+ * Resolve a snippet into a regeneration target: the single source of truth
+ * shared by the UI check and the regeneration runner. A target is ready only
+ * for a contiguous Layer 0 source range while no summarization is running.
  * @param {SummaryceptionStore} store
- * @param {number} layerIndex
- * @param {number} snippetIndex
+ * @param {ChatMessage[]} chat
+ * @param {{ layerIndex: number, snippetIndex: number }} position
+ * @param {{ includeContext?: boolean }} [options] - Skip context building for status-only callers.
  * @returns {RegenerationTarget | RegenerationUnavailable}
  */
-function getRegenerationTarget(store, layerIndex, snippetIndex) {
+function resolveRegenerationTarget(store, chat, position, { includeContext = true } = {}) {
+    const { layerIndex, snippetIndex } = position;
     const snippet = getSnippetAt(store, layerIndex, snippetIndex);
     if (!snippet) {
         return { status: 'missing' };
     }
-    if (layerIndex !== 0 || !Array.isArray(snippet.sourceMessageIds)) {
+    const indices = Array.isArray(snippet.sourceMessageIds)
+        ? resolveScIdsToIndices(chat, snippet.sourceMessageIds)
+        : [];
+    if (
+        layerIndex !== 0 ||
+        indices.length === 0 ||
+        indices[indices.length - 1] - indices[0] + 1 !== indices.length
+    ) {
         return { status: 'unsupported' };
+    }
+    if (getIsSummarizing()) {
+        return { status: 'busy' };
     }
 
     return {
         status: 'ready',
         snippet,
-        context: buildSnippetContext(store, layerIndex, snippetIndex),
+        range: /** @type {[number, number]} */ ([indices[0], indices[indices.length - 1]]),
+        ...(includeContext
+            ? { context: buildSnippetContext(store, layerIndex, snippetIndex) }
+            : {}),
     };
 }
 
@@ -226,11 +231,6 @@ function getSnippetAt(store, layerIndex, snippetIndex) {
         return null;
     }
     return store.layers[layerIndex]?.[snippetIndex] || null;
-}
-
-async function saveSnippetStore() {
-    await saveChatStore();
-    refreshExtensionState({ injection: true, ui: false });
 }
 
 function buildSnippetContext(store, excludeLayerIndex, excludeSnippetIndex) {

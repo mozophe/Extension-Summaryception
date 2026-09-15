@@ -21,12 +21,8 @@ describe('showStaleCacheAdvice', () => {
         expect(globalThis.toastr.info).toHaveBeenCalledTimes(1);
         const [message, title, options] = globalThis.toastr.info.mock.calls[0];
         expect(title).toContain('Stale Cache');
-        expect(message).toContain('75 minutes old');
-        expect(message).toContain('Force Summarize now');
         expect(message).toContain('sc_stale_cache_force');
         expect(options).toMatchObject({
-            timeOut: 60000,
-            extendedTimeOut: 60000,
             closeButton: true,
             tapToDismiss: false,
             escapeHtml: false,

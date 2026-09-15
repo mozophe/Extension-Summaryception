@@ -122,6 +122,8 @@ export function serializeState(state) {
 /**
  * Normalize a generated state block to the bounded snapshot representation
  * used for current-state injection.
+ * Compaction is deterministic: the same input always compacts to the same block. Run it
+ * once per assembly.
  * @param {string} stateText - State body or a complete [STATE] block
  * @returns {string} A compact [STATE] block, or an empty string when no state parses
  */

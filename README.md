@@ -69,7 +69,7 @@ This mode works everywhere and keeps context size fairly steady. If cached input
 
 ### Prefix Cache
 
-Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat grow to 32k so more of each request can stay cached.
+Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat span 36k — 20k verbatim plus a 16k queued range — so more of each request can stay cached.
 
 Suppose the next request keeps the same start but changes the tail. A normal prefix cache can still reuse that unchanged start. Your usual lorebooks work normally; no migration or special outlet is needed.
 
@@ -114,7 +114,7 @@ There are three routes:
 - Merge for deeper Layer 1+ promotion work.
 - Fallback for retryable failures after the primary route gives up.
 
-OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Streaming responses must finish with `data: [DONE]`; incomplete streams are treated as failed attempts. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
+OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
 
 ## Slash commands
 
@@ -142,49 +142,11 @@ Older major versions are still available as branches. Open SillyTavern's extensi
 
 - **v22:** Big code refactor
 
-- **v20:** Stop now pauses. Modular [STATE] experiment
-- **v19:** Changed prompts so less repair needed (second LLM pass).
-- **v18:** Improved UI + tooltip.
-- **v17:** Replaced ever-growing accumulated state with bounded rolling snapshots, shortened chronology anchors to spend fewer tokens on bookkeeping, and made compression repair section-aware. Failed output can now be repaired one bad section at a time instead of taking the whole summary back to the workshop. Layer 0 and promotion paths also gained stricter size checks and type guards.
-- **v16:** Refactored summarization routes, split memory style from memory placement, added Macro Only placement, and added assistant-role masking for outgoing chat-completion requests. Retry and atomic commit handling were pulled into dedicated helpers, Layer 0 gained a size-repair guard, and the tuning UI was cleaned up around context estimates and cache behavior.
-- **v15:** UI and prompt tweaks.
-- **v14:** Easy mode. ~~Less~~ Fewer controls up front, ~~saner~~ safer defaults.
-- **v13:** Memory pyramid tuning, temporal anchors, stricter summary integrity checks, and better promotion compression repair. This is the line that stopped long memories from collapsing into tiny broken outputs or promoting into barely smaller summaries.
-- **v12:** Stability pass. Tested on long roleplay chats around 2,000 to 3,000 messages. Main pain point was oversized state.
-- **v11:** Chinese ideograph output filter and the first dual-track memory architecture. Summaries split into narrative and state, with state merged by overwrite during promotion.
-- **v10:** Settings UI and prompt editor update. Layer 0 and Layer 1+ prompts became separate and editable. Debug logging was refactored, and summarizer fallback routing was added.
-- **v9:** Elastic memory budget, dual LLM profiles, and Cache Friendly mode.
-- **v8:** Slop Breaker for manually summarizing recent chat when the model gets stuck repeating itself.
-- **v7:** Replaced raw turn counts with the Verbatim Token Budget slider and improved snippet editing.
-- **v6:** Major modular rewrite with speedups, background processing fixes, and global regex support.
-
-## Screenshots
-
-v15, need to redo it
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/f1fda4c0-282e-4bbf-8924-98755fb461e0" width="180" alt="1" />
-  <img src="https://github.com/user-attachments/assets/988a1227-7c43-4512-8256-67e8a98a8689" width="180" alt="2" />
-  <img src="https://github.com/user-attachments/assets/515f7249-6b29-402f-9979-120e9cbfd336" width="180" alt="3" />
-  <img src="https://github.com/user-attachments/assets/cd7a255c-4d52-4082-9e62-af6c40798a0a" width="180" alt="4" />
-  <img src="https://github.com/user-attachments/assets/88f5de03-4414-4b7d-8b1a-3bfa60b5d3f8" width="180" alt="5" />
-</p>
-
-<img src="img/kimi_connection_profile_1.png" width="900" alt="Kimi K3 setup #1" />
-
-<img src="img/kimi_connection_profile_2.png" width="900" alt="Kimi K3 setup #2" />
-
 ## Troubleshooting
 
-### Ext refuses to update
+Extension refuses to update: remove and install it again.
 
-Remove and install it again
-
-### Ext stopped working
-
-v20 -> v21 -> v22 was rough. Some settings could be reset to default or some other bugs. One of examples is instead of indexes, we now assign each message unique ID.
-
-It would be best if you "clear" memories (ui->tools). best way to update extention is when you start new RP. If you want stable work stick with named "vXX" branches.
+Major updates can reset settings or misbehave: clear memories before updating and stick to the named vXX branches.
 
 ## License
 

@@ -1,3 +1,5 @@
+import { SLIDER_LIMITS } from '../foundation/constants.js';
+import { clampToStep } from '../foundation/numeric.js';
 import { getSettings, saveSettings } from '../foundation/state.js';
 import { formatCompactTokenCount } from '../core/token-count.js';
 
@@ -22,6 +24,7 @@ export const SETTING_SLIDER_SELECTOR = 'input[type="range"][data-sc-slider-setti
  * @typedef {object} SliderSettingBindingOptions
  * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [beforeSave] - Optional hook before saving the slider value.
  * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [afterSave] - Optional hook after saving the slider value.
+ * @property {(settings: ReturnType<typeof getSettings>, value: number, source: object, key: string) => void} [afterSavePartner] - Optional hook after saving from the partner input; defaults to afterSave.
  */
 
 /**
@@ -105,13 +108,14 @@ export function syncDataSettingElements(selector, settings = getSettings()) {
  * @returns {void}
  */
 export function bindSliderSettingPairs(selector = SETTING_SLIDER_SELECTOR, options = {}) {
+    const partnerOptions = { ...options, afterSave: options.afterSavePartner ?? options.afterSave };
     for (const binding of collectSliderSettingBindings(selector)) {
         $(document).on('input', binding.sliderSelector, function () {
             writeSliderSetting(binding, $(this), options);
         });
 
         $(document).on('change blur', binding.partnerSelector, function () {
-            writeSliderSetting(binding, $(this), options);
+            writeSliderSetting(binding, $(this), partnerOptions);
         });
 
         $(document).on('focus', binding.partnerSelector, function () {
@@ -270,8 +274,7 @@ function getIdSelector($element) {
 
 function writeSliderSetting(binding, $source, options) {
     const settings = getSettings();
-    const $slider = $(binding.sliderSelector);
-    const value = normalizeSliderValue($source.val(), $slider);
+    const value = normalizeSliderValue($source.val(), binding.key);
     settings[binding.key] = value;
     options.beforeSave?.(settings, value, $source, binding.key);
     syncSliderSettingPairs(SETTING_SLIDER_SELECTOR, settings);
@@ -281,26 +284,23 @@ function writeSliderSetting(binding, $source, options) {
 
 function syncSliderSettingPair(binding, settings) {
     const $slider = $(binding.sliderSelector);
-    const value = normalizeSliderValue(settings[binding.key], $slider);
+    const value = normalizeSliderValue(settings[binding.key], binding.key);
     $slider.val(value);
     $(binding.partnerSelector).val(formatCompactTokenCount(value));
 }
 
 /**
- * Normalize a slider value to the paired range input's min, max, and step.
+ * Normalize a slider value against the declared SLIDER_LIMITS bounds for its
+ * setting. Bounds live in the shared map; the read-time settings normalizer
+ * stays the only enforcement.
  * @param {unknown} value
- * @param {object} slider jQuery-wrapped range input
+ * @param {string} key Settings key whose SLIDER_LIMITS entry applies
  * @returns {number}
  */
-function normalizeSliderValue(value, slider) {
-    const min = parseSliderAttr(slider, 'min', 0);
-    const max = parseSliderAttr(slider, 'max', min);
-    const step = parseSliderAttr(slider, 'step', 1);
-    const parsed = parseSliderInputValue(value, { min, step });
-    const base = Number.isFinite(parsed) ? parsed : min;
-    const clamped = Math.min(max, Math.max(min, base));
-    const snapped = min + Math.round((clamped - min) / step) * step;
-    return Math.round(Math.min(max, Math.max(min, snapped)));
+function normalizeSliderValue(value, key) {
+    const { MIN, MAX, STEP } = SLIDER_LIMITS[key];
+    const parsed = parseSliderInputValue(value, { min: MIN, step: STEP });
+    return clampToStep(parsed, MIN, MAX, STEP);
 }
 
 function parseSliderInputValue(value, { min, step }) {
@@ -316,11 +316,6 @@ function parseSliderInputValue(value, { min, step }) {
         return parsed * 1000;
     }
     return parsed;
-}
-
-function parseSliderAttr(slider, attr, fallback) {
-    const parsed = Number.parseFloat(String(slider.attr(attr)));
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 /**

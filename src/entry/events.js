@@ -2,28 +2,29 @@ import { getChat, isDryRunEvent } from '../foundation/context.js';
 import { debug, info, isDebugEnabled, warn } from '../foundation/logger.js';
 import { ensureChatScIds } from '../foundation/message-identity.js';
 import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
-import { repairMissingGhostingForSummaries } from '../core/ghosting-reconcile.js';
+import { refreshFull, refreshUi } from '../foundation/refresh.js';
+import { syncGhosting } from '../core/ghosting.js';
 import { maskUserRoleAsAssistantInGenerateData } from '../core/assistant-role-mask.js';
 import { evaluateStaleCacheAdvice, isProviderCacheMode } from '../core/cache-staleness.js';
 import { buildChatWindowPlan } from '../core/chat-window-planner.js';
 import {
     beginForegroundGeneration,
     endForegroundGeneration,
-    hasActiveAbortController,
-    hasFrozenPromptMutations,
-    maybeSummarizeTurns,
+    isPromptMutationFrozen,
     recoverStalePromptFreeze,
     resetPromptMutationGuard,
-} from '../core/summarizer.js';
+} from '../core/summarizer-commit.js';
+import { hasActiveAbortController } from '../core/summarizer-request.js';
+import { requestSummarization } from '../core/summarizer-queue.js';
 import { updateInjection } from '../features/injection.js';
-import { persistChatState } from '../core/persist-state.js';
+import { flushPendingChatSave, persistChatState } from '../core/persist-state.js';
 import { showStaleCacheAdvice } from './ui-dialogs.js';
-import { updateUI } from './ui.js';
 
 let previousPromptSectionHashes = [];
 
 /**
  * Log one prefix-stability verdict for each final, non-dry-run chat prompt.
+ * Both dry-run forms (payload flag, separate argument) are ignored before any comparison state updates.
  * @param {...unknown} args - CHAT_COMPLETION_PROMPT_READY event arguments.
  * @returns {void}
  */
@@ -138,8 +139,8 @@ export function onMessageReceived(messageIndex) {
         if (msg && !msg.is_user && !msg.is_system) {
             debug('New assistant message at index', messageIndex);
             setTimeout(async () => {
-                await maybeSummarizeTurns();
-                updateUI();
+                await requestSummarization();
+                refreshUi();
             }, 500);
         }
     } catch (e) {
@@ -200,6 +201,7 @@ export function onGenerationStarted(...args) {
     }
     info('Foreground generation start detected; freezing Summaryception prompt mutations.');
     beginForegroundGeneration();
+    refreshUi();
 }
 
 /**
@@ -207,7 +209,7 @@ export function onGenerationStarted(...args) {
  */
 export function onGenerationEnded() {
     const hasActiveSummaryRequest = hasActiveAbortController();
-    const hasFrozenMutations = hasFrozenPromptMutations();
+    const hasFrozenMutations = isPromptMutationFrozen();
 
     if (hasActiveSummaryRequest && !hasFrozenMutations) {
         debug('Ignoring generation end from active Summaryception request.');
@@ -219,13 +221,20 @@ export function onGenerationEnded() {
         `activeSummaryRequest=${hasActiveSummaryRequest}`,
         `frozen=${hasFrozenMutations}`,
     );
-    void endForegroundGeneration()
+    void (async () => {
+        try {
+            await endForegroundGeneration();
+            await flushPendingChatSave();
+            await requestSummarization();
+        } finally {
+            refreshUi();
+        }
+    })()
         .catch((error) => {
             warn('Error while ending foreground generation:', error);
         })
         .finally(() => {
-            updateInjection();
-            updateUI();
+            refreshFull();
         });
 }
 
@@ -261,7 +270,7 @@ function onVisibilityChange() {
 }
 
 function recoverPromptFreeze(reason) {
-    void recoverStalePromptFreeze(reason, { refreshUi: updateUI }).catch((error) => {
+    void recoverStalePromptFreeze(reason, { refreshUi }).catch((error) => {
         warn('Error while recovering foreground generation freeze:', error);
     });
 }
@@ -274,7 +283,7 @@ async function reconcileLoadedChatState() {
     }
     getChatStore();
     updateInjection();
-    await repairMissingGhostingForSummaries();
+    await syncGhosting();
 }
 
 /**
@@ -317,7 +326,7 @@ async function drainReconciliationQueue() {
     do {
         reconcileQueued = false;
         await reconcileLoadedChatState();
-        updateUI();
+        refreshUi();
     } while (reconcileQueued);
     await checkStaleCacheAdvice();
 }

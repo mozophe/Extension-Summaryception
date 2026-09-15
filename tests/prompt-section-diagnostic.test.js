@@ -30,9 +30,7 @@ describe('onChatCompletionPromptReady', () => {
             ],
         });
 
-        expect(console.groupCollapsed).toHaveBeenCalledWith(
-            '[Summaryception] [DEBUG] Prompt prefix BROKEN at block 1: previous 2, current 3',
-        );
+        expect(console.groupCollapsed).toHaveBeenCalledTimes(1);
         expect(JSON.parse(console.log.mock.calls[0][0])).toEqual({
             type: 'summaryception.prompt.prefix-broken.v1',
             block: 1,

@@ -106,67 +106,65 @@ export function error(...args) {
 }
 
 /**
+ * Read an HTTP status from an error-like object.
+ * @param {Error & { status?: number, statusCode?: number, response?: { status?: number } } | null} node
+ * @returns {number | null}
+ */
+function statusOf(node) {
+    return (
+        (node && (node.status || node.statusCode || (node.response && node.response.status))) ||
+        null
+    );
+}
+
+/**
+ * Read the caller-supplied retryable hint from an error-like object.
+ * @param {Error & { retryable?: boolean | (() => boolean) } | null} node
+ * @returns {boolean | null}
+ */
+function retryableOf(node) {
+    if (!node) {
+        return null;
+    }
+    if (typeof node.retryable === 'boolean') {
+        return node.retryable;
+    }
+    if (typeof node.retryable === 'function') {
+        return node.retryable();
+    }
+    return null;
+}
+
+/**
  * Coerce any thrown value into a plain object with the standard error fields.
+ * Procedure: Read the top-level fields, then walk the `cause` chain resolving
+ * the deepest informative message and the deepest status found at any level.
+ * Cyclic chains stop at the first revisited error.
  * @param {unknown} err - A thrown value. It can be an Error, a plain object, a string, or null.
  * @returns {{ name: string, message: string, status: number|null, retryable: boolean|null }}
  */
 export function serializeError(err) {
     const e =
-        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean | (() => boolean), response?: { status?: number } }} */ (
+        /** @type {Error & { status?: number, statusCode?: number, retryable?: boolean | (() => boolean), response?: { status?: number }, cause?: unknown }} */ (
             err
         );
+    let message = e && e.message ? e.message : String(e);
+    let status = statusOf(e);
+    const seen = new Set();
+    let cursor = /** @type {unknown} */ (e);
+    while (cursor && typeof cursor === 'object' && !seen.has(cursor)) {
+        seen.add(cursor);
+        const node = /** @type {typeof e} */ (cursor);
+        if (node.message) {
+            message = node.message;
+        }
+        status = statusOf(node) || status;
+        cursor = node.cause;
+    }
     return {
         name: (e && e.name) || 'Error',
-        message: e && e.message ? e.message : String(e),
-        status: (e && (e.status || e.statusCode || (e.response && e.response.status))) || null,
-        retryable:
-            e && typeof e.retryable === 'boolean'
-                ? e.retryable
-                : e && typeof e.retryable === 'function'
-                  ? e.retryable()
-                  : null,
+        message,
+        status,
+        retryable: retryableOf(e),
     };
-}
-
-/**
- * Trace visible/owned chat counts for ghosting diagnostics.
- * @param {ChatMessage[]} chat
- * @param {SummaryceptionStore} store
- * @returns {void}
- */
-export function debugVisibleTurns(chat, store) {
-    trace('=== DEBUG VISIBLE TURNS ===');
-    trace('  Total chat messages:', chat.length);
-
-    const ownedIds = new Set(store.ghostedMessageIds);
-    let visibleCount = 0;
-    let ghostedCount = 0;
-    let hiddenCount = 0;
-    const visibleIndices = [];
-
-    for (let i = 0; i < chat.length; i++) {
-        const message = chat[i];
-        if (!message) {
-            continue;
-        }
-        const owned = typeof message.sc_id === 'string' && ownedIds.has(message.sc_id);
-        const messageText = message.mes?.trim() || '';
-        if (!message.is_user && !message.is_system && !owned && messageText.length > 0) {
-            visibleCount++;
-            visibleIndices.push(i);
-        }
-        if (owned) {
-            ghostedCount++;
-        }
-        if (message.is_hidden || message.is_system) {
-            hiddenCount++;
-        }
-    }
-
-    trace('  Visible non-owned turns:', visibleCount);
-    trace('  Summaryception-owned turns:', ghostedCount);
-    trace('  Hidden/System turns:', hiddenCount);
-    trace('  First 10 visible indices:', visibleIndices.slice(0, 10));
-    trace('  Last 10 visible indices:', visibleIndices.slice(-10));
-    trace('=== END DEBUG ===');
 }

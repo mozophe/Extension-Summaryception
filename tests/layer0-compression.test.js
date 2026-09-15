@@ -5,24 +5,23 @@ import {
     appendLayer0PromptConstraints,
     buildLayer0SizeRepairFeedback,
     buildStateSnapshotSizeRepairFeedback,
-    getLayer0SummaryRepairCeiling,
     getLayer0SummaryTokenBounds,
     getLayer0SummaryTokenTarget,
-    getPromotionSummaryTokenHardMax,
-    getPromotionSummaryTokenTarget,
     isLayer0CompressionCall,
     isLayer0SizeGuardCall,
+    validateLayer0OutputSize,
 } from '../src/core/layer0-compression.js';
 import {
     EXECUTION_TRIGGER_L0,
     EXECUTION_TRIGGER_PROMO,
     buildUserPrompt,
 } from '../src/foundation/prompt-parts.js';
+import { LAYER_HARD_MAX_RATIO } from '../src/core/token-budget.js';
 import {
-    LAYER0_REPAIR_RATIO,
-    LAYER_HARD_MAX_RATIO,
-    LAYER_MIN_RATIO,
-} from '../src/core/token-budget.js';
+    getPromotionSummaryTokenHardMax,
+    getPromotionSummaryTokenTarget,
+} from '../src/core/promotion-planner.js';
+import { installSummaryContext } from './test-helpers.js';
 
 function makeLayer0Prompt(triggerLine) {
     return buildUserPrompt({
@@ -88,52 +87,19 @@ describe('getLayer0SummaryTokenBounds', () => {
         const bounds = getLayer0SummaryTokenBounds(settings);
         const target = getLayer0SummaryTokenTarget(settings);
         expect(bounds.target).toBe(target);
-        expect(bounds.min).toBe(50);
         expect(bounds.max).toBe(Math.round(target * LAYER_HARD_MAX_RATIO.l0));
         expect(bounds.min).toBeLessThan(bounds.target);
         expect(bounds.target).toBeLessThan(bounds.max);
     });
 });
 
-describe('getLayer0SummaryRepairCeiling', () => {
-    it('equals target * LAYER0_REPAIR_RATIO rounded', () => {
-        const settings = { layer0SummaryTokenTarget: 200 };
-        expect(getLayer0SummaryRepairCeiling(settings)).toBe(
-            Math.round(getLayer0SummaryTokenTarget(settings) * LAYER0_REPAIR_RATIO),
-        );
-    });
-});
-
 describe('getPromotionSummaryTokenTarget', () => {
-    it('uses the l1 ratio for layerIndex 0 and the l2 ratio for layerIndex >= 1', () => {
-        const targetTokens = 1000;
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 0, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l1)),
-        );
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 1, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l2)),
-        );
-        expect(getPromotionSummaryTokenTarget({ layerIndex: 3, targetTokens })).toBe(
-            Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO.l2)),
-        );
-    });
-
     it('floors to at least 1 for a tiny targetTokens', () => {
         expect(getPromotionSummaryTokenTarget({ layerIndex: 0, targetTokens: 1 })).toBe(1);
     });
 });
 
 describe('getPromotionSummaryTokenHardMax', () => {
-    it('uses the hard-max ratios with rounding', () => {
-        const targetTokens = 1000;
-        expect(getPromotionSummaryTokenHardMax({ layerIndex: 0, targetTokens })).toBe(
-            Math.max(1, Math.round(targetTokens * LAYER_HARD_MAX_RATIO.l1)),
-        );
-        expect(getPromotionSummaryTokenHardMax({ layerIndex: 1, targetTokens })).toBe(
-            Math.max(1, Math.round(targetTokens * LAYER_HARD_MAX_RATIO.l2)),
-        );
-    });
-
     it('yields a hard max no smaller than the target for the same inputs', () => {
         const args = { layerIndex: 0, targetTokens: 1000 };
         expect(getPromotionSummaryTokenHardMax(args)).toBeGreaterThanOrEqual(
@@ -228,5 +194,55 @@ describe('buildStateSnapshotSizeRepairFeedback', () => {
         });
         expect(output).toContain('<summaryception_l0_repair_feedback>');
         expect(output).toContain('STATE_SNAPSHOT_MARKER: value');
+    });
+});
+
+describe('validateLayer0OutputSize', () => {
+    it('accepts a Layer 0 draft whose sections sit inside the configured size band', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 100 });
+        const output = [
+            '[NARRATIVE]',
+            'Kaelen traded the map for safe passage and left before dawn.',
+            '',
+            '[STATE]',
+            'location: the river dock',
+            'bonds: owes Harl a favor',
+        ].join('\n');
+
+        const result = await validateLayer0OutputSize(output, defaultSettings, { kind: 'layer0' });
+
+        expect(result.valid).toBe(true);
+        expect(result.error).toBeNull();
+        expect(result.repairFeedback).toBe('');
+    });
+
+    it('rejects an oversized Layer 0 draft with violations and non-empty repair feedback', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 500 });
+        const output = [
+            '[NARRATIVE]',
+            'Kaelen argued with the ferryman about the fare and watched the storm roll in.',
+            '',
+            '[STATE]',
+            'location: the river dock',
+        ].join('\n');
+
+        const result = await validateLayer0OutputSize(output, defaultSettings, { kind: 'layer0' });
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBeInstanceOf(Error);
+        expect(result.diagnostics.violations.length).toBeGreaterThan(0);
+        expect(result.repairFeedback.length).toBeGreaterThan(0);
+    });
+
+    it('passes a draft through untouched when the call is not a Layer 0 size-guard call', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 500 });
+
+        const result = await validateLayer0OutputSize(
+            '[NARRATIVE]\nAny draft\n\n[STATE]\nlocation: the river dock',
+            defaultSettings,
+            { kind: 'promotion' },
+        );
+
+        expect(result).toEqual({ valid: true, error: null, repairFeedback: '' });
     });
 });

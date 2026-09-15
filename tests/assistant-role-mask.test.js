@@ -63,10 +63,14 @@ describe('maskUserRoleAsAssistantInGenerateData gating', () => {
 });
 
 describe('maskUserRoleAsAssistantInGenerateData payload shapes', () => {
-    it('rewrites a bare message array', () => {
+    it.each([
+        ['a bare message array', (messages) => messages],
+        ['generateData.prompt', (messages) => ({ prompt: messages })],
+        ['generateData.messages', (messages) => ({ messages })],
+    ])('rewrites user messages in %s', (_label, buildPayload) => {
         const messages = msgs();
         const rewritten = maskUserRoleAsAssistantInGenerateData(
-            messages,
+            buildPayload(messages),
             onSettings(MASK_USER_ROLE_MODES.MARKER_FIRST),
         );
         expect(rewritten).toBe(2);
@@ -74,34 +78,6 @@ describe('maskUserRoleAsAssistantInGenerateData payload shapes', () => {
             { role: 'assistant', content: 'a' },
             { role: 'assistant', content: 'c' },
         ]);
-    });
-
-    it('rewrites generateData.prompt', () => {
-        const prompt = msgs();
-        const rewritten = maskUserRoleAsAssistantInGenerateData(
-            { prompt },
-            onSettings(MASK_USER_ROLE_MODES.MARKER_FIRST),
-        );
-        expect(rewritten).toBe(2);
-        expect(
-            prompt
-                .filter((m) => m.content === 'a' || m.content === 'c')
-                .every((m) => m.role === 'assistant'),
-        ).toBe(true);
-    });
-
-    it('rewrites generateData.messages', () => {
-        const messages = msgs();
-        const rewritten = maskUserRoleAsAssistantInGenerateData(
-            { messages },
-            onSettings(MASK_USER_ROLE_MODES.MARKER_FIRST),
-        );
-        expect(rewritten).toBe(2);
-        expect(
-            messages
-                .filter((m) => m.content === 'a' || m.content === 'c')
-                .every((m) => m.role === 'assistant'),
-        ).toBe(true);
     });
 
     it('preserves reasoning fields while rewriting roles', () => {

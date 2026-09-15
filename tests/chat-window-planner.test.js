@@ -122,10 +122,10 @@ describe('buildChatWindowPlan', () => {
         expect(force.eligibleTurns).toHaveLength(0);
     });
 
-    it('splits all of the queued window into two and three balanced partitions', async () => {
-        const twoChat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
-        const two = await buildChatWindowPlan(
-            twoChat,
+    it('wires the queued window into partitions covering every eligible turn', async () => {
+        const chat = makeSizedChat(8, { userLength: 400, assistantLength: 400 });
+        const plan = await buildChatWindowPlan(
+            chat,
             makeSummaryStore(),
             windowSettings({
                 verbatimTokenBudget: 100,
@@ -134,20 +134,12 @@ describe('buildChatWindowPlan', () => {
                 maxL0SourceTokens: 4000,
             }),
         );
-        const threeChat = makeSizedChat(12, { userLength: 300, assistantLength: 300 });
-        const three = await buildChatWindowPlan(
-            threeChat,
-            makeSummaryStore(),
-            windowSettings({
-                verbatimTokenBudget: 100,
-                queuedTokenBudget: 800,
-                minSummaryBudget: 3000,
-                maxL0SourceTokens: 4000,
-            }),
+        // Balancing itself is owned by partition-planner.test.js; this only
+        // proves the wider seam produces non-empty, fully covering partitions.
+        expect(plan.partitions.length).toBeGreaterThan(0);
+        expect(plan.partitions.flatMap((part) => part.turns)).toHaveLength(
+            plan.eligibleTurns.length,
         );
-        expect(two.partitions).toHaveLength(2);
-        expect(three.partitions).toHaveLength(3);
-        expect(two.partitions.flatMap((part) => part.turns)).toHaveLength(two.eligibleTurns.length);
     });
 
     it('excludes non-conversation records from recent/queued accounting', async () => {

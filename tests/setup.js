@@ -1,4 +1,4 @@
-import { beforeEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 
 import { installSummaryContext } from './test-helpers.js';
 
@@ -63,7 +63,6 @@ const foundationMocks = vi.hoisted(() => {
         trace: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
-        debugVisibleTurns: vi.fn(),
     };
 
     function resetContext() {
@@ -203,12 +202,6 @@ const foundationMocks = vi.hoisted(() => {
         logger.error.mockImplementation((...args) => {
             console.error(LOG_PREFIX, ...args);
         });
-        logger.debugVisibleTurns.mockImplementation((chat, store) => {
-            logger.trace('=== DEBUG VISIBLE TURNS ===');
-            logger.trace('  store.ghostedMessageIds:', store.ghostedMessageIds);
-            logger.trace('  Total chat messages:', chat.length);
-            logger.trace('=== END DEBUG ===');
-        });
     }
 
     function reset() {
@@ -229,4 +222,14 @@ globalThis.summaryceptionFoundationMocks = foundationMocks;
 beforeEach(() => {
     foundationMocks.reset();
     installSummaryContext();
+});
+
+// Host display mocks are installed per test; clear only what a test installed.
+afterEach(() => {
+    if ('toastr' in globalThis) {
+        delete globalThis.toastr;
+    }
+    if ('$' in globalThis) {
+        delete globalThis.$;
+    }
 });

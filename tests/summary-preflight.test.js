@@ -53,7 +53,7 @@ describe('summary preflight', () => {
         installSummaryContext({ chat, saveChat, reloadCurrentChat });
         const queue = { setPhase: vi.fn() };
 
-        await expect(runElasticAutoCycle(queue)).resolves.toBe('idle');
+        await expect(runElasticAutoCycle(queue)).resolves.toEqual({ status: 'idle' });
 
         expect(chat.map((message) => message.sc_id)).toEqual(['user-id', 'wi-id', 'assistant-id']);
         expect(saveChat).not.toHaveBeenCalled();

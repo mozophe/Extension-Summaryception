@@ -1,4 +1,10 @@
-import { TOAST_TITLE } from '../foundation/constants.js';
+import { formatTokenValue } from '../core/token-count.js';
+import {
+    BATCH_PROGRESS,
+    GHOST_PROGRESS,
+    NOTIFY_EVENTS,
+    TOAST_TITLE,
+} from '../foundation/constants.js';
 
 /**
  * Show the Slop Breaker no-op toast.
@@ -209,6 +215,173 @@ export function confirmSlopBreaker() {
             resolve(false);
         });
     });
+}
+
+/**
+ * Display policy for one progress label: title subtitle, action text, and the
+ * every-N-items update cadence. Counted views render `text: done / total`
+ * lines; message views render one static string and ignore counts.
+ * @typedef {object} ProgressView
+ * @property {string} [subtitle] - Title suffix after the toast title; omitted renders the bare title.
+ * @property {string} [text] - Action text leading each counted progress line.
+ * @property {string} [message] - Static toast message; replaces counted lines.
+ * @property {boolean} [progressBar] - Show toastr's progress bar.
+ * @property {number} [everyN] - Render only when processed is a multiple of this (counted views only).
+ */
+
+/**
+ * Per-label progress display policy: title subtitle, action text, and the
+ * every-N-items update cadence. This is UI policy; core only reports counts.
+ * @type {Record<string, ProgressView>}
+ */
+const NOTIFY_PROGRESS_VIEWS = {
+    [GHOST_PROGRESS.HIDE]: { subtitle: 'Ghosting', text: 'Hiding messages', everyN: 1 },
+    [GHOST_PROGRESS.UNHIDE]: { subtitle: 'Clearing', text: 'Unhiding messages', everyN: 10 },
+    [BATCH_PROGRESS.MEMORY]: { message: 'Updating conversation memory…', progressBar: true },
+};
+
+/**
+ * Fallback display policy for unknown progress labels: 'Working' title
+ * subtitle and action text, updated on every event.
+ * @type {ProgressView}
+ */
+const DEFAULT_PROGRESS_VIEW = { subtitle: 'Working', text: 'Working', everyN: 1 };
+
+/**
+ * Per-kind terminal notice policy for progress clears (ADR-0004): rendered
+ * right after the progress toast closes. Unknown kinds close silently.
+ * @type {Record<string, () => void>}
+ */
+const NOTIFY_TERMINAL_VIEWS = {
+    [BATCH_PROGRESS.UPDATED]: () =>
+        toastr.success('Conversation memory updated.', TOAST_TITLE, { timeOut: 3000 }),
+    [BATCH_PROGRESS.ABORTED]: () =>
+        toastr.warning('Conversation memory update stopped.', TOAST_TITLE, { timeOut: 3000 }),
+    [BATCH_PROGRESS.FAILED]: () =>
+        toastr.warning('Conversation memory was not updated.', TOAST_TITLE, { timeOut: 3000 }),
+    [GHOST_PROGRESS.UNHIDDEN]: () =>
+        toastr.success('Chat restored.', TOAST_TITLE, { timeOut: 3000 }),
+};
+
+/**
+ * Fixed display duration for retry warnings. Independent of the backoff wait,
+ * which lives in retry policy (ADR-0004).
+ */
+const RETRY_NOTICE_MS = 5000;
+
+/**
+ * Per-kind transient notice policy (ADR-0004): severity, fixed display
+ * duration, and phrasing built from the event's structured payload. Durations
+ * never derive from core wait times; unknown kinds stay silent.
+ * @type {Record<string, (event: import('../core/notify.js').NotifyTransientEvent) => void>}
+ */
+const NOTIFY_TRANSIENT_VIEWS = {
+    [NOTIFY_EVENTS.RUN_ABORTED]: () =>
+        toastr.warning('Summarization stopped.', TOAST_TITLE, { timeOut: 3000 }),
+    [NOTIFY_EVENTS.RUN_FAILED]: (event) =>
+        toastr.error(
+            `Summarization failed` +
+                `${event.retriesExhausted ? ` after ${event.attempts} attempts` : ''}` +
+                `${event.status ? ` (${event.status})` : ''}. Batch skipped; will retry on next trigger.`,
+            TOAST_TITLE,
+            { timeOut: 8000 },
+        ),
+    [NOTIFY_EVENTS.EASY_GUARD_BLOCKED]: (event) =>
+        toastr.error(
+            `Easy mode blocked ${event.label}: summarizer request is ` +
+                `${formatTokenValue(event.tokens, event.estimated)} tokens, above the ` +
+                `${formatTokenValue(event.limit)} Easy Summarizer Context cap. ` +
+                'Raise the Easy context slider or switch to Advanced.',
+            TOAST_TITLE,
+            { timeOut: 10000 },
+        ),
+    [NOTIFY_EVENTS.RETRY_WAIT]: (event) =>
+        toastr.warning(
+            `Summarizer request failed. Retrying (attempt ${(event.attempt ?? 0) + 1} of ${event.maxRetries ?? 0})...`,
+            TOAST_TITLE,
+            { timeOut: RETRY_NOTICE_MS },
+        ),
+    [NOTIFY_EVENTS.ROUTE_CYCLE_WAIT]: () =>
+        toastr.warning('Both summarizer routes failed. Retrying primary...', TOAST_TITLE, {
+            timeOut: RETRY_NOTICE_MS,
+        }),
+    [NOTIFY_EVENTS.LANGUAGE_MIX_RETRY]: (event) =>
+        toastr.warning(
+            `Summarizer response contained too much CN text (${event.percent ?? '?'}%). Retrying...`,
+            TOAST_TITLE,
+            { timeOut: RETRY_NOTICE_MS },
+        ),
+    [NOTIFY_EVENTS.PROMOTION_STARTED]: (event) =>
+        toastr.info(
+            `Promoting ${event.mergedCount} memories: Layer ${event.fromLayer} -> ` +
+                `Layer ${event.toLayer}`,
+            TOAST_TITLE,
+            { timeOut: 3000, progressBar: true },
+        ),
+};
+
+/**
+ * Handle for an open notify progress toast: the toastr element, the matched
+ * display policy, and the total used for counted progress lines.
+ * @typedef {object} ToastrProgressHandle
+ * @property {object} toast - Active toastr element.
+ * @property {ProgressView} view - Matched display policy for the label.
+ * @property {number} total - Total items reported by the progress event.
+ */
+
+/**
+ * Build the toastr-backed notify adapter (ADR-0004). Display durations and
+ * update cadence live here; events carry structured data only.
+ * @returns {import('../core/notify.js').NotifyAdapter}
+ */
+export function createToastrNotifyAdapter() {
+    return {
+        transient(event) {
+            const kind = /** @type {string} */ (event?.kind);
+            const view = NOTIFY_TRANSIENT_VIEWS[kind];
+            if (view) {
+                view(/** @type {import('../core/notify.js').NotifyTransientEvent} */ (event));
+            }
+        },
+        progress(event) {
+            const view = NOTIFY_PROGRESS_VIEWS[event.label] || DEFAULT_PROGRESS_VIEW;
+            const toast = toastr.info(
+                view.message ?? `${view.text}: 0 / ${event.total}`,
+                view.subtitle ? `${TOAST_TITLE} - ${view.subtitle}` : TOAST_TITLE,
+                {
+                    timeOut: 0,
+                    extendedTimeOut: 0,
+                    tapToDismiss: false,
+                    ...(view.progressBar ? { progressBar: true } : {}),
+                },
+            );
+            return { toast, view, total: event.total };
+        },
+        update(handle, event) {
+            if (!handle) {
+                return;
+            }
+            const progress = /** @type {ToastrProgressHandle} */ (handle);
+            if (!progress.view.everyN || event.processed % progress.view.everyN !== 0) {
+                return;
+            }
+            const pct = Math.round((event.processed / progress.total) * 100);
+            $(progress.toast)
+                .find('.toast-message')
+                .text(`${progress.view.text}: ${event.processed} / ${progress.total} (${pct}%)`);
+        },
+        clear(handle, event) {
+            if (handle) {
+                toastr.clear(/** @type {ToastrProgressHandle} */ (handle).toast);
+            }
+            const terminal = event?.kind
+                ? NOTIFY_TERMINAL_VIEWS[/** @type {string} */ (event.kind)]
+                : null;
+            if (terminal) {
+                terminal();
+            }
+        },
+    };
 }
 
 /**

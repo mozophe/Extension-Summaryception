@@ -1,133 +1,59 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MEMORY_MODES } from '../src/foundation/constants.js';
-import { bindDataSettingElements, readLines } from '../src/entry/ui-bind.js';
+import { estimateContextPreview } from '../src/core/token-budget.js';
+import {
+    bindDataSettingElements,
+    bindSliderSettingPairs,
+    readLines,
+} from '../src/entry/ui-bind.js';
 import { getSettings } from '../src/foundation/state.js';
-import { buildMainContextPreviewModel, buildTriggerGaugeModel } from '../src/entry/ui.js';
-import { installSummaryContext } from './test-helpers.js';
+import { buildTriggerGaugeModel } from '../src/entry/ui-view-models.js';
+import { createJQueryHarness, installSummaryContext } from './test-helpers.js';
+
+vi.mock('../src/entry/ui.js', async (importOriginal) => ({
+    ...(await importOriginal()),
+    updateUI: vi.fn(),
+}));
 
 describe('context limit and trigger gauge UI models', () => {
-    it('builds the main-request range from memory, verbatim, and queued budgets for both modes', () => {
-        const base = {
-            memoryTokenBudget: 10000,
-            verbatimTokenBudget: 16000,
-            queuedTokenBudget: 32000,
-        };
+    it('builds the context preview estimates from token budgets and defaults', () => {
         expect(
-            buildMainContextPreviewModel({ ...base, memoryMode: MEMORY_MODES.BALANCED }),
+            estimateContextPreview({
+                memoryTokenBudget: 10000,
+                verbatimTokenBudget: 16000,
+                queuedTokenBudget: 32000,
+            }),
         ).toEqual({
             rawChatMin: 16000,
             rawChatMax: 48000,
             mainMin: 26000,
             mainMax: 58000,
-        });
-        expect(
-            buildMainContextPreviewModel({ ...base, memoryMode: MEMORY_MODES.PREFIX_CACHE }),
-        ).toEqual({
-            rawChatMin: 16000,
-            rawChatMax: 48000,
-            mainMin: 26000,
-            mainMax: 58000,
+            l0Typical: 28000,
+            l0Max: 36000,
+            l1Total: 6840,
         });
     });
 
-    it('builds the queued gauge from queued planner stats and the queued budget', () => {
+    it('builds the queued gauge from the auto work read model and the queued budget', () => {
         expect(
             buildTriggerGaugeModel(
-                {
-                    rawPlan: { queuedStats: { finalTokens: 4321.2, finalTokensEstimated: true } },
-                },
+                { queuedTokens: 4321.2, queuedEstimated: true },
                 { queuedTokenBudget: 16000 },
             ),
-        ).toEqual({
+        ).toMatchObject({
             queuedTokens: 4322,
             queuedEstimated: true,
             triggerTokens: 16000,
-            label: 'Summarize at Recent + Queued',
         });
     });
 });
 
-/**
- * Minimal jQuery stand-in for the binding engine: string selectors resolve by
- * exact match against the registered elements (comma lists supported).
- * @param {Array<{ selector: string, attrs: Record<string, string>, value?: string }>} elements
- * @returns {{ $: (target: unknown) => unknown, element: (selector: string) => object, fire: (selector: string, eventName: string) => void }}
- */
-function makeSettingsDomStub(elements) {
-    const handlers = new Map();
-    const wrapperBySelector = new Map();
-    const wrapperByNode = new Map();
-    for (const spec of elements) {
-        const state = { attrs: { ...spec.attrs }, value: spec.value ?? '', props: {} };
-        const node = {};
-        const wrapper = {
-            attr(name) {
-                return state.attrs[name];
-            },
-            is(selector) {
-                return selector === ':checkbox' && state.attrs.type === 'checkbox';
-            },
-            on(eventName, handler) {
-                handlers.set(`${spec.selector}|${eventName}`, handler);
-                return wrapper;
-            },
-            prop(name, nextValue) {
-                if (arguments.length === 1) {
-                    return state.props[name];
-                }
-                state.props[name] = nextValue;
-                return wrapper;
-            },
-            val(...args) {
-                if (args.length === 0) {
-                    return state.value;
-                }
-                state.value = args[0];
-                return wrapper;
-            },
-            each(callback) {
-                callback.call(node, 0, node);
-                return wrapper;
-            },
-        };
-        wrapperBySelector.set(spec.selector, wrapper);
-        wrapperByNode.set(node, wrapper);
-    }
-    const $ = (target) => {
-        if (typeof target !== 'string') {
-            return wrapperByNode.get(target);
-        }
-        const matched = String(target)
-            .split(',')
-            .map((part) => part.trim())
-            .map((part) => wrapperBySelector.get(part))
-            .filter(Boolean);
-        return {
-            each(callback) {
-                matched.forEach((wrapper, index) => {
-                    const node = [...wrapperByNode.entries()].find(([, w]) => w === wrapper)?.[0];
-                    callback.call(node, index, node);
-                });
-            },
-        };
-    };
-    return {
-        $,
-        element: (selector) => wrapperBySelector.get(selector),
-        fire(selector, eventName) {
-            const handler = handlers.get(`${selector}|${eventName}`);
-            if (!handler) {
-                throw new Error(`No ${eventName} handler bound for ${selector}`);
-            }
-            handler();
-        },
-    };
-}
-
 describe('data-attr setting binding engine', () => {
     beforeEach(() => {
         installSummaryContext({ settings: { debugMode: false, stripPatterns: [] } });
+    });
+    afterEach(() => {
+        delete globalThis.document;
     });
 
     it('reads textarea content as trimmed non-empty lines', () => {
@@ -140,34 +66,36 @@ describe('data-attr setting binding engine', () => {
     });
 
     it('binds checkbox settings from data attributes on change and syncs at bind time', () => {
-        const dom = makeSettingsDomStub([
-            {
-                selector: '#sc_debug_mode',
-                attrs: { type: 'checkbox', 'data-sc-setting': 'debugMode' },
+        const dom = createJQueryHarness({
+            attributes: {
+                '#sc_debug_mode': { type: 'checkbox', 'data-sc-setting': 'debugMode' },
             },
-        ]);
+        });
         globalThis.$ = dom.$;
 
         bindDataSettingElements('#sc_debug_mode', { eventName: 'change' });
 
         expect(dom.element('#sc_debug_mode').prop('checked')).toBe(false);
-        expect(() => dom.fire('#sc_debug_mode', 'input')).toThrow('No input handler');
+        expect(() => dom.trigger('input', '#sc_debug_mode')).toThrow(
+            'No handler registered for input',
+        );
         dom.element('#sc_debug_mode').prop('checked', true);
-        dom.fire('#sc_debug_mode', 'change');
+        dom.trigger('change', '#sc_debug_mode');
         expect(getSettings().debugMode).toBe(true);
     });
 
     it('binds lines and plain string settings from their declared data types', () => {
-        const dom = makeSettingsDomStub([
-            {
-                selector: '#sc_strip_patterns',
-                attrs: { 'data-sc-setting': 'stripPatterns', 'data-sc-type': 'lines' },
+        const dom = createJQueryHarness({
+            attributes: {
+                '#sc_strip_patterns': {
+                    'data-sc-setting': 'stripPatterns',
+                    'data-sc-type': 'lines',
+                },
+                '#sc_custom_memory_position': {
+                    'data-sc-setting': 'customMemoryPosition',
+                },
             },
-            {
-                selector: '#sc_custom_memory_position',
-                attrs: { 'data-sc-setting': 'customMemoryPosition' },
-            },
-        ]);
+        });
         globalThis.$ = dom.$;
         const afterSave = vi.fn();
 
@@ -177,10 +105,75 @@ describe('data-attr setting binding engine', () => {
         });
 
         dom.element('#sc_strip_patterns').val('  foo\n\nbar ');
-        dom.fire('#sc_strip_patterns', 'change');
-        dom.fire('#sc_custom_memory_position', 'change');
+        dom.trigger('change', '#sc_strip_patterns');
+        dom.trigger('change', '#sc_custom_memory_position');
         expect(getSettings().stripPatterns).toEqual(['foo', 'bar']);
         expect(getSettings().customMemoryPosition).toBe('in_prompt');
         expect(afterSave).toHaveBeenCalledTimes(2);
+    });
+
+    it('clamps slider writes to SLIDER_LIMITS bounds, not the template attributes', () => {
+        const dom = createJQueryHarness({
+            attributes: {
+                'input[type="range"][data-sc-slider-setting]': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    'data-sc-slider-setting': 'memoryTokenBudget',
+                    'data-sc-partner-input': '#sc_memory_token_budget_val',
+                },
+                '#sc_memory_token_budget': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    // Intentionally stale drift: the template says max 16000,
+                    // SLIDER_LIMITS.memoryTokenBudget.MAX is 32000.
+                    min: '4000',
+                    max: '16000',
+                    step: '1000',
+                },
+                '#sc_memory_token_budget_val': { type: 'text' },
+            },
+        });
+        globalThis.$ = dom.$;
+        globalThis.document = {};
+
+        bindSliderSettingPairs();
+
+        dom.element('#sc_memory_token_budget_val').val('24k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(24000);
+
+        dom.element('#sc_memory_token_budget_val').val('99k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(32000);
+    });
+
+    it('round-trips slider writes when the template attributes match the declared bounds', () => {
+        const dom = createJQueryHarness({
+            attributes: {
+                'input[type="range"][data-sc-slider-setting]': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    'data-sc-slider-setting': 'memoryTokenBudget',
+                    'data-sc-partner-input': '#sc_memory_token_budget_val',
+                },
+                '#sc_memory_token_budget': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    min: '4000',
+                    max: '32000',
+                    step: '1000',
+                },
+                '#sc_memory_token_budget_val': { type: 'text' },
+            },
+        });
+        globalThis.$ = dom.$;
+        globalThis.document = {};
+
+        bindSliderSettingPairs();
+
+        dom.element('#sc_memory_token_budget_val').val('24k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(24000);
+        expect(dom.element('#sc_memory_token_budget').val()).toBe(24000);
     });
 });

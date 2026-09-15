@@ -143,6 +143,33 @@ export function makeToastrMock() {
     };
 }
 
+/**
+ * Build a silent notify adapter that records every structured event
+ * (ADR-0004 seam). Events are flat records: `type` plus the structured payload.
+ * @returns {{ events: Array<object>, transient: (event: object) => void, progress: (event: object) => object, update: (handle: unknown, event: object) => void, clear: (handle: unknown, event?: object) => void }}
+ */
+export function makeNotifyRecorder() {
+    const events = [];
+    let nextHandleId = 0;
+    return {
+        events,
+        transient(event) {
+            events.push({ type: 'transient', ...event });
+        },
+        progress(event) {
+            const handle = { id: ++nextHandleId };
+            events.push({ type: 'progress', label: event.label, total: event.total, handle });
+            return handle;
+        },
+        update(handle, event) {
+            events.push({ type: 'update', handle, processed: event.processed });
+        },
+        clear(handle, event) {
+            events.push({ type: 'clear', handle, event });
+        },
+    };
+}
+
 /** Install minimal browser globals expected by entry/UI-adjacent modules. */
 export function installBrowserRuntimeStub(opts = {}) {
     const toastr = makeToastrMock();
@@ -202,6 +229,13 @@ export function createJQueryHarness({ attributes = {}, collections = {} } = {}) 
         if (typeof target === 'string') {
             if (Object.hasOwn(collections, target)) {
                 return createJQueryHarnessCollection(collections[target].map(element));
+            }
+            const selectors = String(target)
+                .split(',')
+                .map((part) => part.trim())
+                .filter(Boolean);
+            if (selectors.length > 1) {
+                return createJQueryHarnessCollection(selectors.map(element));
             }
             if (target.startsWith('<')) {
                 return createJQueryHarnessElement({
@@ -284,6 +318,21 @@ export function installSummaryContext(opts = {}) {
         settings: makeSummarySettings(settings),
         getTokenCountAsync: getTokenCountAsync || (async (text) => String(text || '').length),
         ...rest,
+    });
+}
+
+/**
+ * Install a context whose Layer 0 exceeds its token quota (24 ~150-char
+ * snippets vs. a 2400-token quota under the length-based test tokenizer).
+ */
+export function installOverflowingStore() {
+    const snippets = Array.from({ length: 24 }, (_, i) => ({
+        text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}\n[STATE]\nlocation: room${i}`,
+        sourceMessageIds: [`msg-${i}`],
+    }));
+    installSummaryContext({
+        metadata: { summaryception: makeSummaryStore({ layers: [snippets] }) },
+        settings: makeSummarySettings({ memoryTokenBudget: 4000 }),
     });
 }
 
@@ -386,6 +435,9 @@ function createJQueryHarnessElement({ selector, attributes = {}, handlers, visib
             }
             state.props[name] = nextValue;
             return api;
+        },
+        is(selector) {
+            return selector === ':checkbox' && state.attrs.type === 'checkbox';
         },
         attr(name, nextValue) {
             if (arguments.length === 1) {

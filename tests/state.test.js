@@ -1,21 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-    CACHE_TTL,
     MEMORY_MODE_PRESETS,
     MEMORY_MODES,
+    SLIDER_LIMITS,
     UI_MODES,
     applyMemoryModePreset,
     defaultSettings,
 } from '../src/foundation/constants.js';
 import {
     bumpSummaryStoreMutationEpoch,
+    collectSnippetSourceIds,
     getChatStore,
     getCurrentSummarizedBoundary,
     getEffectiveSettings,
     getPlayerName,
     getSettings,
     getSummaryStoreMutationEpoch,
+    resetSettingsToDefaults,
 } from '../src/foundation/state.js';
 import {
     installSummaryContext,
@@ -64,8 +66,8 @@ describe('memory mode budgets', () => {
             settings: { verbatimTokenBudget: 999, queuedTokenBudget: 999999 },
         });
         expect(getSettings()).toMatchObject({
-            verbatimTokenBudget: 4000,
-            queuedTokenBudget: 64000,
+            verbatimTokenBudget: SLIDER_LIMITS.verbatimTokenBudget.MIN,
+            queuedTokenBudget: SLIDER_LIMITS.queuedTokenBudget.MAX,
         });
     });
 
@@ -79,10 +81,10 @@ describe('memory mode budgets', () => {
 
     it('defaults and clamps the provider cache TTL', () => {
         installSummaryContext({ settings: { cacheTtlMinutes: 9999 } });
-        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.MAX_MINUTES);
+        expect(getSettings().cacheTtlMinutes).toBe(SLIDER_LIMITS.cacheTtlMinutes.MAX);
 
         installSummaryContext({ settings: {} });
-        expect(getSettings().cacheTtlMinutes).toBe(CACHE_TTL.DEFAULT_MINUTES);
+        expect(getSettings().cacheTtlMinutes).toBe(defaultSettings.cacheTtlMinutes);
     });
 });
 
@@ -150,6 +152,41 @@ describe('summary store mutation epoch', () => {
     });
 });
 
+describe('collectSnippetSourceIds', () => {
+    it('flattens provenance across all layers, deduping in first-seen order', () => {
+        const layers = [
+            [
+                { text: 'a', sourceMessageIds: ['m-2', 'm-1'] },
+                { text: 'b', sourceMessageIds: ['m-1', 'm-3'] },
+            ],
+            [{ text: 'c', sourceMessageIds: ['m-3', 'm-4'] }],
+            [],
+        ];
+        expect(collectSnippetSourceIds(layers)).toEqual(['m-2', 'm-1', 'm-3', 'm-4']);
+    });
+
+    it('skips non-string and blank ids and dedupes on the raw value', () => {
+        const layers = [[{ text: 'a', sourceMessageIds: ['', '   ', 7, null, ' m-1 ', ' m-1 '] }]];
+        expect(collectSnippetSourceIds(layers)).toEqual([' m-1 ']);
+    });
+
+    it('reads only the requested layer when layerIndex is given', () => {
+        const layers = [
+            [{ text: 'a', sourceMessageIds: ['m-1'] }],
+            [{ text: 'b', sourceMessageIds: ['m-2', 'm-1'] }],
+        ];
+        expect(collectSnippetSourceIds(layers, { layerIndex: 0 })).toEqual(['m-1']);
+        expect(collectSnippetSourceIds(layers, { layerIndex: 1 })).toEqual(['m-2', 'm-1']);
+    });
+
+    it('tolerates missing layers and snippets without provenance', () => {
+        expect(collectSnippetSourceIds(undefined)).toEqual([]);
+        expect(collectSnippetSourceIds([[{ text: 'no ids' }], null], { layerIndex: 1 })).toEqual(
+            [],
+        );
+    });
+});
+
 describe('getCurrentSummarizedBoundary', () => {
     it('returns -1 when no Layer 0 source ID resolves', () => {
         expect(getCurrentSummarizedBoundary(makeMessages(2), makeSummaryStore())).toBe(-1);
@@ -175,5 +212,100 @@ describe('getPlayerName', () => {
     it('falls back to "User" when name1 is absent', () => {
         delete globalThis.SillyTavern.getContext().name1;
         expect(getPlayerName()).toBe('User');
+    });
+});
+
+describe('resetSettingsToDefaults', () => {
+    function settingsFor(overrides = {}) {
+        installSummaryContext({ settings: overrides });
+        return getSettings();
+    }
+
+    it('preserves mode, connection-route, and route timeout settings', () => {
+        const s = settingsFor({
+            memoryMode: MEMORY_MODES.PREFIX_CACHE,
+            uiMode: UI_MODES.ADVANCED,
+            configMode: UI_MODES.ADVANCED,
+            connectionSource: 'profile',
+            connectionProfileId: 'profile-1',
+            requestTimeoutSeconds: 90,
+            mergeConnectionProfileId: 'merge-1',
+            mergeConnectionSource: 'profile',
+            mergeSummarizerResponseLength: 777,
+            mergeRequestTimeoutSeconds: 80,
+            fallbackConnectionSource: 'default',
+            fallbackConnectionProfileId: 'fallback-1',
+            fallbackSummarizerResponseLength: 555,
+            fallbackRequestTimeoutSeconds: 70,
+        });
+
+        resetSettingsToDefaults();
+
+        expect(s).toMatchObject({
+            memoryMode: MEMORY_MODES.PREFIX_CACHE,
+            uiMode: UI_MODES.ADVANCED,
+            configMode: UI_MODES.ADVANCED,
+            connectionSource: 'profile',
+            connectionProfileId: 'profile-1',
+            requestTimeoutSeconds: 90,
+            mergeConnectionSource: 'profile',
+            mergeConnectionProfileId: 'merge-1',
+            mergeSummarizerResponseLength: 777,
+            mergeRequestTimeoutSeconds: 80,
+            fallbackConnectionSource: 'default',
+            fallbackConnectionProfileId: 'fallback-1',
+            fallbackSummarizerResponseLength: 555,
+            fallbackRequestTimeoutSeconds: 70,
+        });
+    });
+    it('resets plain keys to defaults and re-enables debug mode', () => {
+        const s = settingsFor();
+        s.injectionTemplate = 'edited';
+        s.autoPaused = true;
+        s.minSummaryTurns = 9;
+        s.stateCatBonds = true;
+        s.debugMode = false;
+
+        resetSettingsToDefaults();
+
+        expect(s.injectionTemplate).toBe(defaultSettings.injectionTemplate);
+        expect(s.autoPaused).toBe(defaultSettings.autoPaused);
+        expect(s.minSummaryTurns).toBe(defaultSettings.minSummaryTurns);
+        expect(s.stateCatBonds).toBe(defaultSettings.stateCatBonds);
+        expect(s.debugMode).toBe(true);
+    });
+
+    it('restores retention budgets from the preserved memory mode preset', () => {
+        const s = settingsFor({ memoryMode: MEMORY_MODES.PREFIX_CACHE });
+        s.verbatimTokenBudget = 1;
+        s.queuedTokenBudget = 999999;
+
+        resetSettingsToDefaults();
+        expect(s).toMatchObject(MEMORY_MODE_PRESETS[MEMORY_MODES.PREFIX_CACHE]);
+    });
+
+    it('resets non-custom prompt profiles and keeps custom profiles untouched', () => {
+        const s = settingsFor();
+        s.promptPreset = 'narrative';
+        s.summarizerUserPrompt = 'edited user prompt';
+        s.promotionSystemPromptPreset = 'custom';
+        s.promotionSystemPrompt = 'kept custom text';
+
+        resetSettingsToDefaults();
+
+        expect(s.promptPreset).toBe(defaultSettings.promptPreset);
+        expect(s.summarizerUserPrompt).toBe(defaultSettings.summarizerUserPrompt);
+        expect(s.promotionSystemPromptPreset).toBe('custom');
+        expect(s.promotionSystemPrompt).toBe('kept custom text');
+    });
+
+    it('copies default arrays instead of aliasing them', () => {
+        const s = settingsFor();
+        s.stripPatterns.push('extra-pattern');
+
+        resetSettingsToDefaults();
+
+        expect(s.stripPatterns).toEqual(defaultSettings.stripPatterns);
+        expect(s.stripPatterns).not.toBe(defaultSettings.stripPatterns);
     });
 });

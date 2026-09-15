@@ -1,41 +1,41 @@
-import { TOAST_TITLE } from '../foundation/constants.js';
+import { BATCH_PROGRESS } from '../foundation/constants.js';
 import { getContext, getChat } from '../foundation/context.js';
-import { ensureChatScIds, resolveScIdsToIndices } from '../foundation/message-identity.js';
+import { ensureChatScIds } from '../foundation/message-identity.js';
 import {
-    bumpSummaryStoreMutationEpoch,
     getChatStore,
     getCurrentSummarizedBoundary,
-    saveChatStore,
+    getSummaryStoreMutationEpoch,
 } from '../foundation/state.js';
 import { debug, error, info, isTraceEnabled, serializeError, trace } from '../foundation/logger.js';
-import { ghostMessagesInRange, repairGhostingForRange } from './ghosting.js';
+import { repairGhostingForRange } from './ghosting.js';
 import { buildPassageFromRangeWithStats, buildFullContext } from './chatutils.js';
 import { persistChatState } from './persist-state.js';
 import { callSummarizer } from './summarizer-request.js';
 import { buildSnippetMetadataFromState } from './snippet-metadata.js';
-import { commitWhenSafe, updateCommittedInjection } from './summarizer-commit.js';
-import { executeLayer0StoreTransaction } from './layer0-store-transaction.js';
-import { isSummarizerOutputSafe } from './prompts.js';
+import { commitWhenSafe } from './summarizer-commit.js';
+import { commitSnippetMutation } from './snippet-commit.js';
+import { isSummarizerOutputSafe } from './summarizer-output.js';
 import { parseSnippet } from './summarizer-state.js';
 import { buildMemoryInjection, getCurrentStateSnapshotText } from './memory-injection.js';
 import { formatTokenValue } from './token-count.js';
 import {
     buildSnapshotBasis,
     fingerprintSourceRange,
-    getSummaryStoreSnapshotEpoch,
     isSnapshotStoreCurrent,
 } from './summarizer-snapshot.js';
 
 /**
  * Shared batch summarization logic used by normal and catch-up paths.
  * @param {import('./chatutils.js').AssistantTurn[]} visibleTurns
- * @param {{ showToasts?: boolean, catchExceptions?: boolean, sourceEndIdx?: number }} [opts]
- * @returns {Promise<boolean>}
+ * @param {{ catchExceptions?: boolean, sourceEndIdx?: number }} [opts]
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 export async function summarizeBatchFromTurns(
     /** @type {import('./chatutils.js').AssistantTurn[]} */ visibleTurns,
-    /** @type {{ showToasts?: boolean, catchExceptions?: boolean, sourceEndIdx?: number }} */
-    { showToasts = false, catchExceptions = false, sourceEndIdx } = {},
+    /** @type {{ catchExceptions?: boolean, sourceEndIdx?: number }} */
+    { catchExceptions = false, sourceEndIdx } = {},
+    /** @type {import('./notify.js').NotifyAdapter | undefined} */ notify,
 ) {
     trace('>>> ENTERING summarizeBatchFromTurns');
     trace('  visibleTurns:', visibleTurns?.length ?? 'UNDEFINED');
@@ -51,30 +51,32 @@ export async function summarizeBatchFromTurns(
     trace('  eligibleTurns after filtering:', eligibleTurns.length);
 
     if (eligibleTurns.length === 0) {
-        await repairGhosting(visibleTurns, summarizedBoundary);
-        return false;
+        await repairGhosting(visibleTurns, summarizedBoundary, notify);
+        return { status: 'idle' };
     }
-
     return await summarizeBatchCore({
         chat,
         store,
         eligibleTurns,
-        opts: { showToasts, catchExceptions, sourceEndIdx },
+        opts: { catchExceptions, sourceEndIdx },
+        notify,
     });
 }
 
 /**
  * Summarize cache-friendly partitions as one all-or-nothing Layer 0 transaction.
  * @param {import('./partition-planner.js').SourcePartition[]} partitions
- * @param {{ showToasts?: boolean, catchExceptions?: boolean }} [opts]
- * @returns {Promise<boolean>}
+ * @param {{ catchExceptions?: boolean }} [opts]
+ * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the engine; runs without one stay silent.
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 export async function summarizeAtomicLayer0Partitions(
     partitions,
-    { showToasts = false, catchExceptions = false } = {},
+    { catchExceptions = false } = {},
+    /** @type {import('./notify.js').NotifyAdapter | undefined} */ notify,
 ) {
     return await summarizeSafely(catchExceptions, 'summarizeAtomicLayer0Partitions', () =>
-        summarizeAtomicLayer0PartitionsCore(partitions, { showToasts }),
+        summarizeAtomicLayer0PartitionsCore(partitions, notify),
     );
 }
 
@@ -82,15 +84,16 @@ export async function summarizeAtomicLayer0Partitions(
  * Repair ghosting for turns already marked as summarized.
  * @param {import('./chatutils.js').AssistantTurn[]} visibleTurns
  * @param {number} boundaryIndex
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter threaded to ghosting progress events
  * @returns {Promise<void>}
  */
-async function repairGhosting(visibleTurns, boundaryIndex) {
+async function repairGhosting(visibleTurns, boundaryIndex, notify) {
     info('All visible turns are already summarized; repairing ghosting...');
     const turnsToGhost = visibleTurns.filter((t) => t.index <= boundaryIndex);
     if (turnsToGhost.length > 0) {
         const first = turnsToGhost[0].index;
         const last = turnsToGhost[turnsToGhost.length - 1].index;
-        await repairGhostingForRange(first, last, { chatSave: 'deferred' });
+        await repairGhostingForRange(first, last, { chatSave: 'deferred', notify });
     }
     await persistChatState({ chatSave: 'deferred' });
     trace('<<< EXITING summarizeBatchFromTurns - REPAIRED GHOSTING');
@@ -102,14 +105,15 @@ async function repairGhosting(visibleTurns, boundaryIndex) {
  * @param {ChatMessage[]} p.chat - Chat array
  * @param {SummaryceptionStore} p.store - Chat store
  * @param {import('./chatutils.js').AssistantTurn[]} p.eligibleTurns - Eligible turns
- * @param {{ showToasts: boolean, catchExceptions: boolean, sourceEndIdx?: number }} p.opts - Options
- * @returns {Promise<boolean>}
+ * @param {{ catchExceptions: boolean, sourceEndIdx?: number }} p.opts - Options
+ * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
-async function summarizeBatchCore({ chat, store, eligibleTurns, opts }) {
+async function summarizeBatchCore({ chat, store, eligibleTurns, opts, notify }) {
     const batch = eligibleTurns;
     if (batch.length === 0) {
         trace('<<< EXITING summarizeBatchFromTurns - EMPTY BATCH');
-        return false;
+        return { status: 'idle' };
     }
 
     const { startIdx, endIdx: batchEndIdx } = getBatchRange(batch);
@@ -123,75 +127,149 @@ async function summarizeBatchCore({ chat, store, eligibleTurns, opts }) {
     ensureLayer0(store);
     const passageStart = summarizedBoundary < 0 ? 0 : summarizedBoundary + 1;
     if (!isPassageRangeValid(passageStart, endIdx)) {
-        return false;
+        return { status: 'idle' };
     }
 
     return await summarizeSafely(opts.catchExceptions, 'summarizeBatchFromTurns', () =>
-        performBatchSummary({ batch, chat, store, passageStart, endIdx, opts }),
+        performBatchSummary({ batch, chat, store, passageStart, endIdx, notify }),
     );
 }
-
-async function summarizeAtomicLayer0PartitionsCore(partitions, { showToasts }) {
+/**
+ * Atomic-partition core. One shared progress owner opens at the first
+ * validated passage and settles exactly once at the terminal outcome.
+ * @param {import('./partition-planner.js').SourcePartition[]} partitions
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
+ */
+async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
     const usablePartitions = (partitions || []).filter((partition) => partition?.turns?.length > 0);
     if (usablePartitions.length === 0) {
-        return false;
+        return { status: 'idle' };
     }
 
     const chat = getChat();
     const store = getChatStore();
     ensureLayer0(store);
-    /** @type {(success: boolean) => void} */
-    let completeToast = () => {};
+    const progress = createBatchProgress(notify);
     let contextText = buildFullContext(0);
     const snapshots = [];
     const pendingSnippets = [];
-    const baseMutationEpoch = getSummaryStoreSnapshotEpoch(store);
-    const createToast = () => {
-        if (snapshots.length === 0) {
-            completeToast = createSummarizationToast(showToasts);
-        }
-        return completeToast;
-    };
+    const baseMutationEpoch = getSummaryStoreMutationEpoch(store);
 
-    for (const partition of usablePartitions) {
-        if (getSummaryStoreSnapshotEpoch(store) !== baseMutationEpoch) {
-            completeToast(false);
-            return false;
+    try {
+        for (const partition of usablePartitions) {
+            if (getSummaryStoreMutationEpoch(store) !== baseMutationEpoch) {
+                progress.settle();
+                return { status: 'failed', completed: snapshots.length, failed: 1 };
+            }
+
+            const result = await runLayer0Summarization({
+                chat,
+                store,
+                passageStart: partition.sourceStartIdx,
+                endIdx: partition.sourceEndIdx,
+                contextText,
+                metadata: { assistantTurnCount: partition.turns.length },
+                notify,
+                progress,
+                total: usablePartitions.length,
+            });
+            if (result.status) {
+                progress.settle();
+                return { status: 'failed', completed: snapshots.length, failed: 1 };
+            }
+
+            snapshots.push(result.snapshot);
+            pendingSnippets.push(buildLayer0Snippet(result.snapshot, result.summary));
+            contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
+            progress.update(snapshots.length);
         }
 
-        const job = await runLayer0Summarization({
-            chat,
-            store,
-            passageStart: partition.sourceStartIdx,
-            endIdx: partition.sourceEndIdx,
-            contextText,
-            metadata: { assistantTurnCount: partition.turns.length },
-            createToast,
+        const committed = await commitLayer0Job({
+            kind: 'layer0-atomic-cache',
+            snapshot: snapshots[0],
+            progress,
+            commit: () =>
+                commitLayer0Snippets({
+                    entries: snapshots.map((snapshot, index) => ({
+                        snapshot,
+                        snippet: pendingSnippets[index],
+                    })),
+                    notify,
+                }),
         });
-        if (!job) {
-            completeToast(false);
-            return false;
-        }
-
-        snapshots.push(job.snapshot);
-        pendingSnippets.push(buildLayer0Snippet(job.snapshot, job.summary));
-        contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
+        return committed
+            ? { status: 'completed', completed: snapshots.length }
+            : { status: 'failed', failed: snapshots.length };
+    } catch (err) {
+        // Snapshot capture or partition bookkeeping can throw after the shared
+        // handle opened; settle it before the exception reaches summarizeSafely.
+        progress.settle();
+        throw err;
     }
+}
 
-    return await commitLayer0Job({
-        kind: 'layer0-atomic-cache',
-        snapshot: snapshots[0],
-        toast: completeToast,
-        commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets }),
-    });
+/**
+ * Close a batch progress handle with a terminal event kind. No-ops when the
+ * adapter or the handle never opened (silent runs, failures before validation).
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
+ * @param {unknown} progress - Progress handle, or null before the first validation
+ * @param {string} kind - Terminal event kind from BATCH_PROGRESS
+ * @returns {void}
+ */
+function closeBatchProgress(notify, progress, kind) {
+    if (notify && progress) {
+        notify.clear(progress, { kind });
+    }
+}
+
+/**
+ * Internal owner of one batch progress lifecycle (one handle per run).
+ * Opens lazily on the first validated passage, updates through the run, and
+ * settles exactly once with a terminal event kind. Runs without an adapter
+ * never open a handle, so every settlement is a silent no-op.
+ * @typedef {{ open: (total: number) => unknown, update: (processed: number) => void, settle: (kind?: string) => void }} BatchProgressOwner
+ */
+
+/**
+ * Build the batch progress owner for one summarization run.
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
+ * @returns {BatchProgressOwner}
+ */
+function createBatchProgress(notify) {
+    let handle = null;
+    let settled = false;
+    return {
+        open(total) {
+            if (settled || !notify) {
+                return null;
+            }
+            if (!handle) {
+                handle = notify.progress({ label: BATCH_PROGRESS.MEMORY, total });
+            }
+            return handle;
+        },
+        update(processed) {
+            if (handle && !settled) {
+                notify?.update(handle, { processed });
+            }
+        },
+        settle(kind = BATCH_PROGRESS.FAILED) {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            closeBatchProgress(notify, handle, kind);
+        },
+    };
 }
 
 /**
  * Rethrow unless catchExceptions is set; log and report failure otherwise.
  * @param {boolean} catchExceptions - Swallow exceptions when true
  * @param {string} source - Caller name used in log prefixes
- * @param {() => Promise<boolean>} run - Summarization step to run
- * @returns {Promise<boolean>}
+ * @param {() => Promise<import('./run-outcome.js').SummarizationRunOutcome>} run - Summarization step to run
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function summarizeSafely(catchExceptions, source, run) {
     try {
@@ -206,13 +284,14 @@ async function summarizeSafely(catchExceptions, source, run) {
         });
         error(`${source} exception:`, err);
         trace(`<<< EXITING ${source} - EXCEPTION`);
-        return false;
+        return { status: 'failed' };
     }
 }
 
 /**
  * Capture, call the summarizer, and validate one Layer 0 job.
- * The toast is created only after the passage validates so earlier failures never leak it.
+ * The progress handle opens only after the passage validates so earlier
+ * failures never leak it.
  * @param {object} p
  * @param {ChatMessage[]} p.chat - Chat array
  * @param {SummaryceptionStore} p.store - Chat store
@@ -220,8 +299,10 @@ async function summarizeSafely(catchExceptions, source, run) {
  * @param {number} p.endIdx - Last passage index
  * @param {string} [p.contextText] - Prebuilt pending context for multi-partition jobs
  * @param {object} [p.metadata] - Extra callSummarizer options for this job
- * @param {() => (success: boolean) => void} p.createToast - Toast factory invoked once the passage is valid
- * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, completeToast: (success: boolean) => void} | null>}
+ * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
+ * @param {BatchProgressOwner} p.progress - Shared batch progress owner for this run
+ * @param {number} p.total - Total partitions in the batch
+ * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, status?: undefined} | {status: 'idle' | 'aborted' | 'failed'}>}
  */
 async function runLayer0Summarization({
     chat,
@@ -230,7 +311,9 @@ async function runLayer0Summarization({
     endIdx,
     contextText,
     metadata,
-    createToast,
+    notify,
+    progress,
+    total,
 }) {
     const snapshot = await captureLayer0Snapshot({
         chat,
@@ -241,41 +324,54 @@ async function runLayer0Summarization({
     });
     tracePassageTokens(snapshot);
     if (!snapshot.passageText.trim()) {
-        return null;
+        return { status: 'idle' };
     }
 
-    const completeToast = createToast();
+    progress.open(total);
 
-    let summary;
+    // Every failure routes through the owner so the run's handle settles
+    // exactly once, whether this run owns it or shares it across partitions.
+    let outcome;
     try {
-        summary = await callSummarizer(snapshot.passageText, snapshot.contextText, {
-            kind: 'layer0',
-            sourceRange: snapshot.sourceRange,
-            regexStats: snapshot.passageStats,
-            sourceState: snapshot.sourceState,
-            ...metadata,
-        });
+        outcome = await callSummarizer(
+            snapshot.passageText,
+            snapshot.contextText,
+            {
+                kind: 'layer0',
+                sourceRange: snapshot.sourceRange,
+                regexStats: snapshot.passageStats,
+                sourceState: snapshot.sourceState,
+                ...metadata,
+            },
+            notify,
+        );
     } catch (err) {
-        completeToast(false);
+        progress.settle();
         throw err;
     }
-    if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
-        completeToast(false);
-        return null;
+    if (outcome.status === 'aborted') {
+        progress.settle(BATCH_PROGRESS.ABORTED);
+        return { status: 'aborted' };
     }
-    return { snapshot, summary, completeToast };
+    const summary = outcome.status === 'completed' ? outcome.text : '';
+    if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
+        progress.settle();
+        return { status: 'failed' };
+    }
+    return { snapshot, summary };
 }
 
 /**
- * Commit a validated Layer 0 job as soon as the prompt guard allows, reporting on the toast.
+ * Commit a validated Layer 0 job as soon as the prompt guard allows, closing
+ * the batch progress with the terminal outcome exactly once.
  * @param {object} p
  * @param {string} p.kind - Commit job kind
  * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot - Job snapshot
- * @param {(success: boolean) => void} p.toast - Toast completion callback
+ * @param {BatchProgressOwner} p.progress - Batch progress owner for this run
  * @param {() => Promise<boolean>} p.commit - Commit executed inside commitWhenSafe's apply
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Job({ kind, snapshot, toast, commit }) {
+async function commitLayer0Job({ kind, snapshot, progress, commit }) {
     let result;
     try {
         result = await commitWhenSafe({
@@ -283,12 +379,12 @@ async function commitLayer0Job({ kind, snapshot, toast, commit }) {
             snapshot,
             apply: async () => {
                 const committed = await commit();
-                toast(committed);
+                progress.settle(committed ? BATCH_PROGRESS.UPDATED : BATCH_PROGRESS.FAILED);
                 return committed;
             },
         });
     } catch (err) {
-        toast(false);
+        progress.settle();
         throw err;
     }
     return result !== 'stale';
@@ -297,26 +393,46 @@ async function commitLayer0Job({ kind, snapshot, toast, commit }) {
 /**
  * Build the passage, call the summarizer, and commit the result.
  * @param {object} p - Batch parameters
- * @returns {Promise<boolean>}
+ * @param {import('./chatutils.js').AssistantTurn[]} p.batch - Eligible turns
+ * @param {ChatMessage[]} p.chat - Chat array
+ * @param {SummaryceptionStore} p.store - Chat store
+ * @param {number} p.passageStart - First passage index
+ * @param {number} p.endIdx - Last passage index
+ * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
+ * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
-async function performBatchSummary({ chat, store, passageStart, endIdx, opts }) {
-    const job = await runLayer0Summarization({
+async function performBatchSummary({ chat, store, passageStart, endIdx, notify }) {
+    const progress = createBatchProgress(notify);
+    const result = await runLayer0Summarization({
         chat,
         store,
         passageStart,
         endIdx,
-        createToast: () => createSummarizationToast(opts.showToasts),
+        notify,
+        progress,
+        total: 1,
     });
-    if (!job) {
-        return false;
+    if (result.status) {
+        return result.status === 'idle' ? { status: 'idle' } : { status: 'failed' };
     }
+    progress.update(1);
 
-    return await commitLayer0Job({
+    const committed = await commitLayer0Job({
         kind: 'layer0',
-        snapshot: job.snapshot,
-        toast: job.completeToast,
-        commit: () => commitLayer0Snippet({ snapshot: job.snapshot, summary: job.summary }),
+        snapshot: result.snapshot,
+        progress,
+        commit: () =>
+            commitLayer0Snippets({
+                entries: [
+                    {
+                        snapshot: result.snapshot,
+                        snippet: buildLayer0Snippet(result.snapshot, result.summary),
+                    },
+                ],
+                notify,
+            }),
     });
+    return committed ? { status: 'completed', completed: 1 } : { status: 'failed' };
 }
 
 /**
@@ -376,103 +492,48 @@ async function captureLayer0Snapshot({ chat, store, passageStart, endIdx, contex
 }
 
 /**
- * Record a successful summary into Layer 0 and trigger downstream bookkeeping.
+ * Commit validated Layer 0 entries as one Snippet Commit transaction, restoring
+ * the chat array when post-mutation persistence fails. Every entry is
+ * re-validated here so no caller can skip the checks.
  * @param {object} p
- * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot
- * @param {string} p.summary - The LLM-generated summary text
+ * @param {{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, snippet: SummaryceptionSnippet}[]} p.entries - Snapshot and prebuilt snippet pairs.
+ * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter threaded to ghosting
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Snippet({ snapshot, summary }) {
-    if (!isLayer0SnapshotValid(snapshot)) {
+async function commitLayer0Snippets({ entries, notify }) {
+    if (
+        entries.length === 0 ||
+        !entries.every(
+            ({ snapshot, snippet }) =>
+                isLayer0SnapshotValid(snapshot) && isLayer0SummarySafe(snippet.text, snapshot),
+        )
+    ) {
         return false;
     }
 
     const store = getChatStore();
     ensureLayer0(store);
-
-    if (!isLayer0SummarySafe(summary, snapshot)) {
-        return false;
-    }
-
-    await executeLayer0Commit({
-        store,
-        sourceMessageIds: snapshot.sourceMessageIds,
-        rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
-        onRollback: () => {
-            debug('Layer 0 commit rolled back: post-save persistence failed.');
-        },
-        mutate: () => {
-            store.layers[0].push(buildLayer0Snippet(snapshot, summary));
-            bumpSummaryStoreMutationEpoch(store);
-            trace('  Added Layer 0 snippet for current source IDs.');
-        },
-    });
-
-    return true;
-}
-
-async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets }) {
-    if (snapshots.length === 0 || pendingSnippets.length !== snapshots.length) {
-        return false;
-    }
-    if (!snapshots.every(isLayer0SnapshotValid)) {
-        return false;
-    }
-
-    const store = getChatStore();
-    ensureLayer0(store);
-    const sourceMessageIds = snapshots.flatMap((snapshot) => snapshot.sourceMessageIds);
-
-    await executeLayer0Commit({
-        store,
-        sourceMessageIds,
-        rollbackMessage: 'Layer 0 commit persistence failed, rolling back store state:',
-        onRollback: () => {
-            debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
-        },
-        mutate: () => {
-            for (const snippet of pendingSnippets) {
-                store.layers[0].push(snippet);
-            }
-            bumpSummaryStoreMutationEpoch(store);
-        },
-    });
-
-    return true;
-}
-
-async function executeLayer0Commit({
-    store,
-    sourceMessageIds,
-    mutate,
-    rollbackMessage,
-    onRollback,
-}) {
     const chat = getChat();
     const chatRollbackPoint = [...chat];
-    await executeLayer0StoreTransaction({
+    await commitSnippetMutation(
         store,
-        mutate,
-        rollbackMessage,
-        onRollback: async () => {
-            chat.splice(0, chat.length, ...chatRollbackPoint);
-            onRollback?.();
+        () => {
+            for (const { snippet } of entries) {
+                store.layers[0].push(snippet);
+            }
+            trace('  Added Layer 0 snippets for current source IDs.');
         },
-        persist: async () => {
-            await saveChatStore();
-            await updateCommittedInjection({ logMemoryStatus: true });
-            await ghostSourceMessageIds(sourceMessageIds);
-            await persistChatState({ chatSave: 'deferred' });
+        {
+            chatSave: 'deferred',
+            notify,
+            onRollback: () => {
+                chat.splice(0, chat.length, ...chatRollbackPoint);
+                debug('Layer 0 commit rolled back: post-save persistence failed.');
+            },
         },
-    });
-}
+    );
 
-async function ghostSourceMessageIds(sourceMessageIds) {
-    const indices = resolveScIdsToIndices(getChat(), sourceMessageIds);
-    if (indices.length === 0) {
-        return;
-    }
-    await ghostMessagesInRange(indices[0], indices[indices.length - 1], { chatSave: 'deferred' });
+    return true;
 }
 
 function buildLayer0Snippet(snapshot, summary) {
@@ -579,33 +640,4 @@ function isPassageRangeValid(passageStart, endIdx) {
 
     error(`passageStart (${passageStart}) > endIdx (${endIdx}). Batch already summarized?`);
     return false;
-}
-
-/**
- * @param {boolean} showToasts
- * @returns {(success: boolean) => void}
- */
-function createSummarizationToast(showToasts) {
-    if (!showToasts) {
-        return () => {};
-    }
-    const progressToast = toastr.info('Updating conversation memory…', TOAST_TITLE, {
-        timeOut: 0,
-        extendedTimeOut: 0,
-        tapToDismiss: false,
-        progressBar: true,
-    });
-    let completed = false;
-    return (success) => {
-        if (completed) {
-            return;
-        }
-        completed = true;
-        toastr.clear(progressToast);
-        (success ? toastr.success : toastr.warning)(
-            success ? 'Conversation memory updated.' : 'Conversation memory was not updated.',
-            TOAST_TITLE,
-            { timeOut: 3000 },
-        );
-    };
 }

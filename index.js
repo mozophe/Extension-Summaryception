@@ -10,11 +10,15 @@
 
 import { LOG_PREFIX } from './src/foundation/constants.js';
 import { getContext } from './src/foundation/context.js';
+import { initRefreshPort, refreshUi } from './src/foundation/refresh.js';
 import { getSettings } from './src/foundation/state.js';
 import { initSnippetBrowser } from './src/entry/ui-snippets.js';
-import { setInjectionUpdater, setUiUpdater } from './src/core/summarizer.js';
-import { setUiRefresher } from './src/features/persist.js';
-import { updateUI } from './src/entry/ui.js';
+import { requestSummarization, setNotify, summarizerQueue } from './src/core/summarizer-queue.js';
+import { initCommitCallbacks } from './src/core/summarizer-commit.js';
+import { hasActiveAbortController } from './src/core/summarizer-request.js';
+import { withUsageRun } from './src/core/summarizer-usage.js';
+import { createToastrNotifyAdapter } from './src/entry/ui-dialogs.js';
+import { syncLLMContextPreview, updateUI } from './src/entry/ui.js';
 import { bindUIEvents } from './src/entry/ui-events.js';
 import { initConnectionUI } from './src/entry/ui-connection.js';
 import { initSettingsHelp } from './src/entry/settings-help.js';
@@ -44,10 +48,19 @@ import { registerSlashCommands } from './src/entry/commands.js';
     }
 
     getSettings();
-    setUiUpdater(updateUI);
-    setInjectionUpdater(updateInjection, reassertInjectionSnapshot);
-    setUiRefresher(updateUI);
-    initSnippetBrowser(updateUI);
+    initCommitCallbacks({
+        updateInjection,
+        reassertInjection: reassertInjectionSnapshot,
+        requeue: () => {
+            void requestSummarization();
+        },
+    });
+    const notify = createToastrNotifyAdapter();
+    setNotify(notify);
+    const manualRunnerDeps = { queue: summarizerQueue, refreshUi, withUsageRun };
+    const pauseLatchDeps = { queue: summarizerQueue, hasActiveAbortController };
+    initRefreshPort({ updateInjection, updateUI, updatePreview: syncLLMContextPreview });
+    initSnippetBrowser(notify);
 
     const html = await renderExtensionTemplateAsync(
         'third-party/Extension-Summaryception',
@@ -57,7 +70,7 @@ import { registerSlashCommands } from './src/entry/commands.js';
     $('#extensions_settings2').append(html);
 
     initSettingsHelp();
-    bindUIEvents();
+    bindUIEvents(notify, manualRunnerDeps, pauseLatchDeps);
     bindPromptFreezeRecoveryEvents();
     initSettingsTabs();
     initConnectionUI();

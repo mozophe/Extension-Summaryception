@@ -14,7 +14,8 @@ const L0_SOURCE_OVERSHOOT_TOLERANCE = 1.15;
  */
 
 /**
- * Build token-balanced Layer 0 source partitions on assistant-turn boundaries.
+ * Build token-balanced Layer 0 source partitions on assistant-turn boundaries,
+ * capped at settings.maxSummaryTurns turns per partition.
  * @param {object} p
  * @param {ChatMessage[]} p.chat
  * @param {number} p.sourceStartIdx
@@ -45,20 +46,18 @@ export async function buildLayer0Partitions({
     const totalTokens = sumSegmentTokens(segments);
     const maxTokens = getMaxL0SourceTokens(settings);
     const targetTokens = getTargetSourceTokens(settings);
-    const maxTurns = getMaxTurnsPerBatch(settings);
+    const maxTurns = settings.maxSummaryTurns;
 
     if (
-        totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE) &&
-        segments.length <= maxTurns
+        turns.length <= maxTurns &&
+        totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE)
     ) {
         return [buildPartitionFromSegments(segments)];
     }
 
-    const partitionCount = Math.max(
-        1,
-        Math.ceil(totalTokens / targetTokens),
-        Math.ceil(segments.length / maxTurns),
-    );
+    const tokenPartitions = Math.ceil(totalTokens / targetTokens);
+    const turnPartitions = Math.ceil(turns.length / maxTurns);
+    const partitionCount = Math.max(1, tokenPartitions, turnPartitions);
     const softTarget = Math.min(maxTokens, Math.ceil(totalTokens / partitionCount));
     return buildBalancedPartitions(segments, softTarget, maxTokens, maxTurns);
 }
@@ -152,6 +151,7 @@ function shouldCutBeforeSegment({
     if (current.length === 0) {
         return false;
     }
+
     if (current.length >= maxTurns) {
         return true;
     }
@@ -208,17 +208,4 @@ function getTargetSourceTokens(settings) {
     const budget = Number(settings.minSummaryBudget);
     const safeBudget = Number.isFinite(budget) ? budget : cap;
     return Math.min(cap, Math.max(MIN_L0_SOURCE_TOKENS, Math.round(safeBudget)));
-}
-
-/**
- * Max Turns per Batch: hard cap on assistant turns in one Layer 0 partition,
- * applied alongside the token target (whichever limit is hit first cuts).
- * @param {ExtensionSettings} settings
- * @returns {number}
- */
-function getMaxTurnsPerBatch(settings) {
-    const configured = Math.round(Number(settings.maxSummaryTurns));
-    return Number.isFinite(configured) && configured >= 1
-        ? configured
-        : defaultSettings.maxSummaryTurns;
 }
