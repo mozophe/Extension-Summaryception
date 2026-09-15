@@ -22,6 +22,14 @@ _Avoid_: Snippet save
 Moving merged older snippets from a layer into the next deeper layer.
 Code: `attemptPromotion` (src/core/summarizer-promotion.js)
 
+**Promotion Plan**:
+The read-model computed before each drain iteration: per-layer quotas, effective merge count, first over-limit candidate, and the Layer 0 retention-floor verdict.
+Code: `buildPromotionPlan` (src/core/promotion-planner.js)
+
+**Promotion Candidate**:
+One proposed merged snippet awaiting validation; at most one section-aware repair pass.
+Code: `generateValidatedPromotion` (src/core/promotion-candidate.js)
+
 **Promotion Drain**:
 The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the Foreground Gate blocks, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
 Code: `drainPromotionOverflow` (src/core/summarizer-promotion.js)
