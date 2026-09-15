@@ -189,7 +189,14 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
             kind: 'layer0-atomic-cache',
             snapshot: snapshots[0],
             progress,
-            commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }),
+            commit: () =>
+                commitLayer0Snippets({
+                    entries: snapshots.map((snapshot, index) => ({
+                        snapshot,
+                        snippet: pendingSnippets[index],
+                    })),
+                    notify,
+                }),
         });
         return committed
             ? { status: 'completed', completed: snapshots.length }
@@ -415,7 +422,15 @@ async function performBatchSummary({ chat, store, passageStart, endIdx, notify }
         snapshot: result.snapshot,
         progress,
         commit: () =>
-            commitLayer0Snippet({ snapshot: result.snapshot, summary: result.summary, notify }),
+            commitLayer0Snippets({
+                entries: [
+                    {
+                        snapshot: result.snapshot,
+                        snippet: buildLayer0Snippet(result.snapshot, result.summary),
+                    },
+                ],
+                notify,
+            }),
     });
     return committed ? { status: 'completed', completed: 1 } : { status: 'failed' };
 }
@@ -477,31 +492,36 @@ async function captureLayer0Snapshot({ chat, store, passageStart, endIdx, contex
 }
 
 /**
- * Record a successful summary into Layer 0 and trigger downstream bookkeeping.
+ * Commit validated Layer 0 entries as one Snippet Commit transaction, restoring
+ * the chat array when post-mutation persistence fails. Every entry is
+ * re-validated here so no caller can skip the checks.
  * @param {object} p
- * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot
- * @param {string} p.summary - The LLM-generated summary text
+ * @param {{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, snippet: SummaryceptionSnippet}[]} p.entries - Snapshot and prebuilt snippet pairs.
  * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter threaded to ghosting
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Snippet({ snapshot, summary, notify }) {
-    if (!isLayer0SnapshotValid(snapshot)) {
+async function commitLayer0Snippets({ entries, notify }) {
+    if (
+        entries.length === 0 ||
+        !entries.every(
+            ({ snapshot, snippet }) =>
+                isLayer0SnapshotValid(snapshot) && isLayer0SummarySafe(snippet.text, snapshot),
+        )
+    ) {
         return false;
     }
 
     const store = getChatStore();
     ensureLayer0(store);
-
-    if (!isLayer0SummarySafe(summary, snapshot)) {
-        return false;
-    }
     const chat = getChat();
     const chatRollbackPoint = [...chat];
     await commitSnippetMutation(
         store,
         () => {
-            store.layers[0].push(buildLayer0Snippet(snapshot, summary));
-            trace('  Added Layer 0 snippet for current source IDs.');
+            for (const { snippet } of entries) {
+                store.layers[0].push(snippet);
+            }
+            trace('  Added Layer 0 snippets for current source IDs.');
         },
         {
             chatSave: 'deferred',
@@ -509,38 +529,6 @@ async function commitLayer0Snippet({ snapshot, summary, notify }) {
             onRollback: () => {
                 chat.splice(0, chat.length, ...chatRollbackPoint);
                 debug('Layer 0 commit rolled back: post-save persistence failed.');
-            },
-        },
-    );
-
-    return true;
-}
-
-async function commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }) {
-    if (snapshots.length === 0 || pendingSnippets.length !== snapshots.length) {
-        return false;
-    }
-    if (!snapshots.every(isLayer0SnapshotValid)) {
-        return false;
-    }
-
-    const store = getChatStore();
-    ensureLayer0(store);
-    const chat = getChat();
-    const chatRollbackPoint = [...chat];
-    await commitSnippetMutation(
-        store,
-        () => {
-            for (const snippet of pendingSnippets) {
-                store.layers[0].push(snippet);
-            }
-        },
-        {
-            chatSave: 'deferred',
-            notify,
-            onRollback: () => {
-                chat.splice(0, chat.length, ...chatRollbackPoint);
-                debug('Atomic Layer 0 commit rolled back: post-save persistence failed.');
             },
         },
     );

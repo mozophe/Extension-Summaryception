@@ -272,4 +272,34 @@ describe('Layer 0 atomic multi-partition progress', () => {
         expect(clears[0].handle).toBe(progress[0].handle);
         expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
     });
+
+    it('restores chat and Layer 0 when atomic post-mutation persistence fails', async () => {
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
+            makeMessage({ scId: 'assistant-id', mes: 'Assistant scene.' }),
+        ];
+        const originalChat = [...chat];
+        const metadata = { summaryception: makeSummaryStore() };
+        let metadataSaves = 0;
+        const saveMetadata = vi.fn(async () => {
+            metadataSaves++;
+            if (metadataSaves === 1) {
+                throw new Error('metadata write failed');
+            }
+        });
+        installSummaryContext({ chat, metadata, saveMetadata });
+        callSummarizer.mockResolvedValue({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        const partitions = [{ turns: [{ index: 1 }], sourceStartIdx: 1, sourceEndIdx: 1 }];
+
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, undefined)).rejects.toThrow(
+            'metadata write failed',
+        );
+
+        expect(chat).toEqual(originalChat);
+        expect(metadata.summaryception.layers[0]).toEqual([]);
+        expect(metadata.summaryception.mutationEpoch).toBe(0);
+    });
 });
