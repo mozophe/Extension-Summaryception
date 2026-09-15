@@ -52,6 +52,11 @@ Code: `verbatimBudget` / `verbatimStartIdx` (src/core/chat-window-planner.js)
 A bounded rolling snapshot of roleplay state. Only the newest snapshot reaches the prompt.
 Code: `compactStateSnapshotText` (src/core/summarizer-state.js)
 
+**Output Hygiene**:
+The chain that turns a raw summarizer response into safe snippet text: cleanup, CN ideograph policy, integrity guard, Layer 0 size guard.
+Code: `processSummarizerResponse` (src/core/summarizer-output.js)
+_Avoid_: output sanitization, response post-processing
+
 **Mutation Epoch**:
 A counter bumped on every summary store mutation, including Ghosting ownership. Consumers use it to detect stale derived data.
 Code: `getSummaryStoreMutationEpoch` (src/foundation/state.js)

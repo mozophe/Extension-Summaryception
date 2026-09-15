@@ -19,10 +19,8 @@ import {
     classifyAttemptRetryStatus,
     computeRetryDelay,
 } from './request-retry-policy.js';
-import {
-    processSummarizerResponse,
-    recordSuccessfulSummarizerUsage,
-} from './summarizer-pipeline.js';
+import { processSummarizerResponse } from './summarizer-output.js';
+import { recordSuccessfulSummarizerUsage } from './summarizer-pipeline.js';
 import { countTextTokens, formatTokenCount, formatTokenValue } from './token-count.js';
 import { insertBeforeTrigger, EXECUTION_TRIGGER_L0 } from '../foundation/prompt-parts.js';
 import { describePromptLogCall } from './request-attempt-log.js';

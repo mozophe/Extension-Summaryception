@@ -2,13 +2,13 @@ import { NOTIFY_EVENTS } from '../foundation/constants.js';
 import { warn } from '../foundation/logger.js';
 import { getChatStore } from '../foundation/state.js';
 import { getEffectiveMemoryUsage } from './memory-budget.js';
+import { getLayer0SummaryTokenTarget } from './layer0-compression.js';
 import {
-    getLayer0SummaryTokenTarget,
+    buildHypotheticalLayersAfterPromotion,
     getPromotionSummaryTokenHardMax,
     getPromotionSummaryTokenTarget,
-} from './layer0-compression.js';
-import { buildHypotheticalLayersAfterPromotion } from './promotion-planner.js';
-import { isSummarizerOutputSafe } from './prompts.js';
+} from './promotion-planner.js';
+import { isSummarizerOutputSafe } from './summarizer-output.js';
 import { buildRepairDiagnostics } from './repair-diagnostics.js';
 import { parseSnippet } from './summarizer-state.js';
 import { callSummarizer } from './summarizer-request.js';

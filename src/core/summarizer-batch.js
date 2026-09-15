@@ -14,7 +14,7 @@ import { callSummarizer } from './summarizer-request.js';
 import { buildSnippetMetadataFromState } from './snippet-metadata.js';
 import { commitWhenSafe } from './summarizer-commit.js';
 import { commitSnippetMutation } from './snippet-commit.js';
-import { isSummarizerOutputSafe } from './prompts.js';
+import { isSummarizerOutputSafe } from './summarizer-output.js';
 import { parseSnippet } from './summarizer-state.js';
 import { buildMemoryInjection, getCurrentStateSnapshotText } from './memory-injection.js';
 import { formatTokenValue } from './token-count.js';

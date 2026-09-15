@@ -11,6 +11,12 @@ export const LAYER0_REPAIR_RATIO = 1.65;
 export const LAYER_SAFETY_MULTIPLIER = { l0: 0.85, l1: 0.5, l2: 0.5 };
 
 /**
+ * Source token count above which a summarizer output must clear a minimum
+ * narrative size (integrity check and Layer 0 narrative minimum gating).
+ */
+export const SUBSTANTIAL_SOURCE_TOKEN_THRESHOLD = 500;
+
+/**
  * Maximum number of `[STATE]` key:value lines the model should emit.
  * @param {number | undefined} sourceStateKeyCount
  * @returns {number}

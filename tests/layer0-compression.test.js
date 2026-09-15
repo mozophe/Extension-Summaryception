@@ -7,10 +7,9 @@ import {
     buildStateSnapshotSizeRepairFeedback,
     getLayer0SummaryTokenBounds,
     getLayer0SummaryTokenTarget,
-    getPromotionSummaryTokenHardMax,
-    getPromotionSummaryTokenTarget,
     isLayer0CompressionCall,
     isLayer0SizeGuardCall,
+    validateLayer0OutputSize,
 } from '../src/core/layer0-compression.js';
 import {
     EXECUTION_TRIGGER_L0,
@@ -18,6 +17,11 @@ import {
     buildUserPrompt,
 } from '../src/foundation/prompt-parts.js';
 import { LAYER_HARD_MAX_RATIO } from '../src/core/token-budget.js';
+import {
+    getPromotionSummaryTokenHardMax,
+    getPromotionSummaryTokenTarget,
+} from '../src/core/promotion-planner.js';
+import { installSummaryContext } from './test-helpers.js';
 
 function makeLayer0Prompt(triggerLine) {
     return buildUserPrompt({
@@ -190,5 +194,55 @@ describe('buildStateSnapshotSizeRepairFeedback', () => {
         });
         expect(output).toContain('<summaryception_l0_repair_feedback>');
         expect(output).toContain('STATE_SNAPSHOT_MARKER: value');
+    });
+});
+
+describe('validateLayer0OutputSize', () => {
+    it('accepts a Layer 0 draft whose sections sit inside the configured size band', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 100 });
+        const output = [
+            '[NARRATIVE]',
+            'Kaelen traded the map for safe passage and left before dawn.',
+            '',
+            '[STATE]',
+            'location: the river dock',
+            'bonds: owes Harl a favor',
+        ].join('\n');
+
+        const result = await validateLayer0OutputSize(output, defaultSettings, { kind: 'layer0' });
+
+        expect(result.valid).toBe(true);
+        expect(result.error).toBeNull();
+        expect(result.repairFeedback).toBe('');
+    });
+
+    it('rejects an oversized Layer 0 draft with violations and non-empty repair feedback', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 500 });
+        const output = [
+            '[NARRATIVE]',
+            'Kaelen argued with the ferryman about the fare and watched the storm roll in.',
+            '',
+            '[STATE]',
+            'location: the river dock',
+        ].join('\n');
+
+        const result = await validateLayer0OutputSize(output, defaultSettings, { kind: 'layer0' });
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBeInstanceOf(Error);
+        expect(result.diagnostics.violations.length).toBeGreaterThan(0);
+        expect(result.repairFeedback.length).toBeGreaterThan(0);
+    });
+
+    it('passes a draft through untouched when the call is not a Layer 0 size-guard call', async () => {
+        installSummaryContext({ getTokenCountAsync: async () => 500 });
+
+        const result = await validateLayer0OutputSize(
+            '[NARRATIVE]\nAny draft\n\n[STATE]\nlocation: the river dock',
+            defaultSettings,
+            { kind: 'promotion' },
+        );
+
+        expect(result).toEqual({ valid: true, error: null, repairFeedback: '' });
     });
 });

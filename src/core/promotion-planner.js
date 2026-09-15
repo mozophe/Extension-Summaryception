@@ -1,6 +1,7 @@
 import { INTERNAL_MAX_LAYER_DEPTH } from '../foundation/constants.js';
 import { warn } from '../foundation/logger.js';
 import { getEffectiveMemoryUsage } from './memory-budget.js';
+import { LAYER_HARD_MAX_RATIO, LAYER_MIN_RATIO } from './token-budget.js';
 
 const MIN_PROMOTION_MERGE_COUNT = 3;
 const MAX_PROMOTION_MERGE_COUNT = 4;
@@ -9,6 +10,32 @@ const LAYER0_DEEP_BUDGET_RATIO = 0.5;
 const LAYER1_BUDGET_RATIO = 0.3;
 const DEEP_LAYER_BUDGET_RATIO = 0.2;
 const LAYER0_PROMOTION_RETENTION_FLOOR_RATIO = 0.4;
+
+/**
+ * Compute the target size for a promotion, anchored to the slider target T.
+ * Doubles as the acceptance floor: a shorter output is rejected as over-merged.
+ * @param {object} p
+ * @param {number} p.layerIndex - Promotion SOURCE layer (0 => produces L1, >=1 => L2+).
+ * @param {number} p.targetTokens - Slider target T.
+ * @returns {number}
+ */
+export function getPromotionSummaryTokenTarget({ layerIndex, targetTokens }) {
+    const key = Number(layerIndex) >= 1 ? 'l2' : 'l1';
+    return Math.max(1, Math.floor(targetTokens * LAYER_MIN_RATIO[key]));
+}
+
+/**
+ * Compute the hard maximum size for a promotion, anchored to the slider
+ * target T.
+ * @param {object} p
+ * @param {number} p.layerIndex - Promotion SOURCE layer (0 => produces L1, >=1 => L2+).
+ * @param {number} p.targetTokens - Slider target T.
+ * @returns {number}
+ */
+export function getPromotionSummaryTokenHardMax({ layerIndex, targetTokens }) {
+    const key = Number(layerIndex) >= 1 ? 'l2' : 'l1';
+    return Math.max(1, Math.round(targetTokens * LAYER_HARD_MAX_RATIO[key]));
+}
 
 /**
  * Build normalized token quotas for active non-empty layers.

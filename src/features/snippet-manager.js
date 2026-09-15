@@ -2,7 +2,7 @@ import { getChat } from '../foundation/context.js';
 import { resolveScIdsToIndices } from '../foundation/message-identity.js';
 import { getChatStore } from '../foundation/state.js';
 import { buildPassageFromRangeWithStats } from '../core/chatutils.js';
-import { validateSummarizerOutputIntegrity } from '../core/prompts.js';
+import { validateSummarizerOutputIntegrity } from '../core/summarizer-output.js';
 import { commitSnippetMutation } from '../core/snippet-commit.js';
 import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
 import { parseSnippet } from '../core/summarizer-state.js';

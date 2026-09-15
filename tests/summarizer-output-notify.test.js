@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { NOTIFY_EVENTS } from '../src/foundation/constants.js';
-import { processSummarizerResponse } from '../src/core/summarizer-pipeline.js';
+import { processSummarizerResponse } from '../src/core/summarizer-output.js';
 import {
     installBrowserRuntimeStub,
     makeNotifyRecorder,
@@ -9,11 +9,11 @@ import {
 } from './test-helpers.js';
 
 /**
- * The summarizer pipeline emits structured notify events (ADR-0004) instead of
+ * The summarizer output module emits structured notify events (ADR-0004) instead of
  * calling the notification library; the entry adapter renders the language-mix
  * retry warning.
  */
-describe('summarizer pipeline notify events', () => {
+describe('summarizer output notify events', () => {
     it('emits a structured language-mix event when the CN policy rejects a response', async () => {
         const { toastr } = installBrowserRuntimeStub();
         const recorder = makeNotifyRecorder();
