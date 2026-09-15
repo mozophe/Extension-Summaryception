@@ -1,6 +1,5 @@
 import {
     MEMORY_MODE_PRESETS,
-    MEMORY_MODES,
     TOAST_TITLE,
     MASK_USER_ROLE_MODES,
     applyMemoryModePreset,
@@ -21,36 +20,15 @@ import { refreshFull, refreshPreview, refreshUi } from '../foundation/refresh.js
 import {
     deriveAdvancedEngineTuning,
     enforceRetentionInvariants,
-    getEffectiveSettings,
     getSettings,
     isValidSnippet,
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
 import { commitSnippetMutation } from '../core/snippet-commit.js';
-import {
-    abortSummarization,
-    describeManualRun,
-    ELASTIC_STRATEGIES,
-    getIsSummarizing,
-    pauseAutoSummarization,
-    requestSummarization,
-    resumeAutoSummarization,
-    runManual,
-} from '../core/summarizer.js';
-import { updateInjection } from '../features/injection.js';
+import { requestSummarization } from '../core/summarizer.js';
 import { clearSummaryceptionMemory } from '../features/memory.js';
 import { updateUI } from './ui.js';
-import {
-    clearManualProgressToast,
-    confirmSlopBreaker,
-    createManualProgressToast,
-    showCatchupOutcome,
-    showBusySummaryToast,
-    showSlopBreakerNoop,
-    showSlopBreakerOutcome,
-    updateManualProgressToast,
-} from './ui-dialogs.js';
 import {
     SETTING_SLIDER_SELECTOR,
     bindDataSettingElements,
@@ -60,8 +38,8 @@ import {
     readString,
     syncRoleMaskModeControl,
 } from './ui-bind.js';
+import { bindManualRunControls, reloadPage } from './ui-manual-run.js';
 
-let notifyAdapter = null;
 // UI-specific metadata for each shared prompt pair, keyed by presetKey. The
 // (presetKey, settingKey) pairs themselves live in PROMPT_SETTING_KEYS.
 const PROMPT_FIELD_UI = {
@@ -108,7 +86,7 @@ const PROMPT_FIELDS = PROMPT_SETTING_KEYS.map(({ presetKey, settingKey }) => ({
  * Save settings, then update injection and the UI.
  * @returns {void}
  */
-export function saveAndRefreshUi() {
+function saveAndRefreshUi() {
     saveSettings();
     refreshFull();
 }
@@ -121,12 +99,12 @@ export function saveAndRefreshUi() {
  * @returns {void}
  */
 export function bindUIEvents(notify) {
-    notifyAdapter = notify;
     bindModeHandlers();
     bindToggleHandlers();
     bindSliderHandlers();
     bindTextareaHandlers();
-    bindClickHandlers();
+    bindClickHandlers(notify);
+    bindManualRunControls({ notify });
     bindPromptProfileHandlers();
 }
 
@@ -304,230 +282,14 @@ function bindTextareaHandlers() {
 }
 
 /**
- * Abort a manual summarization run from its progress toast.
- * @param {AbortController} controller
- * @returns {void}
- */
-function cancelManualRun(controller) {
-    controller.abort();
-    abortSummarization();
-}
-
-/**
- * Stop the in-flight summarizer and latch autoPaused so automatic cycles do
- * not resume on their own while the user is still changing settings.
- * @returns {Promise<void>}
- */
-async function onStopSummarize() {
-    const status = await pauseAutoSummarization();
-    if (status === 'already-paused') {
-        toastr.info('Already paused.', TOAST_TITLE);
-        return;
-    }
-    if (status === 'idle') {
-        toastr.info('Nothing is running.', TOAST_TITLE);
-        return;
-    }
-    toastr.warning('Summarization paused. Progress saved. Press Resume to continue.', TOAST_TITLE, {
-        timeOut: 5000,
-    });
-    $(this).prop('disabled', true);
-    setTimeout(() => $(this).prop('disabled', false), 2000);
-    updateUI();
-}
-
-/**
- * Clear the autoPaused latch and kick a single automatic cycle.
- * @returns {Promise<void>}
- */
-async function onResumeSummarize() {
-    const status = await resumeAutoSummarization();
-    if (status === 'not-paused') {
-        toastr.info('Not paused.', TOAST_TITLE);
-        return;
-    }
-    toastr.success('Resumed. Automatic summarization is active again.', TOAST_TITLE, {
-        timeOut: 3000,
-    });
-    updateUI();
-}
-
-/**
- * Force Summarize button click handler.
- * @returns {Promise<void>}
- */
-async function onForceSummarize() {
-    await executeForceSummarize($(this));
-}
-
-const MANUAL_RUN_BUSY_HTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>';
-
-/**
- * Shared manual-run driver: busy button, abort/progress wiring, outcome
- * report, injection refresh, reload, and UI update. `run` receives the
- * engine options carrying the abort signal; returning undefined skips the
- * outcome report (nothing ran).
- * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
- * @param {string} idleHtml Button html restored after the run.
- * @param {{ run: (options: object) => Promise<object | undefined>, report: (outcome: object) => void }} ops
- * @returns {Promise<void>}
- */
-async function runManualSummarization($button, idleHtml, { run, report }) {
-    const controller = new AbortController();
-    let progressToast = null;
-    const options = {
-        signal: controller.signal,
-        notify: notifyAdapter,
-        onStart: (progress) => {
-            progressToast = createManualProgressToast({
-                ...progress,
-                onCancel: () => cancelManualRun(controller),
-            });
-        },
-        onProgress: (progress) => updateManualProgressToast(progressToast, progress),
-    };
-    if ($button) {
-        $button.prop('disabled', true).html(MANUAL_RUN_BUSY_HTML);
-    }
-    let outcome;
-    try {
-        outcome = await run(options);
-    } catch (err) {
-        error(err);
-        toastr.error('Summarization failed - check console.', TOAST_TITLE, {
-            timeOut: 8000,
-        });
-        return;
-    } finally {
-        clearManualProgressToast(progressToast);
-        if ($button) {
-            $button.prop('disabled', false).html(idleHtml);
-        }
-        updateUI();
-    }
-    if (outcome !== undefined) {
-        report(outcome);
-        updateInjection();
-        reloadAfterManualRun(outcome);
-    }
-}
-
-/**
- * Shared manual-run guard. Show the toast for the first failing check.
- * @param {object} s Effective settings.
- * @returns {boolean} true when a manual run is allowed.
- */
-function guardManualRun(s) {
-    if (!s.enabled) {
-        toastr.warning('Enable Summaryception first.');
-        return false;
-    }
-    if (getIsSummarizing()) {
-        showBusySummaryToast();
-        return false;
-    }
-    showManualCacheWarning(s);
-    return true;
-}
-
-/**
- * Run Force Summarize from a panel button or the stale-cache advice toast.
- * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
- * @returns {Promise<void>}
- */
-async function executeForceSummarize($button) {
-    const s = getEffectiveSettings();
-    if (!guardManualRun(s)) {
-        return;
-    }
-    await runManualSummarization(
-        $button,
-        '<i class="fa-solid fa-bolt"></i><span>Force Summarize</span>',
-        {
-            run: async (options) => {
-                const preview = await describeManualRun(ELASTIC_STRATEGIES.FORCE);
-                if (!preview.ready) {
-                    toastr.info('Nothing eligible to summarize.', TOAST_TITLE);
-                    return;
-                }
-
-                toastr.info(`${preview.backlog} turns ready to process. Starting...`, TOAST_TITLE, {
-                    timeOut: 2000,
-                });
-
-                return runManual(ELASTIC_STRATEGIES.FORCE, options);
-            },
-            report: showCatchupOutcome,
-        },
-    );
-}
-
-/**
- * Run Slop Breaker after validating the current chat tail.
- * @returns {Promise<void>}
- */
-async function onSlopBreaker() {
-    const s = getEffectiveSettings();
-    if (!guardManualRun(s)) {
-        return;
-    }
-
-    const preview = await describeManualRun(ELASTIC_STRATEGIES.SLOP);
-    if (!preview.ready) {
-        showSlopBreakerNoop();
-        return;
-    }
-    if (!(await confirmSlopBreaker())) {
-        return;
-    }
-
-    await runManualSummarization(
-        $(this),
-        '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
-        {
-            run: (options) => runManual(ELASTIC_STRATEGIES.SLOP, options),
-            report: showSlopBreakerOutcome,
-        },
-    );
-}
-
-function showManualCacheWarning(settings) {
-    if (settings.memoryMode !== MEMORY_MODES.PREFIX_CACHE) {
-        return;
-    }
-    toastr.info(
-        'Manual summarization updates memory immediately and may reset cache savings for the next request.',
-        TOAST_TITLE,
-        { timeOut: 5000 },
-    );
-}
-
-/**
- * Reload the page after successful manual context changes.
- * @param {{ fullyCommitted?: boolean } | undefined} outcome
- * @returns {void}
- */
-function reloadAfterManualRun(outcome) {
-    if (outcome?.fullyCommitted) {
-        reloadPage();
-    }
-}
-
-function reloadPage() {
-    const reload = globalThis.location?.reload;
-    if (typeof reload === 'function') {
-        reload.call(globalThis.location);
-    }
-}
-
-/**
  * Import summary memory from a JSON file.
  *
  * Vanilla document.createElement is used for the ephemeral <input type="file">
  * because it never enters the live DOM - we read its files and discard it.
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for the import commit.
  * @returns {void}
  */
-function triggerImport() {
+function triggerImport(notify) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
@@ -551,7 +313,7 @@ function triggerImport() {
                 () => {
                     store.layers = data.layers;
                 },
-                { notify: notifyAdapter, chatSave: 'immediate' },
+                { notify, chatSave: 'immediate' },
             );
             refreshUi();
             toastr.success(
@@ -661,10 +423,11 @@ function resetPromptFields(settings) {
 }
 
 /**
- * Bind action button click handlers (repair, clear, force, stop, export, import, reset).
+ * Bind action button click handlers (clear, refresh, export, import, reset).
+ * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for the import commit.
  * @returns {void}
  */
-function bindClickHandlers() {
+function bindClickHandlers(notify) {
     $(document).on('click', '#sc_clear_memory', async function () {
         if (!confirm('Clear ALL Summaryception memory for this chat and unghost all messages?')) {
             return;
@@ -688,19 +451,6 @@ function bindClickHandlers() {
         }
     });
 
-    $(document).on('click', '#sc_force_summarize, #sc_easy_force_summarize', onForceSummarize);
-    $(document).on('click', '#sc_stale_cache_force', function () {
-        const $toast = $(this).closest('.toast');
-        if ($toast.length) {
-            toastr.clear($toast);
-        }
-        void executeForceSummarize(null);
-    });
-    $(document).on('click', '#sc_slop_breaker, #sc_easy_slop_breaker', onSlopBreaker);
-
-    $(document).on('click', '#sc_stop_summarize, #sc_easy_stop_summarize', onStopSummarize);
-    $(document).on('click', '#sc_resume_summarize, #sc_easy_resume_summarize', onResumeSummarize);
-
     $(document).on('click', '#sc_refresh_preview', () => updateUI());
 
     $(document).on('click', '#sc_export', function () {
@@ -715,7 +465,7 @@ function bindClickHandlers() {
         toastr.success('Memory exported', TOAST_TITLE);
     });
 
-    $(document).on('click', '#sc_import', triggerImport);
+    $(document).on('click', '#sc_import', () => triggerImport(notify));
 
     $(document).on('click', '#sc_reset_defaults', onResetDefaults);
 
