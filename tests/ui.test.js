@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { estimateContextPreview } from '../src/core/token-budget.js';
-import { bindDataSettingElements, readLines } from '../src/entry/ui-bind.js';
+import {
+    bindDataSettingElements,
+    bindSliderSettingPairs,
+    readLines,
+} from '../src/entry/ui-bind.js';
 import { getSettings } from '../src/foundation/state.js';
 import { buildTriggerGaugeModel } from '../src/entry/ui.js';
 import { createJQueryHarness, installSummaryContext } from './test-helpers.js';
@@ -47,6 +51,9 @@ describe('context limit and trigger gauge UI models', () => {
 describe('data-attr setting binding engine', () => {
     beforeEach(() => {
         installSummaryContext({ settings: { debugMode: false, stripPatterns: [] } });
+    });
+    afterEach(() => {
+        delete globalThis.document;
     });
 
     it('reads textarea content as trimmed non-empty lines', () => {
@@ -103,5 +110,70 @@ describe('data-attr setting binding engine', () => {
         expect(getSettings().stripPatterns).toEqual(['foo', 'bar']);
         expect(getSettings().customMemoryPosition).toBe('in_prompt');
         expect(afterSave).toHaveBeenCalledTimes(2);
+    });
+
+    it('clamps slider writes to SLIDER_LIMITS bounds, not the template attributes', () => {
+        const dom = createJQueryHarness({
+            attributes: {
+                'input[type="range"][data-sc-slider-setting]': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    'data-sc-slider-setting': 'memoryTokenBudget',
+                    'data-sc-partner-input': '#sc_memory_token_budget_val',
+                },
+                '#sc_memory_token_budget': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    // Intentionally stale drift: the template says max 16000,
+                    // SLIDER_LIMITS.memoryTokenBudget.MAX is 32000.
+                    min: '4000',
+                    max: '16000',
+                    step: '1000',
+                },
+                '#sc_memory_token_budget_val': { type: 'text' },
+            },
+        });
+        globalThis.$ = dom.$;
+        globalThis.document = {};
+
+        bindSliderSettingPairs();
+
+        dom.element('#sc_memory_token_budget_val').val('24k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(24000);
+
+        dom.element('#sc_memory_token_budget_val').val('99k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(32000);
+    });
+
+    it('round-trips slider writes when the template attributes match the declared bounds', () => {
+        const dom = createJQueryHarness({
+            attributes: {
+                'input[type="range"][data-sc-slider-setting]': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    'data-sc-slider-setting': 'memoryTokenBudget',
+                    'data-sc-partner-input': '#sc_memory_token_budget_val',
+                },
+                '#sc_memory_token_budget': {
+                    type: 'range',
+                    id: 'sc_memory_token_budget',
+                    min: '4000',
+                    max: '32000',
+                    step: '1000',
+                },
+                '#sc_memory_token_budget_val': { type: 'text' },
+            },
+        });
+        globalThis.$ = dom.$;
+        globalThis.document = {};
+
+        bindSliderSettingPairs();
+
+        dom.element('#sc_memory_token_budget_val').val('24k');
+        dom.trigger('change', '#sc_memory_token_budget_val');
+        expect(getSettings().memoryTokenBudget).toBe(24000);
+        expect(dom.element('#sc_memory_token_budget').val()).toBe(24000);
     });
 });

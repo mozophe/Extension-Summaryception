@@ -121,4 +121,4 @@
 - Memory below steady-state use silently truncates injected memory.
 - Cache TTL applies to Prefix Cache mode only.
 - Stale-cache advice needs a queue at or above Min Turns per Batch and a readable last-message time.
-- Retention clamp invariants live in one read-time normalizer. UI sliders delegate to it; keep no second enforcement.
+- Numeric bounds declare once in SLIDER_LIMITS (src/foundation/constants.js); the read-time normalizer is the only enforcement. tests/settings-bounds.test.js pins settings.html attributes to the map, and the UI slider snap is an affordance fed by the same map, not a second enforcement.
