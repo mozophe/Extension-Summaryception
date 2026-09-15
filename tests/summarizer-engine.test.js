@@ -171,4 +171,22 @@ describe('manual run failure limit', () => {
         expect(outcome.fullyCommitted).toBe(false);
         expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(3);
     });
+
+    it('halts as blocked when a completed batch does not move the boundary', async () => {
+        // Failure, then a completed batch whose boundary never moves, then two
+        // failures the halt must never reach.
+        batchMocks.summarizeBatchFromTurns
+            .mockResolvedValueOnce({ status: 'failed' })
+            .mockResolvedValueOnce({ status: 'completed' })
+            .mockResolvedValueOnce({ status: 'failed' })
+            .mockResolvedValueOnce({ status: 'failed' });
+
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(outcome.blocked).toBe(true);
+        expect(outcome.failureLimitReached).toBe(false);
+        expect(outcome.failed).toBe(1);
+        expect(outcome.completed).toBe(0);
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(2);
+    });
 });

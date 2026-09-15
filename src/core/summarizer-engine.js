@@ -184,16 +184,12 @@ export async function resumeAutoSummarization(deps) {
  * @returns {Promise<{ ready: boolean, backlog: number }>}
  */
 export async function describeManualRun(strategy) {
-    const chat = getChat();
-    const store = getChatStore();
-    const settings = getEffectiveSettings();
-    if (strategy !== ELASTIC_STRATEGIES.FORCE && strategy !== ELASTIC_STRATEGIES.SLOP) {
+    const manualStrategy = MANUAL_STRATEGIES[strategy];
+    if (!manualStrategy) {
         return { ready: false, backlog: 0 };
     }
-    const plan =
-        strategy === ELASTIC_STRATEGIES.SLOP
-            ? await buildSlopSummaryRoutePlan(chat, store, settings)
-            : await buildForceSummaryRoutePlan(chat, store, settings);
+    // Synthetic prepared context: route planners are index-only, preflight is skipped.
+    const plan = await manualStrategy.buildBatch({ chat: getChat(), store: getChatStore() });
     return {
         ready: plan.ready,
         backlog: Math.max(plan.batchTurns.length, plan.overflowCount),
@@ -331,21 +327,16 @@ async function executeManualTask(deps, strategy, target, options) {
             }
 
             const result = await processStrategyBatch(batch, strategy, options.notify);
-            await updateManualOutcome({ outcome, result });
-            consecutiveFailures = result.success && result.committed ? 0 : consecutiveFailures;
-
-            if (
-                (await normalizeAfterCommittedResult(outcome, result, options.notify)) === 'failed'
-            ) {
-                break;
-            }
-
-            if (shouldStopManualLoop(outcome, result, options.signal, deps.queue)) {
-                break;
-            }
-
-            consecutiveFailures = updateConsecutiveFailures(outcome, result, consecutiveFailures);
-            if (outcome.failureLimitReached) {
+            const step = await applyManualLoopStep({
+                deps,
+                outcome,
+                result,
+                signal: options.signal,
+                notify: options.notify,
+                consecutiveFailures,
+            });
+            consecutiveFailures = step.consecutiveFailures;
+            if (step.exit) {
                 break;
             }
 
@@ -363,33 +354,26 @@ async function executeManualTask(deps, strategy, target, options) {
     }
 }
 
-async function normalizeAfterCommittedResult(outcome, result, notify) {
-    if (!result.success || !result.committed || outcome.blocked) {
-        return 'skipped';
-    }
+// Consecutive failed batches a manual run tolerates before halting.
+const MANUAL_FAILURE_LIMIT = 3;
 
-    const promotion = await normalizePromotions(notify);
-    if (promotion.status === 'blocked') {
-        outcome.blocked = true;
-    } else if (promotion.status === 'failed') {
-        outcome.failed++;
-    }
-    return promotion.status;
-}
-
-function updateConsecutiveFailures(outcome, result, consecutiveFailures) {
-    if (result.success) {
-        return consecutiveFailures;
-    }
-
-    const failures = consecutiveFailures + 1;
-    outcome.failureLimitReached = failures >= 3;
-    return failures;
-}
-
-async function updateManualOutcome({ outcome, result }) {
+/**
+ * Apply one manual batch result to the run outcome and decide the loop's exit.
+ * The failure streak counts failed batches only: a committed batch resets it,
+ * and a success whose boundary did not move preserves it.
+ * @param {object} step - One loop step's inputs.
+ * @param {ManualRunnerDeps} step.deps - Runner deps; the queue's summarizing state detects external stops.
+ * @param {ManualRunOutcome} step.outcome - Run outcome updated in place.
+ * @param {{ success: boolean, committed: boolean, done?: boolean }} step.result - Batch result flags.
+ * @param {AbortSignal} [step.signal] - Cancellation signal for the run.
+ * @param {import('./notify.js').NotifyAdapter} [step.notify] - Notify adapter for promotions.
+ * @param {number} step.consecutiveFailures - Failure streak before this step.
+ * @returns {Promise<{ exit: boolean, consecutiveFailures: number }>} Exit decision and the updated streak.
+ */
+async function applyManualLoopStep({ deps, outcome, result, signal, notify, consecutiveFailures }) {
     if (result.success && result.committed) {
         outcome.completed++;
+        consecutiveFailures = 0;
         if ((await promptWorkGate('manual outcome')) === 'blocked') {
             outcome.blocked = true;
         }
@@ -398,17 +382,30 @@ async function updateManualOutcome({ outcome, result }) {
     } else {
         outcome.failed++;
     }
-}
 
-function shouldStopManualLoop(outcome, result, signal, queue) {
+    if (result.success && result.committed && !outcome.blocked) {
+        const promotion = await normalizePromotions(notify);
+        if (promotion.status === 'blocked') {
+            outcome.blocked = true;
+        } else if (promotion.status === 'failed') {
+            outcome.failed++;
+            return { exit: true, consecutiveFailures };
+        }
+    }
+
     if (result.done || outcome.blocked) {
-        return true;
+        return { exit: true, consecutiveFailures };
     }
-    if (isCancelled(signal) || !queue.getIsSummarizing()) {
+    if (isCancelled(signal) || !deps.queue.getIsSummarizing()) {
         outcome.cancelled = true;
-        return true;
+        return { exit: true, consecutiveFailures };
     }
-    return false;
+
+    if (!result.success) {
+        consecutiveFailures++;
+        outcome.failureLimitReached = consecutiveFailures >= MANUAL_FAILURE_LIMIT;
+    }
+    return { exit: outcome.failureLimitReached, consecutiveFailures };
 }
 
 /**
