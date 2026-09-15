@@ -111,6 +111,80 @@ describe('buildLayer0Partitions', () => {
         );
     });
 
+    it('keeps token-driven cuts when turns stay within maxSummaryTurns', async () => {
+        const chat = makeSizedChat(6, { userLength: 500, assistantLength: 2000 });
+        const partitions = await buildLayer0Partitions({
+            chat,
+            sourceStartIdx: 0,
+            assistantTurns: turnsAt(chat, [1, 3, 5, 7, 9, 11]),
+            settings: makeSummarySettings({
+                minSummaryBudget: 6000,
+                maxL0SourceTokens: 24000,
+                maxSummaryTurns: 20,
+            }),
+        });
+
+        expect(partitions.length).toBe(3);
+        for (const partition of partitions) {
+            expect(partition.turns.length).toBe(2);
+        }
+        expect(partitions[0].sourceStartIdx).toBe(0);
+        expect(partitions[0].sourceEndIdx).toBe(3);
+        expect(partitions[1].sourceStartIdx).toBe(4);
+        expect(partitions[1].sourceEndIdx).toBe(7);
+        expect(partitions[2].sourceStartIdx).toBe(8);
+        expect(partitions[2].sourceEndIdx).toBe(11);
+    });
+
+    it('applies the turn cap while oversized turns still cut on tokens', async () => {
+        const chat = [
+            makeMessage({ isUser: true, mes: 'x'.repeat(500) }),
+            makeMessage({ mes: 'x'.repeat(30000) }),
+        ];
+        for (let i = 0; i < 9; i++) {
+            chat.push(makeMessage({ isUser: true, mes: 'x'.repeat(100) }));
+            chat.push(makeMessage({ mes: 'x'.repeat(100) }));
+        }
+        const partitions = await buildLayer0Partitions({
+            chat,
+            sourceStartIdx: 0,
+            assistantTurns: turnsAt(chat, [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]),
+            settings: makeSummarySettings({
+                minSummaryBudget: 6000,
+                maxL0SourceTokens: 24000,
+                maxSummaryTurns: 3,
+            }),
+        });
+
+        expect(partitions.length).toBe(4);
+        expect(partitions[0].turns.length).toBe(1);
+        expect(partitions[0].stats.finalTokens).toBeGreaterThan(24000);
+        for (const partition of partitions.slice(1)) {
+            expect(partition.turns.length).toBe(3);
+        }
+    });
+
+    it('caps partitions at maxSummaryTurns when turns are short', async () => {
+        const chat = makeSizedChat(12, { userLength: 100, assistantLength: 100 });
+        const turnTokens = messageLineTokens(true, 100) + messageLineTokens(false, 100);
+        const partitions = await buildLayer0Partitions({
+            chat,
+            sourceStartIdx: 0,
+            assistantTurns: turnsAt(chat, [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]),
+            settings: makeSummarySettings({
+                minSummaryBudget: 6000,
+                maxL0SourceTokens: 24000,
+                maxSummaryTurns: 3,
+            }),
+        });
+
+        expect(partitions.length).toBe(4);
+        for (const partition of partitions) {
+            expect(partition.turns.length).toBe(3);
+            expect(partition.stats.finalTokens).toBe(3 * turnTokens);
+        }
+    });
+
     it('extends the final segment to finalSourceEndIdx', async () => {
         const chat = [
             ...makeSizedChat(2, { userLength: 500, assistantLength: 2000 }),

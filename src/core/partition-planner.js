@@ -14,7 +14,8 @@ const L0_SOURCE_OVERSHOOT_TOLERANCE = 1.15;
  */
 
 /**
- * Build token-balanced Layer 0 source partitions on assistant-turn boundaries.
+ * Build token-balanced Layer 0 source partitions on assistant-turn boundaries,
+ * capped at settings.maxSummaryTurns turns per partition.
  * @param {object} p
  * @param {ChatMessage[]} p.chat
  * @param {number} p.sourceStartIdx
@@ -45,14 +46,20 @@ export async function buildLayer0Partitions({
     const totalTokens = sumSegmentTokens(segments);
     const maxTokens = getMaxL0SourceTokens(settings);
     const targetTokens = getTargetSourceTokens(settings);
+    const maxTurns = settings.maxSummaryTurns;
 
-    if (totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE)) {
+    if (
+        turns.length <= maxTurns &&
+        totalTokens <= Math.ceil(targetTokens * L0_SOURCE_OVERSHOOT_TOLERANCE)
+    ) {
         return [buildPartitionFromSegments(segments)];
     }
 
-    const partitionCount = Math.max(1, Math.ceil(totalTokens / targetTokens));
+    const tokenPartitions = Math.ceil(totalTokens / targetTokens);
+    const turnPartitions = Math.ceil(turns.length / maxTurns);
+    const partitionCount = Math.max(1, tokenPartitions, turnPartitions);
     const softTarget = Math.min(maxTokens, Math.ceil(totalTokens / partitionCount));
-    return buildBalancedPartitions(segments, softTarget, maxTokens);
+    return buildBalancedPartitions(segments, softTarget, maxTokens, maxTurns);
 }
 
 /**
@@ -100,7 +107,7 @@ function sumSegmentTokens(segments) {
     return segments.reduce((total, segment) => total + segment.stats.finalTokens, 0);
 }
 
-function buildBalancedPartitions(segments, softTarget, maxTokens) {
+function buildBalancedPartitions(segments, softTarget, maxTokens, maxTurns) {
     const partitions = [];
     let current = [];
     let currentTokens = 0;
@@ -108,7 +115,14 @@ function buildBalancedPartitions(segments, softTarget, maxTokens) {
     for (const segment of segments) {
         const segmentTokens = segment.stats.finalTokens;
         if (
-            shouldCutBeforeSegment({ current, currentTokens, segmentTokens, softTarget, maxTokens })
+            shouldCutBeforeSegment({
+                current,
+                currentTokens,
+                segmentTokens,
+                softTarget,
+                maxTokens,
+                maxTurns,
+            })
         ) {
             partitions.push(buildPartitionFromSegments(current));
             current = [];
@@ -126,9 +140,20 @@ function buildBalancedPartitions(segments, softTarget, maxTokens) {
     return partitions;
 }
 
-function shouldCutBeforeSegment({ current, currentTokens, segmentTokens, softTarget, maxTokens }) {
+function shouldCutBeforeSegment({
+    current,
+    currentTokens,
+    segmentTokens,
+    softTarget,
+    maxTokens,
+    maxTurns,
+}) {
     if (current.length === 0) {
         return false;
+    }
+
+    if (current.length >= maxTurns) {
+        return true;
     }
 
     const combinedTokens = currentTokens + segmentTokens;
