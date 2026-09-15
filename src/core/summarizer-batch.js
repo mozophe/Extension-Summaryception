@@ -135,8 +135,8 @@ async function summarizeBatchCore({ chat, store, eligibleTurns, opts, notify }) 
     );
 }
 /**
- * Atomic-partition core. One shared progress handle opens at the first
- * validated passage and closes exactly once at the terminal outcome.
+ * Atomic-partition core. One shared progress owner opens at the first
+ * validated passage and settles exactly once at the terminal outcome.
  * @param {import('./partition-planner.js').SourcePartition[]} partitions
  * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
  * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
@@ -150,64 +150,56 @@ async function summarizeAtomicLayer0PartitionsCore(partitions, notify) {
     const chat = getChat();
     const store = getChatStore();
     ensureLayer0(store);
-    let progress = null;
+    const progress = createBatchProgress(notify);
     let contextText = buildFullContext(0);
     const snapshots = [];
     const pendingSnippets = [];
     const baseMutationEpoch = getSummaryStoreMutationEpoch(store);
 
-    let progressSettled = false;
-    // Same settled-flag guard as commitLayer0Job: runLayer0Summarization's
-    // internal close and this core's own failure closes both route through
-    // here, so the shared handle closes exactly once with the terminal kind.
-    const settleProgressClosed = (handle, kind = BATCH_PROGRESS.FAILED) => {
-        if (progressSettled) {
-            return;
-        }
-        progressSettled = true;
-        closeBatchProgress(notify, handle, kind);
-    };
+    try {
+        for (const partition of usablePartitions) {
+            if (getSummaryStoreMutationEpoch(store) !== baseMutationEpoch) {
+                progress.settle();
+                return { status: 'failed', completed: snapshots.length, failed: 1 };
+            }
 
-    for (const partition of usablePartitions) {
-        if (getSummaryStoreMutationEpoch(store) !== baseMutationEpoch) {
-            settleProgressClosed(progress);
-            return { status: 'failed', completed: snapshots.length, failed: 1 };
+            const result = await runLayer0Summarization({
+                chat,
+                store,
+                passageStart: partition.sourceStartIdx,
+                endIdx: partition.sourceEndIdx,
+                contextText,
+                metadata: { assistantTurnCount: partition.turns.length },
+                notify,
+                progress,
+                total: usablePartitions.length,
+            });
+            if (result.status) {
+                progress.settle();
+                return { status: 'failed', completed: snapshots.length, failed: 1 };
+            }
+
+            snapshots.push(result.snapshot);
+            pendingSnippets.push(buildLayer0Snippet(result.snapshot, result.summary));
+            contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
+            progress.update(snapshots.length);
         }
 
-        const result = await runLayer0Summarization({
-            chat,
-            store,
-            passageStart: partition.sourceStartIdx,
-            endIdx: partition.sourceEndIdx,
-            contextText,
-            metadata: { assistantTurnCount: partition.turns.length },
-            notify,
+        const committed = await commitLayer0Job({
+            kind: 'layer0-atomic-cache',
+            snapshot: snapshots[0],
             progress,
-            total: usablePartitions.length,
-            settle: settleProgressClosed,
+            commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }),
         });
-        if (result.status) {
-            settleProgressClosed(progress);
-            return { status: 'failed', completed: snapshots.length, failed: 1 };
-        }
-
-        progress = result.progress;
-        snapshots.push(result.snapshot);
-        pendingSnippets.push(buildLayer0Snippet(result.snapshot, result.summary));
-        contextText = buildPendingLayer0Context(store.layers, pendingSnippets);
-        notify?.update(progress, { processed: snapshots.length });
+        return committed
+            ? { status: 'completed', completed: snapshots.length }
+            : { status: 'failed', failed: snapshots.length };
+    } catch (err) {
+        // Snapshot capture or partition bookkeeping can throw after the shared
+        // handle opened; settle it before the exception reaches summarizeSafely.
+        progress.settle();
+        throw err;
     }
-
-    const committed = await commitLayer0Job({
-        kind: 'layer0-atomic-cache',
-        snapshot: snapshots[0],
-        progress,
-        notify,
-        commit: () => commitAtomicLayer0Snippets({ snapshots, pendingSnippets, notify }),
-    });
-    return committed
-        ? { status: 'completed', completed: snapshots.length }
-        : { status: 'failed', failed: snapshots.length };
 }
 
 /**
@@ -222,6 +214,47 @@ function closeBatchProgress(notify, progress, kind) {
     if (notify && progress) {
         notify.clear(progress, { kind });
     }
+}
+
+/**
+ * Internal owner of one batch progress lifecycle (one handle per run).
+ * Opens lazily on the first validated passage, updates through the run, and
+ * settles exactly once with a terminal event kind. Runs without an adapter
+ * never open a handle, so every settlement is a silent no-op.
+ * @typedef {{ open: (total: number) => unknown, update: (processed: number) => void, settle: (kind?: string) => void }} BatchProgressOwner
+ */
+
+/**
+ * Build the batch progress owner for one summarization run.
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter
+ * @returns {BatchProgressOwner}
+ */
+function createBatchProgress(notify) {
+    let handle = null;
+    let settled = false;
+    return {
+        open(total) {
+            if (settled || !notify) {
+                return null;
+            }
+            if (!handle) {
+                handle = notify.progress({ label: BATCH_PROGRESS.MEMORY, total });
+            }
+            return handle;
+        },
+        update(processed) {
+            if (handle && !settled) {
+                notify?.update(handle, { processed });
+            }
+        },
+        settle(kind = BATCH_PROGRESS.FAILED) {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            closeBatchProgress(notify, handle, kind);
+        },
+    };
 }
 
 /**
@@ -260,10 +293,9 @@ async function summarizeSafely(catchExceptions, source, run) {
  * @param {string} [p.contextText] - Prebuilt pending context for multi-partition jobs
  * @param {object} [p.metadata] - Extra callSummarizer options for this job
  * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
- * @param {unknown} p.progress - Shared batch progress handle; null before the first validation
+ * @param {BatchProgressOwner} p.progress - Shared batch progress owner for this run
  * @param {number} p.total - Total partitions in the batch
- * @param {((handle: unknown, kind?: string) => void) | undefined} [p.settle] - Terminal close routed to the atomic caller's settled guard so the shared handle closes exactly once
- * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, progress: unknown, status?: undefined} | {status: 'idle' | 'aborted' | 'failed'}>}
+ * @returns {Promise<{snapshot: import('./summarizer-commit.js').SummarizationJobSnapshot, summary: string, status?: undefined} | {status: 'idle' | 'aborted' | 'failed'}>}
  */
 async function runLayer0Summarization({
     chat,
@@ -275,7 +307,6 @@ async function runLayer0Summarization({
     notify,
     progress,
     total,
-    settle,
 }) {
     const snapshot = await captureLayer0Snapshot({
         chat,
@@ -289,20 +320,10 @@ async function runLayer0Summarization({
         return { status: 'idle' };
     }
 
-    if (!progress && notify) {
-        progress = notify.progress({ label: BATCH_PROGRESS.MEMORY, total });
-    }
+    progress.open(total);
 
-    // Route the close through the atomic caller's settled guard when one is
-    // installed; direct callers close their own handle here.
-    const failClosed = (kind = BATCH_PROGRESS.FAILED) => {
-        if (settle) {
-            settle(progress, kind);
-            return;
-        }
-        closeBatchProgress(notify, progress, kind);
-    };
-
+    // Every failure routes through the owner so the run's handle settles
+    // exactly once, whether this run owns it or shares it across partitions.
     let outcome;
     try {
         outcome = await callSummarizer(
@@ -318,19 +339,19 @@ async function runLayer0Summarization({
             notify,
         );
     } catch (err) {
-        failClosed();
+        progress.settle();
         throw err;
     }
     if (outcome.status === 'aborted') {
-        failClosed(BATCH_PROGRESS.ABORTED);
+        progress.settle(BATCH_PROGRESS.ABORTED);
         return { status: 'aborted' };
     }
     const summary = outcome.status === 'completed' ? outcome.text : '';
     if (!summary || !isLayer0SummarySafe(summary, snapshot)) {
-        failClosed();
+        progress.settle();
         return { status: 'failed' };
     }
-    return { snapshot, summary, progress };
+    return { snapshot, summary };
 }
 
 /**
@@ -339,24 +360,11 @@ async function runLayer0Summarization({
  * @param {object} p
  * @param {string} p.kind - Commit job kind
  * @param {import('./summarizer-commit.js').SummarizationJobSnapshot} p.snapshot - Job snapshot
- * @param {unknown} p.progress - Batch progress handle
- * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter
+ * @param {BatchProgressOwner} p.progress - Batch progress owner for this run
  * @param {() => Promise<boolean>} p.commit - Commit executed inside commitWhenSafe's apply
  * @returns {Promise<boolean>}
  */
-async function commitLayer0Job({ kind, snapshot, progress, notify, commit }) {
-    let settled = false;
-    const settle = (committed) => {
-        if (settled) {
-            return;
-        }
-        settled = true;
-        closeBatchProgress(
-            notify,
-            progress,
-            committed ? BATCH_PROGRESS.UPDATED : BATCH_PROGRESS.FAILED,
-        );
-    };
+async function commitLayer0Job({ kind, snapshot, progress, commit }) {
     let result;
     try {
         result = await commitWhenSafe({
@@ -364,12 +372,12 @@ async function commitLayer0Job({ kind, snapshot, progress, notify, commit }) {
             snapshot,
             apply: async () => {
                 const committed = await commit();
-                settle(committed);
+                progress.settle(committed ? BATCH_PROGRESS.UPDATED : BATCH_PROGRESS.FAILED);
                 return committed;
             },
         });
     } catch (err) {
-        settle(false);
+        progress.settle();
         throw err;
     }
     return result !== 'stale';
@@ -387,25 +395,25 @@ async function commitLayer0Job({ kind, snapshot, progress, notify, commit }) {
  * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
 async function performBatchSummary({ chat, store, passageStart, endIdx, notify }) {
+    const progress = createBatchProgress(notify);
     const result = await runLayer0Summarization({
         chat,
         store,
         passageStart,
         endIdx,
         notify,
-        progress: null,
+        progress,
         total: 1,
     });
     if (result.status) {
         return result.status === 'idle' ? { status: 'idle' } : { status: 'failed' };
     }
-    notify?.update(result.progress, { processed: 1 });
+    progress.update(1);
 
     const committed = await commitLayer0Job({
         kind: 'layer0',
         snapshot: result.snapshot,
-        progress: result.progress,
-        notify,
+        progress,
         commit: () =>
             commitLayer0Snippet({ snapshot: result.snapshot, summary: result.summary, notify }),
     });

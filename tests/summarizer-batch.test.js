@@ -242,4 +242,34 @@ describe('Layer 0 atomic multi-partition progress', () => {
         expect(clears[0].handle).toBe(progress[0].handle);
         expect(clears[0].event).toEqual({ kind: 'batch-memory-aborted' });
     });
+
+    it('settles the shared progress when a later partition fails to capture its snapshot', async () => {
+        const recorder = makeNotifyRecorder();
+        const chat = [
+            makeMessage({ isUser: true, scId: 'user-id', mes: 'User scene.' }),
+            makeMessage({ scId: 'assistant-id', mes: 'First assistant scene.' }),
+            makeMessage({ isUser: true, scId: 'user-id-2', mes: 'User scene two.' }),
+            makeMessage({ scId: undefined, mes: 'Second assistant scene.' }),
+        ];
+        installSummaryContext({ chat, metadata: { summaryception: makeSummaryStore() } });
+        callSummarizer.mockResolvedValueOnce({
+            status: 'completed',
+            text: VALID_SUMMARY,
+        });
+        const partitions = [
+            { turns: [{ index: 1 }], sourceStartIdx: 1, sourceEndIdx: 1 },
+            { turns: [{ index: 3 }], sourceStartIdx: 3, sourceEndIdx: 3 },
+        ];
+
+        await expect(summarizeAtomicLayer0Partitions(partitions, {}, recorder)).rejects.toThrow(
+            'Cannot summarize messages without stable Summaryception IDs.',
+        );
+
+        const progress = recorder.events.filter((event) => event.type === 'progress');
+        expect(progress).toHaveLength(1);
+        const clears = recorder.events.filter((event) => event.type === 'clear');
+        expect(clears).toHaveLength(1);
+        expect(clears[0].handle).toBe(progress[0].handle);
+        expect(clears[0].event).toEqual({ kind: 'batch-memory-failed' });
+    });
 });
