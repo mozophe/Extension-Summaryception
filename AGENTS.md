@@ -29,7 +29,7 @@ Issues and specs live in GitHub Issues (vadash/Extension-Summaryception) via the
 
 ### Triage labels
 
-Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+Five-role vocabulary pinned in `docs/agents/triage-labels.md`; use its label strings verbatim.
 
 ### Domain docs
 

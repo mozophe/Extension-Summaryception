@@ -16,5 +16,4 @@ When your output names a domain concept (issue title, refactor proposal, test na
 ## Flag ADR conflicts
 
 If your output contradicts an existing ADR, surface it rather than silently overriding:
-
-> _Contradicts ADR-0007 (event-sourced orders), but worth reopening because…_
+> _Contradicts ADR-0001 (host facade), but worth reopening because…_

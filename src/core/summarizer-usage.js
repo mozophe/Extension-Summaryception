@@ -1,6 +1,8 @@
 import { debug } from '../foundation/logger.js';
 import { countTextTokens, formatTokenValue } from './token-count.js';
 
+// Call-label and token-range formatting lives here only. Prompt logs (request-attempt-log.js)
+// and usage lines import it; do not duplicate it per caller.
 /**
  * @typedef {import('./chatutils.js').PassageRegexStats} PassageRegexStats
  */

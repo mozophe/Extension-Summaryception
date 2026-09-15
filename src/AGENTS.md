@@ -8,26 +8,20 @@
 - Easy and Advanced views edit the same settings.
 - Effective settings disable runtime behavior only when the extension is Off.
 - Use raw settings only for persistence and UI forms.
-- Per-chat summaries live with chat metadata and survive extension reloads (ADR-0002).
-- Global configuration lives in extension settings.
-- Any summary layer or snippet mutation must bump the store mutation epoch (ADR-0003).
+- Per-chat summaries live with chat metadata; global configuration in extension settings (ADR-0002).
+- Any summary layer or snippet mutation must bump the store mutation epoch; consumers cache derived data keyed by it (ADR-0003).
 - Snippet mutations cross the Snippet Commit seam (src/core/snippet-commit.js): mutate, Ghosting ownership, epoch bump, persist, gated injection refresh. Do not hand-roll the sequence.
-- Consumers cache derived data by mutation epoch.
 - Implicit any is allowed. Annotate parameters that hold structured objects so the type gate checks property reads.
 
 ## Memory
 
 - Balanced and Prefix Cache are the only memory modes. Stored legacy Append Only normalizes to Prefix Cache on load.
 - Layer 0 converts turns outside the verbatim window into narrative and a rolling state snapshot.
-- State is a bounded snapshot. Only the newest state reaches the prompt.
-- Deeper layers merge older snippets after a layer exceeds its limit.
 - A promotion overflow drain stops after a fixed number of consecutive promotion failures. The failure counter resets on success.
 - One drain driver owns Promotion overflow clearing; commit applies one merge and never re-drains.
 - The drain asks the Foreground Gate before and after every attempt.
 - Auto cycles tolerate one consecutive promotion failure; manual runs tolerate three.
 - Promotion uses the final state snapshot in the promoted span.
-- State compaction is deterministic and runs once per assembly.
-- State category budgets apply independently. Date and time remain unchanged.
 - Generated output outside its layer bounds triggers section-aware repair.
 - Repair retries only the failed section.
 - Narrative dates omit years, ISO syntax, and clock lead-ins.
@@ -35,7 +29,6 @@
 - Stable message identifiers own snippet provenance and hiding.
 - Resolve identifiers to current chat indexes only for host commands and planning.
 - Do not infer ownership from old array positions.
-- Hide summarized turns through the host command.
 - Ghosting receives the notify adapter through its options. The notify adapter enters core only through explicit arguments; entry wiring creates and distributes the instance.
 - Unhide only store-owned messages.
 - Clear unhides the chat and removes extension-owned chat data.
@@ -54,16 +47,8 @@
 - Keep token limits out of state category definitions.
 - Strip configured output patterns before parsing.
 - Dry runs may mark the payload or a separate argument.
-- Ignore both dry-run forms before updating comparison state.
-- Report one contiguous-prefix verdict for each real request.
 - A broken-prefix report includes the complete first changed block.
-- Treat only an explicit system flag as a system message.
-- Replace every placeholder occurrence. Custom user templates may repeat a placeholder.
-- Start a substituted schema block on its own line. Never concatenate it to instruction text.
 - Keep structural header patterns in the shared header module. Do not define local copies.
-- Section extraction rules differ by caller. One rule requires both headers; another requires only the state header.
-- Keep call-label and token-range formatting in one module. Prompt logs and usage lines share them.
-- Prompt preset keys and setting keys pair in one shared table. Add a new prompt field there only; both consumers derive from it.
 
 ## Connection
 
@@ -92,8 +77,8 @@
 - Manual run callbacks and the abort signal pass as an explicit argument. Never carry them on the task object.
 - A manual run needs a numeric target boundary. Reject the run when the route plan omits it.
 - Automatic work must not mutate the prompt during generation.
-- The app-ready signal fires before the chat and its metadata load. Wait for the chat-changed signal to read chat state.
-- Loaded-chat reconciliation runs on every chat-changed signal: normalize keys, update injection, re-apply ghosting.
+- Loaded-chat reconciliation runs at the app-ready signal: normalize keys, update injection, re-apply ghosting.
+- Chat-changed re-runs reconciliation when the store still holds the empty default.
 - Recover stale prompt freezes at the start of an automatic cycle.
 
 ## UI
@@ -105,7 +90,6 @@
 - Compute route plans and metric counts once per refresh. Pass them to renderers as parameters.
 - Status panels read the auto work read model; entry renders scalars.
 - Sliders save on input. Text and numeric controls save on change or blur.
-- Keep slider min, max, and step equal to the settings clamp bounds.
 - Operating mode gates runtime behavior. Complexity mode selects the visible panel.
 - Bind plain settings through the data-attribute engine. Hand-bind only controls with special semantics.
 - One layer-label helper serves status panel, snippet browser, and slash commands.
@@ -113,10 +97,9 @@
 - Show the Off banner beside the selected panel.
 - Open the Status tab on every startup.
 - A state category toggle needs both write handling and render synchronization.
-- Feature modules return structured outcomes. Entry modules format user notices.
+- Feature modules return structured outcomes and emit notify events; entry owns all notice text, display duration, and update cadence (ADR-0004).
 - Bind toast action buttons with delegated document clicks. Toast content does not exist at bind time.
 - Keep user-facing text out of feature modules.
-- Core emits structured notify events and outcome statuses. Entry owns all notice text, display duration, and update cadence (ADR-0004).
 - Keep the first view focused on status, activity, and required action.
 - Use compact sections and responsive grids. Collapse near 520 pixels.
 - Keep navigation sticky, opaque, keyboard accessible, and text-labelled.
@@ -131,7 +114,7 @@
 
 - Do not optimize raw cost alone. Smaller context can reduce roleplay quality.
 - Automatic summarization waits until the configured Recent + Queued raw-chat threshold is full.
-- Prefix Cache keeps a larger recent range and queues older chat for atomic flushes.
+- Prefix Cache trades some verbatim range for a much larger queued span and atomic flushes.
 - Recall depends on prompt quality, model behavior, and chat depth.
 - Context preview numbers come from one core estimator.
 - Memory below steady-state use silently truncates injected memory.

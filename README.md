@@ -69,7 +69,7 @@ This mode works everywhere and keeps context size fairly steady. If cached input
 
 ### Prefix Cache
 
-Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat grow to 32k so more of each request can stay cached.
+Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat span 36k — 20k verbatim plus a 16k queued range — so more of each request can stay cached.
 
 Suppose the next request keeps the same start but changes the tail. A normal prefix cache can still reuse that unchanged start. Your usual lorebooks work normally; no migration or special outlet is needed.
 
@@ -114,7 +114,7 @@ There are three routes:
 - Merge for deeper Layer 1+ promotion work.
 - Fallback for retryable failures after the primary route gives up.
 
-OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Streaming responses must finish with `data: [DONE]`; incomplete streams are treated as failed attempts. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
+OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
 
 ## Slash commands
 

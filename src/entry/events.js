@@ -24,6 +24,7 @@ let previousPromptSectionHashes = [];
 
 /**
  * Log one prefix-stability verdict for each final, non-dry-run chat prompt.
+ * Both dry-run forms (payload flag, separate argument) are ignored before any comparison state updates.
  * @param {...unknown} args - CHAT_COMPLETION_PROMPT_READY event arguments.
  * @returns {void}
  */

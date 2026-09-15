@@ -107,6 +107,7 @@ export function isSummarizerConversationMessage(message) {
     if (!message?.mes || !String(message.mes).trim()) {
         return false;
     }
+    // Only an explicit host system flag makes a message system; never infer from role or content.
     if (message.is_system || message.is_hidden || message.extra?.type) {
         return false;
     }

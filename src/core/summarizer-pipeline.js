@@ -313,6 +313,7 @@ function getStringSetting(value, fallback) {
  */
 function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metadata }) {
     const sourceState = metadata.sourceState || '(none)';
+    // replaceAll on purpose: every placeholder occurrence is replaced; user templates may repeat one.
     const prompt = template
         .replaceAll('{{player_name}}', getPlayerName())
         .replaceAll('{{context_str}}', contextStr || '(none yet)')
