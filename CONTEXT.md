@@ -95,5 +95,5 @@ _Avoid_: Stop guard
 
 **Prompt Profile**:
 One preset select plus prompt textarea pair, joined by a `(presetKey, settingKey)` binding. Picking a preset fills the textarea; editing the textarea flips the profile to `custom`.
-Code: `bindPromptProfiles` / `resetPromptFields` (src/entry/ui-prompts.js)
+Code: `bindPromptProfiles` (src/entry/ui-prompts.js); defaults reset via `resetSettingsToDefaults` (src/foundation/state.js)
 _Avoid_: prompt field, preset pair

@@ -18,6 +18,7 @@ import {
     getPlayerName,
     getSettings,
     getSummaryStoreMutationEpoch,
+    resetSettingsToDefaults,
 } from '../src/foundation/state.js';
 import {
     installSummaryContext,
@@ -212,5 +213,100 @@ describe('getPlayerName', () => {
     it('falls back to "User" when name1 is absent', () => {
         delete globalThis.SillyTavern.getContext().name1;
         expect(getPlayerName()).toBe('User');
+    });
+});
+
+describe('resetSettingsToDefaults', () => {
+    function settingsFor(overrides = {}) {
+        installSummaryContext({ settings: overrides });
+        return getSettings();
+    }
+
+    it('preserves mode, connection-route, and route timeout settings', () => {
+        const s = settingsFor({
+            memoryMode: MEMORY_MODES.PREFIX_CACHE,
+            uiMode: UI_MODES.ADVANCED,
+            configMode: UI_MODES.ADVANCED,
+            connectionSource: 'profile',
+            connectionProfileId: 'profile-1',
+            requestTimeoutSeconds: 90,
+            mergeConnectionProfileId: 'merge-1',
+            mergeConnectionSource: 'profile',
+            mergeSummarizerResponseLength: 777,
+            mergeRequestTimeoutSeconds: 80,
+            fallbackConnectionSource: 'default',
+            fallbackConnectionProfileId: 'fallback-1',
+            fallbackSummarizerResponseLength: 555,
+            fallbackRequestTimeoutSeconds: 70,
+        });
+
+        resetSettingsToDefaults();
+
+        expect(s).toMatchObject({
+            memoryMode: MEMORY_MODES.PREFIX_CACHE,
+            uiMode: UI_MODES.ADVANCED,
+            configMode: UI_MODES.ADVANCED,
+            connectionSource: 'profile',
+            connectionProfileId: 'profile-1',
+            requestTimeoutSeconds: 90,
+            mergeConnectionSource: 'profile',
+            mergeConnectionProfileId: 'merge-1',
+            mergeSummarizerResponseLength: 777,
+            mergeRequestTimeoutSeconds: 80,
+            fallbackConnectionSource: 'default',
+            fallbackConnectionProfileId: 'fallback-1',
+            fallbackSummarizerResponseLength: 555,
+            fallbackRequestTimeoutSeconds: 70,
+        });
+    });
+    it('resets plain keys to defaults and re-enables debug mode', () => {
+        const s = settingsFor();
+        s.injectionTemplate = 'edited';
+        s.autoPaused = true;
+        s.minSummaryTurns = 9;
+        s.stateCatBonds = true;
+        s.debugMode = false;
+
+        resetSettingsToDefaults();
+
+        expect(s.injectionTemplate).toBe(defaultSettings.injectionTemplate);
+        expect(s.autoPaused).toBe(defaultSettings.autoPaused);
+        expect(s.minSummaryTurns).toBe(defaultSettings.minSummaryTurns);
+        expect(s.stateCatBonds).toBe(defaultSettings.stateCatBonds);
+        expect(s.debugMode).toBe(true);
+    });
+
+    it('restores retention budgets from the preserved memory mode preset', () => {
+        const s = settingsFor({ memoryMode: MEMORY_MODES.PREFIX_CACHE });
+        s.verbatimTokenBudget = 1;
+        s.queuedTokenBudget = 999999;
+
+        resetSettingsToDefaults();
+        expect(s).toMatchObject(MEMORY_MODE_PRESETS[MEMORY_MODES.PREFIX_CACHE]);
+    });
+
+    it('resets non-custom prompt profiles and keeps custom profiles untouched', () => {
+        const s = settingsFor();
+        s.promptPreset = 'narrative';
+        s.summarizerUserPrompt = 'edited user prompt';
+        s.promotionSystemPromptPreset = 'custom';
+        s.promotionSystemPrompt = 'kept custom text';
+
+        resetSettingsToDefaults();
+
+        expect(s.promptPreset).toBe(defaultSettings.promptPreset);
+        expect(s.summarizerUserPrompt).toBe(defaultSettings.summarizerUserPrompt);
+        expect(s.promotionSystemPromptPreset).toBe('custom');
+        expect(s.promotionSystemPrompt).toBe('kept custom text');
+    });
+
+    it('copies default arrays instead of aliasing them', () => {
+        const s = settingsFor();
+        s.stripPatterns.push('extra-pattern');
+
+        resetSettingsToDefaults();
+
+        expect(s.stripPatterns).toEqual(defaultSettings.stripPatterns);
+        expect(s.stripPatterns).not.toBe(defaultSettings.stripPatterns);
     });
 });

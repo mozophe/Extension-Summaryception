@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { clearSummaryceptionMemory } from '../src/features/memory.js';
-import { installSummaryContext, makeMessage, makeSummaryStore } from './test-helpers.js';
+import { clearSummaryceptionMemory, importSummaryceptionMemory } from '../src/features/memory.js';
+import {
+    installSummaryContext,
+    makeMessage,
+    makeNotifyRecorder,
+    makeSummaryStore,
+} from './test-helpers.js';
 
 describe('clearSummaryceptionMemory', () => {
     it('unhides the full chat and removes all Summaryception chat metadata', async () => {
@@ -52,5 +57,96 @@ describe('clearSummaryceptionMemory', () => {
         expect(runtime.chat.every((message) => !Object.hasOwn(message, 'sc_id'))).toBe(true);
         expect(saveMetadata).toHaveBeenCalled();
         expect(saveChat).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('importSummaryceptionMemory', () => {
+    const validLayers = [
+        [{ text: 'l0', sourceMessageIds: ['a-1'] }],
+        [
+            { text: 'l1a', sourceMessageIds: ['b-1'] },
+            { text: 'l1b', sourceMessageIds: ['b-2'] },
+        ],
+    ];
+
+    function installStore(storeOverrides = {}) {
+        const store = makeSummaryStore(storeOverrides);
+        installSummaryContext({
+            metadata: { summaryception: store, unrelated: { keep: true } },
+        });
+        return store;
+    }
+
+    it('imports valid layers through the commit seam and reports the snippet count', async () => {
+        const store = installStore();
+        const notify = makeNotifyRecorder();
+
+        const result = await importSummaryceptionMemory(
+            { layers: validLayers, ghostedMessageIds: ['a-1'] },
+            { notify },
+        );
+
+        expect(result).toEqual({ status: 'imported', count: 3 });
+        expect(store.layers).toEqual(validLayers);
+        expect(store.mutationEpoch).toBeGreaterThan(0);
+        expect(store.ghostedMessageIds).toEqual(['a-1', 'b-1', 'b-2']);
+    });
+
+    it('rejects a payload without layer arrays and leaves the store untouched', async () => {
+        const sentinel = [{ text: 'keep', sourceMessageIds: ['keep-1'] }];
+        const store = installStore({ layers: [sentinel], ghostedMessageIds: ['keep-1'] });
+        const notify = makeNotifyRecorder();
+
+        const result = await importSummaryceptionMemory({ ghostedMessageIds: [] }, { notify });
+
+        expect(result).toEqual({ status: 'invalid' });
+        expect(store.layers).toEqual([sentinel]);
+        expect(store.mutationEpoch).toBe(0);
+    });
+
+    it('rejects a payload without ghosted IDs and leaves the store untouched', async () => {
+        const sentinel = [{ text: 'keep', sourceMessageIds: ['keep-1'] }];
+        const store = installStore({ layers: [sentinel], ghostedMessageIds: ['keep-1'] });
+        const notify = makeNotifyRecorder();
+
+        const result = await importSummaryceptionMemory({ layers: validLayers }, { notify });
+
+        expect(result).toEqual({ status: 'invalid' });
+        expect(store.layers).toEqual([sentinel]);
+        expect(store.mutationEpoch).toBe(0);
+    });
+
+    it('rejects a payload whose snippets fail validation and leaves the store untouched', async () => {
+        const sentinel = [{ text: 'keep', sourceMessageIds: ['keep-1'] }];
+        const store = installStore({ layers: [sentinel], ghostedMessageIds: ['keep-1'] });
+        const notify = makeNotifyRecorder();
+
+        const result = await importSummaryceptionMemory(
+            { layers: [[{ text: 'no provenance' }]], ghostedMessageIds: [] },
+            { notify },
+        );
+
+        expect(result).toEqual({ status: 'invalid' });
+        expect(store.layers).toEqual([sentinel]);
+        expect(store.mutationEpoch).toBe(0);
+    });
+
+    it('reports failure and rolls the store back when the commit fails', async () => {
+        const snapshot = [[{ text: 'keep', sourceMessageIds: ['keep-1'] }]];
+        const store = installStore({ layers: snapshot, ghostedMessageIds: ['keep-1'] });
+        const notify = makeNotifyRecorder();
+        const failure = new Error('disk full');
+        const saveMetadata = vi.fn().mockRejectedValueOnce(failure);
+        installSummaryContext({ metadata: { summaryception: store }, saveMetadata });
+
+        const result = await importSummaryceptionMemory(
+            { layers: validLayers, ghostedMessageIds: ['a-1'] },
+            { notify },
+        );
+
+        expect(result).toEqual({ status: 'failed', cause: failure });
+        expect(store.layers).toEqual(snapshot);
+        expect(store.ghostedMessageIds).toEqual(['keep-1']);
+        expect(store.mutationEpoch).toBe(0);
     });
 });

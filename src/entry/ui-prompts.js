@@ -63,22 +63,6 @@ export function bindPromptProfiles() {
     }
 }
 
-/**
- * Reset every Prompt Profile to its default preset unless set to custom.
- * @param {object} settings - Settings object mutated in place.
- * @returns {void}
- */
-export function resetPromptFields(settings) {
-    for (const field of PROMPT_FIELDS) {
-        if (settings[field.presetKey] === 'custom') {
-            continue;
-        }
-        settings[field.presetKey] = field.defaultPreset;
-        settings[field.settingKey] =
-            field.presets[field.defaultPreset] || defaultSettings[field.settingKey];
-    }
-}
-
 function bindPromptPresetSelect(field) {
     $(document).on('change', field.presetSelect, function () {
         const selected = String($(this).val());

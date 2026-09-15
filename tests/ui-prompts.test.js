@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PROMPT_PRESETS, defaultSettings } from '../src/foundation/constants.js';
-import { bindPromptProfiles, resetPromptFields } from '../src/entry/ui-prompts.js';
+import { bindPromptProfiles } from '../src/entry/ui-prompts.js';
 import { getSettings } from '../src/foundation/state.js';
 import { createJQueryHarness, installSummaryContext } from './test-helpers.js';
 
@@ -63,20 +63,5 @@ describe('prompt profile bindings', () => {
         expect(s.promptPreset).toBe('custom');
         expect(dom.element('#sc_prompt_preset').val()).toBe('custom');
         expect(saveSettingsDebounced).toHaveBeenCalledTimes(1);
-    });
-
-    it('restores non-custom profiles to defaults and leaves custom profiles untouched', () => {
-        const s = getSettings();
-        s.promptPreset = 'narrative';
-        s.summarizerUserPrompt = 'edited narrative text';
-        s.promotionSystemPromptPreset = 'custom';
-        s.promotionSystemPrompt = 'kept custom text';
-
-        resetPromptFields(s);
-
-        expect(s.promptPreset).toBe('narrative');
-        expect(s.summarizerUserPrompt).toBe(defaultSettings.summarizerUserPrompt);
-        expect(s.promotionSystemPromptPreset).toBe('custom');
-        expect(s.promotionSystemPrompt).toBe('kept custom text');
     });
 });

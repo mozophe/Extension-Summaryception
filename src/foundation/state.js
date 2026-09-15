@@ -4,13 +4,20 @@ import {
     EASY_CONTEXT_LIMITS,
     L0_SOURCE_LIMITS,
     MASK_USER_ROLE_MODES,
+    MEMORY_MODE_PRESETS,
     MEMORY_MODES,
     MEMORY_POSITIONS,
     MEMORY_ROLES,
     MODULE_NAME,
+    PROMOTION_PROMPT_PRESETS,
+    PROMOTION_REPAIR_PROMPT_PRESETS,
+    PROMOTION_SYSTEM_PROMPT_PRESETS,
+    PROMPT_PRESETS,
     PROMPT_SETTING_KEYS,
     REQUEST_TIMEOUT,
     RETENTION_BUDGET_LIMITS,
+    SUMMARIZER_REPAIR_PROMPT_PRESETS,
+    SUMMARIZER_SYSTEM_PROMPT_PRESETS,
     UI_MODES,
     defaultSettings,
 } from './constants.js';
@@ -79,6 +86,96 @@ export function getEffectiveSettings() {
  */
 export function saveSettings() {
     saveSettingsDebounced();
+}
+
+/**
+ * Keys a defaults reset never touches: the selected memory/UI/config modes,
+ * every connection/merge/fallback route setting including per-route timeouts,
+ * and debugMode (re-enabled explicitly after the reset loop).
+ * @type {Set<string>}
+ */
+const RESET_PRESERVED_KEYS = new Set([
+    'memoryMode',
+    'uiMode',
+    'configMode',
+    'connectionSource',
+    'connectionProfileId',
+    'requestTimeoutSeconds',
+    'mergeConnectionSource',
+    'mergeConnectionProfileId',
+    'mergeSummarizerResponseLength',
+    'mergeRequestTimeoutSeconds',
+    'fallbackConnectionSource',
+    'fallbackConnectionProfileId',
+    'fallbackSummarizerResponseLength',
+    'fallbackRequestTimeoutSeconds',
+    'debugMode',
+]);
+
+/** Preset text tables for each prompt profile, keyed by the profile's preset setting. */
+const PROMPT_PRESET_TABLES = Object.freeze({
+    summarizerSystemPromptPreset: SUMMARIZER_SYSTEM_PROMPT_PRESETS,
+    promptPreset: PROMPT_PRESETS,
+    summarizerRepairPromptPreset: SUMMARIZER_REPAIR_PROMPT_PRESETS,
+    promotionSystemPromptPreset: PROMOTION_SYSTEM_PROMPT_PRESETS,
+    promotionPromptPreset: PROMOTION_PROMPT_PRESETS,
+    promotionRepairPromptPreset: PROMOTION_REPAIR_PROMPT_PRESETS,
+});
+
+/**
+ * Reset every Prompt Profile to its default preset unless set to custom.
+ * Custom profiles keep their edited text.
+ * @param {ExtensionSettings} settings - Settings object mutated in place.
+ * @returns {void}
+ */
+function resetPromptValues(settings) {
+    const defaultsRecord = /** @type {Record<string, unknown>} */ (
+        /** @type {unknown} */ (defaultSettings)
+    );
+    const settingsRecord = /** @type {Record<string, unknown>} */ (
+        /** @type {unknown} */ (settings)
+    );
+    for (const { presetKey, settingKey } of PROMPT_SETTING_KEYS) {
+        if (settingsRecord[presetKey] === 'custom') {
+            continue;
+        }
+        const defaultPreset = defaultsRecord[presetKey];
+        settingsRecord[presetKey] = defaultPreset;
+        settingsRecord[settingKey] =
+            PROMPT_PRESET_TABLES[presetKey][defaultPreset] || defaultsRecord[settingKey];
+    }
+}
+
+/**
+ * Reset all settings to their defaults in place, preserving the selected
+ * modes, connection routes, and per-route timeouts. Prompt profiles return
+ * to their default preset unless set to custom. Retention budgets follow the
+ * preserved memory mode's preset, and debug output re-enables so F12
+ * diagnostics stay available.
+ * @returns {void}
+ */
+export function resetSettingsToDefaults() {
+    const s = getSettings();
+    const promptKeys = new Set(
+        PROMPT_SETTING_KEYS.flatMap(({ presetKey, settingKey }) => [presetKey, settingKey]),
+    );
+    for (const key of Object.keys(defaultSettings)) {
+        if (RESET_PRESERVED_KEYS.has(key) || promptKeys.has(key)) {
+            continue;
+        }
+        const value = defaultSettings[key];
+        s[key] = Array.isArray(value) ? [...value] : value;
+    }
+
+    resetPromptValues(s);
+
+    // Retention budgets follow the preserved memory mode's preset, not the plain defaults.
+    const retentionPreset = MEMORY_MODE_PRESETS[s.memoryMode] || MEMORY_MODE_PRESETS.balanced;
+    s.verbatimTokenBudget = retentionPreset.verbatimTokenBudget;
+    s.queuedTokenBudget = retentionPreset.queuedTokenBudget;
+
+    // Debug output deliberately re-enables on reset so F12 diagnostics stay available.
+    s.debugMode = true;
 }
 
 /**

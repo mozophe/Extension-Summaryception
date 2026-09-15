@@ -1,5 +1,4 @@
 import {
-    MEMORY_MODE_PRESETS,
     TOAST_TITLE,
     MASK_USER_ROLE_MODES,
     applyMemoryModePreset,
@@ -9,18 +8,17 @@ import {
 } from '../foundation/constants.js';
 import { error, warn } from '../foundation/logger.js';
 import { clampInteger } from '../foundation/numeric.js';
-import { refreshFull, refreshPreview, refreshUi } from '../foundation/refresh.js';
+import { refreshFull, refreshPreview } from '../foundation/refresh.js';
 import {
     deriveAdvancedEngineTuning,
     enforceRetentionInvariants,
     getSettings,
-    isValidSnippet,
+    resetSettingsToDefaults,
     saveSettings,
     getChatStore,
 } from '../foundation/state.js';
-import { commitSnippetMutation } from '../core/snippet-commit.js';
 import { requestSummarization } from '../core/summarizer.js';
-import { clearSummaryceptionMemory } from '../features/memory.js';
+import { clearSummaryceptionMemory, importSummaryceptionMemory } from '../features/memory.js';
 import { updateUI } from './ui.js';
 import {
     SETTING_SLIDER_SELECTOR,
@@ -32,7 +30,7 @@ import {
     syncRoleMaskModeControl,
 } from './ui-bind.js';
 import { bindManualRunControls, reloadPage } from './ui-manual-run.js';
-import { bindPromptProfiles, resetPromptFields } from './ui-prompts.js';
+import { bindPromptProfiles } from './ui-prompts.js';
 
 /**
  * Save settings, then update injection and the UI.
@@ -254,25 +252,18 @@ function triggerImport(notify) {
         try {
             const text = await file.text();
             const data = JSON.parse(text);
-            if (!validateImportPayload(data)) {
+            const outcome = await importSummaryceptionMemory(data, { notify });
+            if (outcome.status === 'invalid') {
                 toastr.error('Invalid file format.');
                 return;
             }
-
-            const store = getChatStore();
-            await commitSnippetMutation(
-                store,
-                () => {
-                    store.layers = data.layers;
-                },
-                { notify, chatSave: 'immediate' },
-            );
-            refreshUi();
-            toastr.success(
-                `Memory imported. ${store.layers.reduce((sum, l) => sum + (l?.length || 0), 0)} snippets loaded.`,
-                TOAST_TITLE,
-                { timeOut: 4000 },
-            );
+            if (outcome.status === 'failed') {
+                toastr.error('Import failed - check console.');
+                return;
+            }
+            toastr.success(`Memory imported. ${outcome.count} snippets loaded.`, TOAST_TITLE, {
+                timeOut: 4000,
+            });
         } catch (err) {
             error(err);
             toastr.error('Import failed - check console.');
@@ -280,46 +271,6 @@ function triggerImport(notify) {
     };
     input.click();
 }
-
-/**
- * Check an imported payload's shape before any store mutation: layers must be
- * an array of snippet arrays, each snippet passing the persisted-snippet
- * check, plus a ghosted-ID array. Rejects before getChatStore() touches
- * chat metadata.
- * @param {any} data - Parsed JSON payload
- * @returns {boolean} True when the payload carries valid layers and ghosted IDs
- */
-function validateImportPayload(data) {
-    return (
-        Array.isArray(data?.layers) &&
-        Array.isArray(data.ghostedMessageIds) &&
-        data.layers.every((layer) => Array.isArray(layer) && layer.every(isValidSnippet))
-    );
-}
-
-/**
- * Keys a defaults reset never touches: the selected memory/UI/config modes,
- * every connection/merge/fallback route setting including per-route timeouts,
- * and debugMode (re-enabled explicitly after the reset loop).
- * @type {Set<string>}
- */
-const RESET_PRESERVED_KEYS = new Set([
-    'memoryMode',
-    'uiMode',
-    'configMode',
-    'connectionSource',
-    'connectionProfileId',
-    'requestTimeoutSeconds',
-    'mergeConnectionSource',
-    'mergeConnectionProfileId',
-    'mergeSummarizerResponseLength',
-    'mergeRequestTimeoutSeconds',
-    'fallbackConnectionSource',
-    'fallbackConnectionProfileId',
-    'fallbackSummarizerResponseLength',
-    'fallbackRequestTimeoutSeconds',
-    'debugMode',
-]);
 
 /**
  * Reset advanced settings to defaults.
@@ -336,24 +287,7 @@ function onResetDefaults() {
         return;
     }
 
-    const s = getSettings();
-    for (const key of Object.keys(defaultSettings)) {
-        if (RESET_PRESERVED_KEYS.has(key)) {
-            continue;
-        }
-        const value = defaultSettings[key];
-        s[key] = Array.isArray(value) ? [...value] : value;
-    }
-
-    resetPromptFields(s);
-
-    // Retention budgets follow the preserved memory mode's preset, not the plain defaults.
-    const retentionPreset = MEMORY_MODE_PRESETS[s.memoryMode] || MEMORY_MODE_PRESETS.balanced;
-    s.verbatimTokenBudget = retentionPreset.verbatimTokenBudget;
-    s.queuedTokenBudget = retentionPreset.queuedTokenBudget;
-
-    // Debug output deliberately re-enables on reset so F12 diagnostics stay available.
-    s.debugMode = true;
+    resetSettingsToDefaults();
 
     saveAndRefreshUi();
     toastr.success(
