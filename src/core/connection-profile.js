@@ -8,6 +8,7 @@ import { trace, warn } from '../foundation/logger.js';
  * @type {ConnectionProvider}
  */
 export const ProfileProvider = {
+    cancellable: true,
     async generate({ settings, systemPrompt, userPrompt, signal }) {
         return await sendViaProfile({
             profileId: settings.connectionProfileId,
@@ -171,7 +172,7 @@ function parseProfileResponse(raw) {
 
 /**
  * Wrap a profile request error into a ConnectionError.
- * @param {object} params - Parameters
+ * @param {object} params
  * @param {unknown} params.error - The original error
  * @param {string} params.profileId - The profile ID
  * @returns {never} Always throws

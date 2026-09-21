@@ -14,11 +14,10 @@ import {
     recoverStalePromptFreeze,
     resetPromptMutationGuard,
 } from '../core/summarizer-commit.js';
-import { hasActiveAbortController } from '../core/summarizer-request.js';
-import { requestSummarization } from '../core/summarizer-queue.js';
+import { isRequestLive, requestSummarization } from '../core/summarizer-queue.js';
 import { updateInjection } from '../features/injection.js';
 import { flushPendingChatSave, persistChatState } from '../core/persist-state.js';
-import { showStaleCacheAdvice } from './ui-dialogs.js';
+import { pauseMemoryToastForGeneration, showStaleCacheAdvice } from './ui-dialogs.js';
 
 let previousPromptSectionHashes = [];
 
@@ -130,7 +129,8 @@ let reconcileQueued = false;
 let promptFreezeRecoveryBound = false;
 
 /**
- *
+ * Debounces the automatic cycle so fast message streams queue one request.
+ * @returns {void}
  */
 export function onMessageReceived(messageIndex) {
     try {
@@ -149,7 +149,8 @@ export function onMessageReceived(messageIndex) {
 }
 
 /**
- *
+ * Reconciles the loaded chat before any automatic cycle can read it.
+ * @returns {void}
  */
 export function onChatChanged() {
     debug('Chat changed.');
@@ -188,27 +189,30 @@ export function bindPromptFreezeRecoveryEvents() {
 }
 
 /**
- *
+ * Freezes prompt mutations for host generations; dry runs and own requests are excluded.
+ * @returns {void}
  */
 export function onGenerationStarted(...args) {
     if (isDryRunEvent(args[1], args[2])) {
         debug('Ignoring generation start from SillyTavern dry run.');
         return;
     }
-    if (hasActiveAbortController()) {
+    if (isRequestLive()) {
         debug('Ignoring generation start from active Summaryception request.');
         return;
     }
     info('Foreground generation start detected; freezing Summaryception prompt mutations.');
     beginForegroundGeneration();
+    pauseMemoryToastForGeneration();
     refreshUi();
 }
 
 /**
- *
+ * Unfreezes prompt mutations after a host generation ends.
+ * @returns {void}
  */
 export function onGenerationEnded() {
-    const hasActiveSummaryRequest = hasActiveAbortController();
+    const hasActiveSummaryRequest = isRequestLive();
     const hasFrozenMutations = isPromptMutationFrozen();
 
     if (hasActiveSummaryRequest && !hasFrozenMutations) {
@@ -341,7 +345,7 @@ let staleCacheAdviceKey = '';
 async function checkStaleCacheAdvice() {
     try {
         const settings = getEffectiveSettings();
-        if (!settings.enabled || !isProviderCacheMode(settings) || hasActiveAbortController()) {
+        if (!settings.enabled || !isProviderCacheMode(settings) || isRequestLive()) {
             return;
         }
         const chat = getChat();

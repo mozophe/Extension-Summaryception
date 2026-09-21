@@ -38,17 +38,24 @@ import { installSummaryContext } from './test-helpers.js';
 const TARGET_INDEX = 5;
 let boundary = 0;
 
-/** Build manual runner deps with a stub queue. */
-function makeDeps() {
-    return {
+/** Build manual runner deps with a stub queue and its lease handle. */
+function makeDeps({ stopAfterFirstBatch = false } = {}) {
+    const runToken = { end: vi.fn(), isStopped: vi.fn(() => false) };
+    const deps = {
         queue: {
             setPhase: vi.fn(),
-            setSummarizing: vi.fn(),
-            getIsSummarizing: vi.fn(() => true),
+            beginRun: vi.fn(() => runToken),
         },
+        runToken,
         refreshUi: vi.fn(),
         withUsageRun: vi.fn(async (_label, work) => await work()),
     };
+    if (stopAfterFirstBatch) {
+        runToken.isStopped.mockImplementation(
+            () => batchMocks.summarizeBatchFromTurns.mock.calls.length >= 1,
+        );
+    }
+    return deps;
 }
 
 /** Build a ready single-batch force route plan. */
@@ -82,7 +89,7 @@ describe('manual run progress callbacks', () => {
         stateMocks.getChatStore.mockReturnValue({});
         stateMocks.getEffectiveSettings.mockReturnValue({});
         stateMocks.getCurrentSummarizedBoundary.mockImplementation(() => boundary);
-        // Committing one batch advances the summarized boundary to the target.
+        // One commit moves the boundary to the target, so the plan turns unready and the run ends after one batch.
         batchMocks.summarizeBatchFromTurns.mockImplementation(async () => {
             boundary = TARGET_INDEX;
             return { status: 'completed' };
@@ -108,6 +115,22 @@ describe('manual run progress callbacks', () => {
         });
         expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ completed: 1 }));
         expect(outcome.fullyCommitted).toBe(true);
+    });
+
+    it('refreshes the UI after each committed batch', async () => {
+        stubRoutePlan(routeMocks.buildForceSummaryRoutePlan, forceRoutePlan());
+        // Each commit advances the boundary partway; two commits reach the target.
+        batchMocks.summarizeBatchFromTurns.mockImplementation(async () => {
+            boundary += 3;
+            return { status: 'completed' };
+        });
+
+        const deps = makeDeps();
+        await runManual(deps, ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(2);
+        // One refresh per committed batch plus the end-of-run refresh.
+        expect(deps.refreshUi).toHaveBeenCalledTimes(3);
     });
 
     it('reports start and progress for slop breaker', async () => {
@@ -149,6 +172,33 @@ describe('manual run progress callbacks', () => {
     });
 });
 
+describe('manual run work gate', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        resetCommitStateForTests();
+        installSummaryContext({ chat: [] });
+        stateMocks.getChatStore.mockReturnValue({});
+        stateMocks.getEffectiveSettings.mockReturnValue({});
+        stateMocks.getCurrentSummarizedBoundary.mockReturnValue(0);
+        // Every batch fails without moving the summarized boundary.
+        batchMocks.summarizeBatchFromTurns.mockResolvedValue({ status: 'failed' });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
+    });
+
+    it('opens one lease and exits cancelled when the gate stops the run', async () => {
+        const deps = makeDeps({ stopAfterFirstBatch: true });
+
+        const outcome = await runManual(deps, ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(deps.queue.beginRun).toHaveBeenCalledWith('manual-run');
+        expect(deps.runToken.end).toHaveBeenCalledTimes(1);
+        expect(batchMocks.summarizeBatchFromTurns).toHaveBeenCalledTimes(1);
+        expect(outcome.cancelled).toBe(true);
+        expect(outcome.failed).toBe(1);
+        expect(outcome.failureLimitReached).toBe(false);
+    });
+});
+
 describe('manual run failure limit', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -173,8 +223,8 @@ describe('manual run failure limit', () => {
     });
 
     it('halts as blocked when a completed batch does not move the boundary', async () => {
-        // Failure, then a completed batch whose boundary never moves, then two
-        // failures the halt must never reach.
+        // One failure, then a completed batch that never moves the boundary.
+        // The blocked halt must stop the run before the two trailing failures.
         batchMocks.summarizeBatchFromTurns
             .mockResolvedValueOnce({ status: 'failed' })
             .mockResolvedValueOnce({ status: 'completed' })

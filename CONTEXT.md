@@ -31,7 +31,7 @@ One proposed merged snippet awaiting validation; at most one section-aware repai
 Code: `generateValidatedPromotion` (src/core/promotion-candidate.js)
 
 **Promotion Drain**:
-The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the Foreground Gate blocks, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
+The single loop that clears promotion overflow — repeated single-layer Promotions until layers fit, the retention floor refuses the candidate, the Foreground Gate blocks, or consecutive failures reach the budget. Returns a Run Outcome status and the attempt count.
 Code: `drainPromotionOverflow` (src/core/summarizer-promotion.js)
 
 **Regeneration**:
@@ -43,6 +43,18 @@ _Avoid_: Redo, re-summarize
 Hiding summarized turns from model context through the host command while keeping them visible in chat.
 Ownership sync derives the desired ghosted ids from Snippet provenance across all layers: it hides desired messages that are not covered yet and releases owned ids no longer referenced.
 Code: `syncGhosting` (src/core/ghosting.js)
+
+**Batch**:
+The assistant turns one Layer 0 summarizer request covers. Batch ranges count assistant turns only; user messages between them belong to the request's Passage.
+Code: `summarizeBatchFromTurns` (src/core/summarizer-batch.js)
+
+**Passage**:
+The contiguous chat-index range of raw messages one summarizer request summarizes, including the user messages interleaved with a Batch. A Passage therefore starts one or more indices before its Batch.
+Code: `passageStart` / `passageText` (src/core/summarizer-batch.js)
+
+**Chat Index**:
+A message's position in the chat array. Every range in the extension — Batch, Passage, Verbatim Window — is a chat-index range; stable identity uses Summaryception IDs (`sc_id`), never indices.
+Code: `AssistantTurn.index` (src/core/chatutils.js), `sc_id` (src/foundation/message-identity.js)
 
 **Verbatim Window**:
 The recent chat range kept in model context without summarization.
@@ -93,8 +105,13 @@ _Avoid_: UI refresher, refresh registry
 The single gate that owns all automatic summarization work and its guards.
 Code: module src/core/summarizer-engine.js
 
+**Work Gate**:
+The one gate that owns foreground summarization work: manual runs and snippet regenerations open a lease and release it when their work settles. Stop aborts every live request, sets the stop intent on all live leases, and drops queued automatic work; it never releases leases itself.
+Code: `beginRun`, `stop`, `isBusy` (src/core/summarizer-queue.js)
+_Avoid_: summarizing flag, busy flag
+
 **Summarizer Queue**:
-The coalescing worker that owns automatic summarization work: request, drain, and phase. One instance exists; its wrappers are the only way to start, poll, or abort a cycle.
+The coalescing worker that owns automatic summarization work: request, drain, and phase. One instance exists; automatic cycles start through request, foreground runs lease the queue through the Work Gate, and stop is the one way to end live work.
 Code: `SummarizerQueue` (src/core/summarizer-queue.js)
 _Avoid_: job runner, work queue
 

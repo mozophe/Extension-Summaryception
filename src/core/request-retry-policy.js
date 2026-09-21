@@ -1,9 +1,4 @@
-import {
-    RETRY_ATTEMPT_RATIO,
-    RETRY_CONFIG,
-    isRetryableError,
-    parseRetryAfter,
-} from '../foundation/retry.js';
+import { RETRY_CONFIG, isRetryableError, parseRetryAfter } from '../foundation/retry.js';
 
 const PRIMARY_HEALTH_BUCKETS = Object.freeze({
     layer0: 'layer0',
@@ -11,38 +6,33 @@ const PRIMARY_HEALTH_BUCKETS = Object.freeze({
 });
 
 // Hardcoded fallbacks (ms) used when no per-route timeout setting is supplied.
-// Kept identical to the pre-slider values so callers that omit settings behavior is unchanged.
 const FALLBACK_TIMEOUT_MS = Object.freeze({
-    layer0First: 120000,
-    layer0Retry: 90000,
-    promotionFirst: 90000,
-    promotionRetry: 60000,
+    layer0: 120000,
+    promotion: 90000,
 });
 
 export const ROUTE_CYCLE_RETRY_ATTEMPT = RETRY_CONFIG.maxRetries;
 
 /**
- * Compute timeout for a specific attempt based on the configured per-route timeout
- * (seconds, read from the base settings) and attempt index. The first attempt uses
- * the full configured timeout; retries run at RETRY_ATTEMPT_RATIO of it so the route
- * gives up sooner and can retry/failover. L0 (user-facing) defaults higher than
- * L1+ (background promotion) when the route setting is unset.
+ * Compute the timeout for one attempt from the configured per-route timeout
+ * (seconds, read from the base settings). Every attempt of a route series uses
+ * the full configured timeout. A backend that needs the whole window fails a
+ * shortened retry, so retries never run shorter. L0 (user-facing) defaults
+ * higher than L1+ (background promotion) when the route setting is unset.
  * @param {object} [metadata] - Call metadata (kind / useFallback pick the route)
- * @param {number} [attempt] - Zero-based attempt index
+ * @param {number} [_attempt] - Zero-based attempt index (unused; kept for signature stability)
  * @param {object} [settings] - Base extension settings carrying the prefixed timeout fields
  * @returns {number} Timeout in milliseconds
  */
-export function computeAttemptTimeoutMs(metadata = {}, attempt = 0, settings = {}) {
+export function computeAttemptTimeoutMs(metadata = {}, _attempt = 0, settings = {}) {
     const configuredSeconds = resolveTimeoutSeconds(metadata, settings);
     if (!Number.isFinite(configuredSeconds) || configuredSeconds <= 0) {
-        return fallbackTimeoutMs(metadata, attempt);
+        return fallbackTimeoutMs(metadata);
     }
-    const firstMs = configuredSeconds * 1000;
-    return attempt === 0 ? firstMs : Math.round(firstMs * RETRY_ATTEMPT_RATIO);
+    return configuredSeconds * 1000;
 }
 
 /**
- * Resolve the per-route timeout (in seconds) from the base settings object.
  * The metadata.kind (promotion vs layer0/regenerate) and metadata.useFallback flag
  * select which route's timeout field applies:
  *   - fallback route        → fallbackRequestTimeoutSeconds
@@ -62,12 +52,10 @@ function resolveTimeoutSeconds(metadata, settings) {
     return Number(settings?.requestTimeoutSeconds);
 }
 
-function fallbackTimeoutMs(metadata, attempt) {
-    const isPromotion = metadata.kind === 'promotion';
-    if (!isPromotion) {
-        return attempt === 0 ? FALLBACK_TIMEOUT_MS.layer0First : FALLBACK_TIMEOUT_MS.layer0Retry;
-    }
-    return attempt === 0 ? FALLBACK_TIMEOUT_MS.promotionFirst : FALLBACK_TIMEOUT_MS.promotionRetry;
+function fallbackTimeoutMs(metadata) {
+    return metadata.kind === 'promotion'
+        ? FALLBACK_TIMEOUT_MS.promotion
+        : FALLBACK_TIMEOUT_MS.layer0;
 }
 
 /**
@@ -88,7 +76,6 @@ export function computeRetryDelay(err, attempt) {
 }
 
 /**
- * Classify an attempt exception for retry/failover control flow.
  * @param {Error & { retryable?: boolean, message?: string, status?: number, response?: { status?: number } }} error
  * @param {boolean} signalAborted
  * @returns {{ aborted: boolean, shouldRetry: boolean, hardFailover: boolean, failureStatus: string }}
@@ -121,8 +108,8 @@ export function classifyAttemptRetryStatus(error, signalAborted) {
 }
 
 /**
- * Detect definitive, non-recoverable connection-level failures that will not
- * succeed on retry and should trigger immediate failover instead.
+ * Detect connection-level failures that a retry cannot fix. The route skips
+ * its remaining retries and starts fallback.
  * @param {Error & { message?: string, name?: string }} error
  * @returns {boolean}
  */
@@ -150,7 +137,6 @@ function isValidationFailureStatus(status) {
 }
 
 /**
- * Decide whether the next retry should use the repair prompt.
  * @param {object} p
  * @param {{ shouldRetry: boolean, failureStatus?: string }} p.attemptResult - Attempt result
  * @param {number} p.attempt - Zero-based attempt index
@@ -168,7 +154,6 @@ export function shouldSwitchToRepairPrompt({ attemptResult, attempt, maxRetries,
 }
 
 /**
- * Decide why retry processing should stop.
  * @param {{ shouldRetry: boolean, hardFailover?: boolean }} attemptResult - Attempt result
  * @param {number} attempt - Zero-based attempt index
  * @param {number} maxRetries - Maximum retry count for this route

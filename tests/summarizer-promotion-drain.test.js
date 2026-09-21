@@ -19,9 +19,8 @@ import {
 } from './test-helpers.js';
 
 /**
- * drainPromotionOverflow is the single owner of overflow clearing: one loop,
- * one failure budget, one Foreground Gate. Tests drive the real module through its
- * interface with a mocked summarizer request.
+ * drainPromotionOverflow is the single owner of overflow clearing. Tests
+ * drive the real module and mock only the summarizer request.
  */
 describe('drainPromotionOverflow', () => {
     afterEach(() => {
@@ -48,21 +47,23 @@ describe('drainPromotionOverflow', () => {
         expect(callSummarizer).not.toHaveBeenCalled();
     });
 
-    it('completes without attempting when the retention floor refuses the candidate', async () => {
-        // 5 x 200-char snippets over a 4-snippet limit; merging 3 drops L0 below its floor.
+    it('treats a floor-refused candidate as nothing to promote', async () => {
+        // 21 snippets over the count quota of 20, but ~1071 tokens: promoting
+        // 3 leaves ~918 tokens below the 2400 retention floor (quota 6000).
+        const snippets = Array.from({ length: 21 }, (_, i) => ({
+            text: 'x'.repeat(51) + i,
+            sourceMessageIds: [`msg-${i}`],
+        }));
         installSummaryContext({
-            metadata: {
-                summaryception: makeSummaryStore({
-                    layers: [Array.from({ length: 5 }, () => ({ text: 'x'.repeat(200) }))],
-                }),
-            },
-            settings: makeSummarySettings({ memoryTokenBudget: 10000, snippetsPerLayer: 4 }),
+            metadata: { summaryception: makeSummaryStore({ layers: [snippets] }) },
+            settings: makeSummarySettings({ memoryTokenBudget: 10000, snippetsPerLayer: 20 }),
         });
 
         await expect(drainPromotionOverflow({ maxConsecutiveFailures: 3 })).resolves.toEqual({
             status: 'completed',
             attempts: 0,
         });
+
         expect(callSummarizer).not.toHaveBeenCalled();
     });
 

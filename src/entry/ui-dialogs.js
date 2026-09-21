@@ -7,14 +7,12 @@ import {
 } from '../foundation/constants.js';
 
 /**
- * Show the Slop Breaker no-op toast.
  * @returns {void}
  */
 export function showSlopBreakerNoop() {
     toastr.info('Nothing to reset yet. Wait for an AI reply first.', TOAST_TITLE);
 }
 /**
- * Show the warning shown when a summarization run is already in progress.
  * @returns {void}
  */
 export function showBusySummaryToast() {
@@ -22,7 +20,6 @@ export function showBusySummaryToast() {
 }
 
 /**
- * Show the warning shown when foreground generation blocks a manual run.
  * @returns {void}
  */
 export function showForegroundActiveToast() {
@@ -30,7 +27,6 @@ export function showForegroundActiveToast() {
 }
 
 /**
- * Show the appropriate toast after a catch-up run finishes.
  * @param {import('../core/summarizer-engine.js').ManualRunOutcome} outcome
  * @returns {void}
  */
@@ -73,7 +69,6 @@ export function showCatchupOutcome(outcome) {
 }
 
 /**
- * Show the Slop Breaker completion, abort, or failure toast.
  * @param {import('../core/summarizer-engine.js').ManualRunOutcome} outcome
  * @returns {void}
  */
@@ -111,7 +106,6 @@ export function showSlopBreakerOutcome(outcome) {
 }
 
 /**
- * Create a persistent manual run progress toast.
  * @param {import('../core/summarizer-engine.js').ManualRunProgress & { onCancel: () => void }} progress
  * @returns {unknown}
  */
@@ -126,7 +120,6 @@ export function createManualProgressToast(progress) {
 }
 
 /**
- * Update an existing manual run progress toast.
  * @param {unknown} progressToast
  * @param {import('../core/summarizer-engine.js').ManualRunProgress} progress
  * @returns {void}
@@ -138,7 +131,6 @@ export function updateManualProgressToast(progressToast, progress) {
 }
 
 /**
- * Clear a manual run progress toast if it exists.
  * @param {unknown} progressToast
  * @returns {void}
  */
@@ -149,8 +141,8 @@ export function clearManualProgressToast(progressToast) {
 }
 
 /**
- * Show the stale-cache advice toast with a Force Summarize action button.
- * Stays for a minute or until closed; the button click is handled by ui-events.
+ * The delegated click handler in ui-manual-run.js handles the Force
+ * Summarize button.
  * @param {import('../core/cache-staleness.js').StaleCacheAdvice} advice
  * @returns {unknown}
  */
@@ -173,7 +165,6 @@ export function showStaleCacheAdvice(advice) {
 }
 
 /**
- * Show the Slop Breaker confirmation modal.
  * @returns {Promise<boolean>}
  */
 export function confirmSlopBreaker() {
@@ -218,11 +209,11 @@ export function confirmSlopBreaker() {
 }
 
 /**
- * Display policy for one progress label: title subtitle, action text, and the
- * every-N-items update cadence. Counted views render `text: done / total`
- * lines; message views render one static string and ignore counts.
+ * Counted views render `text: done / total` lines; message views render one
+ * static string and ignore counts.
  * @typedef {object} ProgressView
  * @property {string} [subtitle] - Title suffix after the toast title; omitted renders the bare title.
+ * @property {boolean} [tracksForegroundPause] - Track the open toast so a foreground generation can reword it while summarization waits.
  * @property {string} [text] - Action text leading each counted progress line.
  * @property {string} [message] - Static toast message; replaces counted lines.
  * @property {boolean} [progressBar] - Show toastr's progress bar.
@@ -230,26 +221,27 @@ export function confirmSlopBreaker() {
  */
 
 /**
- * Per-label progress display policy: title subtitle, action text, and the
- * every-N-items update cadence. This is UI policy; core only reports counts.
+ * Display policy lives in the UI; core reports counts only.
  * @type {Record<string, ProgressView>}
  */
 const NOTIFY_PROGRESS_VIEWS = {
     [GHOST_PROGRESS.HIDE]: { subtitle: 'Ghosting', text: 'Hiding messages', everyN: 1 },
     [GHOST_PROGRESS.UNHIDE]: { subtitle: 'Clearing', text: 'Unhiding messages', everyN: 10 },
-    [BATCH_PROGRESS.MEMORY]: { message: 'Updating conversation memory…', progressBar: true },
+    [BATCH_PROGRESS.MEMORY]: {
+        message: 'Updating conversation memory…',
+        progressBar: true,
+        tracksForegroundPause: true,
+    },
 };
 
 /**
- * Fallback display policy for unknown progress labels: 'Working' title
- * subtitle and action text, updated on every event.
  * @type {ProgressView}
  */
 const DEFAULT_PROGRESS_VIEW = { subtitle: 'Working', text: 'Working', everyN: 1 };
 
 /**
- * Per-kind terminal notice policy for progress clears (ADR-0004): rendered
- * right after the progress toast closes. Unknown kinds close silently.
+ * Terminal notices render right after the progress toast closes (ADR-0004).
+ * Unknown kinds close silently.
  * @type {Record<string, () => void>}
  */
 const NOTIFY_TERMINAL_VIEWS = {
@@ -321,17 +313,30 @@ const NOTIFY_TRANSIENT_VIEWS = {
 };
 
 /**
- * Handle for an open notify progress toast: the toastr element, the matched
- * display policy, and the total used for counted progress lines.
  * @typedef {object} ToastrProgressHandle
  * @property {object} toast - Active toastr element.
  * @property {ProgressView} view - Matched display policy for the label.
  * @property {number} total - Total items reported by the progress event.
  */
 
+/** Open "Updating conversation memory" toast element, kept for the pause reword. */
+let activeMemoryToast = null;
+
+const MEMORY_PAUSED_MESSAGE = 'Paused while you chat; memory updates after your reply.';
+
 /**
- * Build the toastr-backed notify adapter (ADR-0004). Display durations and
- * update cadence live here; events carry structured data only.
+ * @returns {void}
+ */
+export function pauseMemoryToastForGeneration() {
+    if (!activeMemoryToast) {
+        return;
+    }
+    $(activeMemoryToast).find('.toast-message').text(MEMORY_PAUSED_MESSAGE);
+}
+
+/**
+ * Display durations and update cadence live here. Events carry structured
+ * data only (ADR-0004).
  * @returns {import('../core/notify.js').NotifyAdapter}
  */
 export function createToastrNotifyAdapter() {
@@ -355,6 +360,9 @@ export function createToastrNotifyAdapter() {
                     ...(view.progressBar ? { progressBar: true } : {}),
                 },
             );
+            if (view.tracksForegroundPause) {
+                activeMemoryToast = toast;
+            }
             return { toast, view, total: event.total };
         },
         update(handle, event) {
@@ -374,6 +382,12 @@ export function createToastrNotifyAdapter() {
             if (handle) {
                 toastr.clear(/** @type {ToastrProgressHandle} */ (handle).toast);
             }
+            if (
+                activeMemoryToast &&
+                /** @type {ToastrProgressHandle} */ (handle)?.toast === activeMemoryToast
+            ) {
+                activeMemoryToast = null;
+            }
             const terminal = event?.kind
                 ? NOTIFY_TERMINAL_VIEWS[/** @type {string} */ (event.kind)]
                 : null;
@@ -385,7 +399,6 @@ export function createToastrNotifyAdapter() {
 }
 
 /**
- * Build manual run progress text.
  * @param {import('../core/summarizer-engine.js').ManualRunProgress} progress
  * @returns {string}
  */

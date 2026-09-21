@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { BATCH_PROGRESS, TOAST_TITLE } from '../src/foundation/constants.js';
 import { formatTokenValue } from '../src/core/token-count.js';
-import { createToastrNotifyAdapter } from '../src/entry/ui-dialogs.js';
+import {
+    createToastrNotifyAdapter,
+    pauseMemoryToastForGeneration,
+} from '../src/entry/ui-dialogs.js';
 import { installBrowserRuntimeStub } from './test-helpers.js';
 
 /** Install a $ stub (via the shared runtime stub) that records progress text writes. */
@@ -19,7 +22,7 @@ function installTextCapture() {
 /**
  * The entry adapter maps structured notify events onto toastr (ADR-0004).
  * Tests assert notification kind, persistence, cadence, and processed/total
- * counts; wording stays unasserted per house test rules.
+ * counts. Wording stays unasserted per house test rules.
  */
 describe('toastr notify adapter mapping', () => {
     it('opens one persistent info toast per progress handle', () => {
@@ -140,8 +143,8 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning).not.toHaveBeenCalled();
         expect(toastr.error).not.toHaveBeenCalled();
     });
-    // Severity, fragments, and non-persistence are the adapter contract; the
-    // exact display durations are entry-owned (ADR-0004).
+    // Severity, fragments, and non-persistence are the adapter contract. The
+    // entry owns the exact display durations (ADR-0004).
     it.each([
         {
             event: { kind: 'run-aborted' },
@@ -197,7 +200,7 @@ describe('toastr notify adapter mapping', () => {
             for (const [name, value] of Object.entries(options ?? {})) {
                 expect(opts[name]).toBe(value);
             }
-            // Transient notices auto-dismiss; only the persistent progress
+            // Transient notices auto-dismiss. Only the persistent progress
             // toasts pin timeOut to zero.
             expect(opts.timeOut).toBeGreaterThan(0);
         },
@@ -215,5 +218,50 @@ describe('toastr notify adapter mapping', () => {
         expect(toastr.warning).toHaveBeenCalledTimes(2);
         expect(longWait).toBe(shortWait);
         expect(longWait).toBeLessThan(60000);
+    });
+
+    /** Like installTextCapture, but the memory toast element resolves. */
+    function installPauseCapture() {
+        const writes = installTextCapture();
+        const toastr = globalThis.toastr;
+        toastr.info.mockImplementation(() => ({}));
+        return { writes, toastr };
+    }
+
+    it('rewords an open memory toast when a foreground generation pauses it', () => {
+        const { writes, toastr } = installPauseCapture();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 2 });
+        const [staticText] = toastr.info.mock.calls[0];
+
+        pauseMemoryToastForGeneration();
+
+        expect(writes).toHaveLength(1);
+        expect(writes[0]).not.toBe(String(staticText));
+
+        adapter.clear(handle, { kind: BATCH_PROGRESS.ABORTED });
+    });
+
+    it('leaves non-memory progress toasts untouched on pause', () => {
+        const { writes } = installPauseCapture();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: 'ghost-hide', total: 4 });
+
+        pauseMemoryToastForGeneration();
+
+        expect(writes).toHaveLength(0);
+
+        adapter.clear(handle);
+    });
+
+    it('keeps the memory pause a no-op after the toast closes', () => {
+        const { writes } = installPauseCapture();
+        const adapter = createToastrNotifyAdapter();
+        const handle = adapter.progress({ label: BATCH_PROGRESS.MEMORY, total: 1 });
+        adapter.clear(handle, { kind: BATCH_PROGRESS.UPDATED });
+
+        pauseMemoryToastForGeneration();
+
+        expect(writes).toHaveLength(0);
     });
 });

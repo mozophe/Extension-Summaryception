@@ -4,35 +4,37 @@ import { silentAdapter } from './notify.js';
 import { RequestRunner } from './request-runner.js';
 import { buildSummarizerPipelineInput, traceSummarizerInputTokens } from './summarizer-pipeline.js';
 
-let currentAbortController = null;
+/** Live summarizer requests; each callSummarizer owns one entry for its duration. @type {Set<AbortController>} */
+const liveRequests = new Set();
+
 const requestRunner = new RequestRunner();
 
 /**
- * Check whether an abort controller is active.
  * @returns {boolean}
  */
-export function hasActiveAbortController() {
-    return Boolean(currentAbortController);
+export function isRequestLive() {
+    return liveRequests.size > 0;
 }
 
 /**
- * Abort the in-flight summarizer request.
  * @returns {void}
  */
-export function abortCurrentSummarizerRequest() {
-    if (currentAbortController) {
-        currentAbortController.abort();
-        debug('Abort signal sent.');
+export function abortAllRequests() {
+    if (liveRequests.size === 0) {
+        return;
     }
+    for (const controller of liveRequests) {
+        controller.abort();
+    }
+    debug('Abort signal sent.');
 }
 
 /**
- * Call the configured summarizer backend with retry logic.
- * @param {string} storyTxt - The story text to summarize
- * @param {string} contextStr - The accumulated context string
+ * @param {string} storyTxt
+ * @param {string} contextStr
  * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata] - Call metadata for debug usage logs
  * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for mid-run notices; defaults to the silent adapter
- * @returns {Promise<import('./request-runner.js').RunOutcome>} Run Outcome; `completed` carries the summary text
+ * @returns {Promise<import('./request-runner.js').RunOutcome>} `completed` carries the summary text
  */
 export async function callSummarizer(storyTxt, contextStr, metadata = {}, notify = silentAdapter) {
     trace('>>> ENTERING callSummarizer');
@@ -51,15 +53,16 @@ export async function callSummarizer(storyTxt, contextStr, metadata = {}, notify
         settings,
     });
 
-    currentAbortController = new AbortController();
+    const controller = new AbortController();
+    liveRequests.add(controller);
 
     try {
         return await requestRunner.run({
             ...request,
-            signal: currentAbortController.signal,
+            signal: controller.signal,
             notify,
         });
     } finally {
-        currentAbortController = null;
+        liveRequests.delete(controller);
     }
 }

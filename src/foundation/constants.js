@@ -79,10 +79,8 @@ export const MEMORY_MODE_PRESETS = Object.freeze({
 const SELECTABLE_MEMORY_MODES = Object.freeze([MEMORY_MODES.BALANCED, MEMORY_MODES.PREFIX_CACHE]);
 
 /**
- * Apply a mode's initial retention preset to settings.
- * Every actual mode transition intentionally overwrites the recent and queued budgets (and the Append Only baked cap)
- * with the destination preset. Reselecting the already-active mode is a no-op,
- * and an invalid mode leaves settings untouched.
+ * Apply a mode's initial retention preset to settings. Every mode transition
+ * overwrites the recent and queued budgets with the destination preset.
  * @param {ExtensionSettings} settings
  * @param {string} mode
  * @returns {boolean} true when settings were mutated, false otherwise.
@@ -128,9 +126,9 @@ export const SLIDER_LIMITS = Object.freeze({
     snippetsPerLayer: Object.freeze({ MIN: 20, MAX: 40, STEP: 1 }),
     snippetsPerPromotion: Object.freeze({ MIN: 3, MAX: 4, STEP: 1 }),
     cacheTtlMinutes: Object.freeze({ MIN: 5, MAX: 240, STEP: 5 }),
-    requestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
-    mergeRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
-    fallbackRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 300, STEP: 10 }),
+    requestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 7200, STEP: 10 }),
+    mergeRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 7200, STEP: 10 }),
+    fallbackRequestTimeoutSeconds: Object.freeze({ MIN: 60, MAX: 7200, STEP: 10 }),
     summarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
     mergeSummarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
     fallbackSummarizerResponseLength: Object.freeze({ MIN: 0, MAX: null, STEP: 100 }),
@@ -359,8 +357,6 @@ export const PROMPT_SETTING_KEYS = Object.freeze([
 
 // ─── Retry Configuration ─────────────────────────────────────────────
 
-export const RETRY_ATTEMPT_RATIO = 0.75; // retries run at this fraction of the first attempt's timeout
-
 export const RETRY_CONFIG = {
     maxRetries: 3,
     baseDelay: 2000,
@@ -368,3 +364,8 @@ export const RETRY_CONFIG = {
     backoffMultiplier: 2,
     retryableStatuses: [429, 500, 502, 503, 504],
 };
+
+// Consecutive failed primary+fallback route cycles before one request gives up
+// with a failed Run Outcome instead of retrying forever (mirrors the Promotion
+// Drain failure budget).
+export const ROUTE_CYCLE_FAILURE_BUDGET = 1;
