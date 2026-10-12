@@ -1,27 +1,19 @@
 import { defaultSettings } from '../foundation/constants.js';
 import { debug } from '../foundation/logger.js';
 import {
-    STATE_SNAPSHOT_MAX_TOKENS,
-    STATE_SNAPSHOT_SOFT_TARGET_TOKENS,
-} from '../foundation/prompt-constants.js';
-import {
     buildRepairDiagnostics,
     buildStructuralRepairFeedback,
     countSentences,
     formatRepairDiagnostics,
 } from './repair-diagnostics.js';
-import {
-    LEADING_STATE_HEADER_RE,
-    NARRATIVE_HEADER_RE,
-    STATE_HEADER_RE,
-} from './structural-headers.js';
+import { parseNarrativeEnvelope } from './structural-headers.js';
 import {
     insertBeforeTrigger,
     EXECUTION_TRIGGER_L0,
     EXECUTION_TRIGGER_PROMO,
 } from '../foundation/prompt-parts.js';
-import { compactStateSnapshotText, parseStateBlock } from './summarizer-state.js';
 import {
+    buildLayer0BudgetHint,
     buildSizeConstraintsBlock,
     buildSizeTargetLine,
     computeSentenceCap,
@@ -36,18 +28,8 @@ const MIN_LAYER0_TARGET_TOKENS = 80;
 const MIN_LAYER0_OUTPUT_TOKENS = 50;
 const MAX_LAYER0_TARGET_TOKENS = 700;
 
-/**
- * Check whether a summarizer call should receive runtime compression controls.
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata]
- * @returns {boolean}
- */
-export function isLayer0CompressionCall(metadata = {}) {
-    return (
-        metadata.kind === 'layer0' ||
-        metadata.kind === 'regenerate' ||
-        metadata.kind === 'promotion'
-    );
-}
+/** After the close tag only whitespace or one scene-time key line is legal. */
+const SCENE_TIME_TAIL_LINE_RE = /^[^\S\r\n]*current_date_time[^\S\r\n]*[:=][^\S\r\n]*\S/i;
 
 /**
  * Normalize the configured Layer 0 summary target.
@@ -87,15 +69,6 @@ export function getLayer0SummaryRepairCeiling(settings = {}) {
 }
 
 /**
- * Check whether a summarizer call should receive Layer 0 size validation.
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata]
- * @returns {boolean}
- */
-export function isLayer0SizeGuardCall(metadata = {}) {
-    return metadata.kind === 'layer0' || metadata.kind === 'regenerate';
-}
-
-/**
  * Build attempt-local repair feedback for a rejected Layer 0 output.
  * @param {object} p
  * @param {object} [p.diagnostics]
@@ -113,7 +86,7 @@ export function buildLayer0SizeRepairFeedback({ diagnostics, reason, outputToken
             sections: [
                 {
                     id: 'narrative',
-                    label: '[NARRATIVE]',
+                    label: '<narrative>',
                     actualTokens: outputTokens ?? 0,
                     targetTokens: bounds?.target ?? 0,
                     hardMaxTokens: bounds?.max ?? 0,
@@ -126,140 +99,53 @@ export function buildLayer0SizeRepairFeedback({ diagnostics, reason, outputToken
         rejectedSectionTagPrefix: 'rejected_',
         instructions: [
             'Aim for each section soft target, not merely its hard maximum. Rewrite only the rejected section or sections. Reproduce every preserved section exactly.',
-            'Output exactly one [NARRATIVE] section followed by exactly one [STATE] section.',
+            'Output exactly one <narrative> envelope.',
         ],
     });
-}
-
-/**
- * Build repair feedback for an oversized state snapshot.
- * @param {object} p
- * @param {number} p.stateTokens
- * @param {string} [p.stateText]
- * @returns {string}
- */
-export function buildStateSnapshotSizeRepairFeedback({ stateTokens, stateText = '' }) {
-    const diagnostics = buildRepairDiagnostics({
-        scope: 'Layer 0',
-        totalTokens: stateTokens,
-        sections: [
-            {
-                id: 'state',
-                label: '[STATE]',
-                actualTokens: stateTokens,
-                targetTokens: STATE_SNAPSHOT_SOFT_TARGET_TOKENS,
-                hardMaxTokens: STATE_SNAPSHOT_MAX_TOKENS,
-                text: stateText,
-                repairInstruction:
-                    'rewrite the complete snapshot more abstractly and remove transient facts',
-                preservationInstruction:
-                    'keep only the fixed state keys and the most consequential active continuity',
-            },
-        ],
-        rejectedDraft: stateText,
-    });
-    return buildLayer0SizeRepairFeedback({ diagnostics });
 }
 
 /**
  * Validate exact Layer 0 output size after structural validation.
  * @param {string} text - Cleaned summarizer output
- * @param {Partial<ExtensionSettings>} settings - Active settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata]
- * @returns {Promise<{ valid: true, error: null, repairFeedback: '', text?: string } | { valid: false, error: Error & { retryable?: boolean }, repairFeedback: string, diagnostics: object }>}
+ * @param {import('./call-profile.js').CallProfile} profile - Call profile resolved at dispatch
+ * @returns {Promise<{ valid: true, error: null, repairFeedback: '' } | { valid: false, error: Error & { retryable?: boolean }, repairFeedback: string, diagnostics: object }>}
  */
-export async function validateLayer0OutputSize(text, settings, metadata = {}) {
-    if (!isLayer0SizeGuardCall(metadata)) {
+export async function validateLayer0OutputSize(text, profile) {
+    const guard = profile?.policy?.sizeGuard;
+    if (!guard) {
         return { valid: true, error: null, repairFeedback: '' };
     }
 
-    const sections = extractLayer0Sections(text);
-    const bounds = getLayer0SummaryTokenBounds(settings);
-    const [initialOutputTokens, narrativeTokens, initialStateTokens] = await Promise.all([
+    const narrative = extractLayer0Narrative(text);
+    const [outputTokens, narrativeTokens] = await Promise.all([
         countTextTokens(text),
-        countTextTokens(sections.narrative),
-        countTextTokens(sections.state),
+        countTextTokens(narrative),
     ]);
 
-    const nearMiss = await normalizeLayer0StateNearMiss(
-        text,
-        sections,
-        initialOutputTokens,
-        initialStateTokens,
-    );
-
-    const narrativeRepairCeiling = getLayer0SummaryRepairCeiling(settings);
     const diagnostics = buildLayer0SizeDiagnostics({
         text,
-        bounds,
-        narrativeRepairCeiling,
-        metadata,
-        outputTokens: nearMiss.outputTokens.count,
-        sections,
-        normalizedState: nearMiss.normalizedState,
+        bounds: guard,
+        narrativeRepairCeiling: guard.repairCeiling,
+        provenance: profile.provenance,
+        outputTokens: outputTokens.count,
+        narrative,
         narrativeTokenCount: narrativeTokens.count,
-        stateTokenCount: nearMiss.stateTokenCount,
     });
 
     if (diagnostics.violations.length > 0) {
-        // The deterministic compactor already ran once on the raw oversized
-        // state, via compactStateNearMiss above. A state violation that still
-        // reaches diagnostics here means the compactor could not trim the
-        // block below the hard maximum, so the repair needs the LLM. Do not
-        // add a second compaction pass: compactStateSnapshotText is
-        // deterministic, so a retry would produce an identical result.
-
-        const sourceStateKeyCount = Object.keys(
-            parseStateBlock(String(metadata.sourceState || '')).state,
-        ).length;
         return rejectLayer0Size(diagnostics, {
-            sourceStateKeyCount,
-            targetTokens: getLayer0SummaryTokenTarget(settings),
+            targetTokens: guard.target,
             layer: 'l0',
         });
     }
 
-    if (narrativeTokens.count > bounds.max && narrativeTokens.count <= narrativeRepairCeiling) {
+    if (narrativeTokens.count > guard.max && narrativeTokens.count <= guard.repairCeiling) {
         debug(
-            `Accepted Layer 0 narrative within repair grace: ${narrativeTokens.count} tokens (prompt maximum ${bounds.max}, repair ceiling ${narrativeRepairCeiling})`,
+            `Accepted Layer 0 narrative within repair grace: ${narrativeTokens.count} tokens (prompt maximum ${guard.max}, repair ceiling ${guard.repairCeiling})`,
         );
     }
 
-    return nearMiss.changed
-        ? { valid: true, error: null, repairFeedback: '', text: nearMiss.normalizedText }
-        : { valid: true, error: null, repairFeedback: '' };
-}
-
-/**
- * Run the deterministic state compactor on a near-miss oversize state block,
- * rebuilding the draft and recounting tokens when the trim lands under the
- * hard maximum.
- * @param {string} text - Original cleaned draft
- * @param {{ narrative: string, state: string }} sections - Extracted sections
- * @param {import('./token-count.js').TokenCount} initialOutputTokens - Draft token count
- * @param {import('./token-count.js').TokenCount} initialStateTokens - Raw state token count
- * @returns {Promise<{ outputTokens: import('./token-count.js').TokenCount, normalizedText: string, normalizedState: string, stateTokenCount: number, changed: boolean }>}
- */
-async function normalizeLayer0StateNearMiss(
-    text,
-    sections,
-    initialOutputTokens,
-    initialStateTokens,
-) {
-    let outputTokens = initialOutputTokens;
-    const stateNormalization = await compactStateNearMiss(sections.state, initialStateTokens);
-    let normalizedText = String(text || '');
-    if (stateNormalization.changed) {
-        normalizedText = rebuildLayer0Output(sections.narrative, stateNormalization.block);
-        outputTokens = await countTextTokens(normalizedText);
-    }
-    return {
-        outputTokens,
-        normalizedText,
-        normalizedState: stateNormalization.text,
-        stateTokenCount: stateNormalization.tokens.count,
-        changed: stateNormalization.changed,
-    };
+    return { valid: true, error: null, repairFeedback: '' };
 }
 
 /**
@@ -268,188 +154,92 @@ async function normalizeLayer0StateNearMiss(
  * own gating: the narrative minimum applies only to substantial sources and
  * hard maximums apply only past the repair ceilings.
  * @param {object} p
- * @param {string} p.text - Original cleaned draft, reported as the rejected draft
+ * @param {string} p.text - Cleaned draft, reported as the rejected draft
  * @param {{ target: number, min: number, max: number }} p.bounds - Layer 0 token bounds
  * @param {number} p.narrativeRepairCeiling - Narrative token ceiling eligible for repair
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} p.metadata
- * @param {number} p.outputTokens - Total draft tokens after near-miss compaction
- * @param {{ narrative: string, state: string }} p.sections - Extracted sections
- * @param {string} p.normalizedState - State text after near-miss compaction
+ * @param {import('./call-profile.js').CallProvenance} p.provenance
+ * @param {number} p.outputTokens - Total draft tokens
+ * @param {string} p.narrative - Narrative section text
  * @param {number} p.narrativeTokenCount - Narrative section token count
- * @param {number} p.stateTokenCount - State section token count
  * @returns {object} From buildRepairDiagnostics
  */
 function buildLayer0SizeDiagnostics({
     text,
     bounds,
     narrativeRepairCeiling,
-    metadata,
+    provenance,
     outputTokens,
-    sections,
-    normalizedState,
+    narrative,
     narrativeTokenCount,
-    stateTokenCount,
 }) {
-    const sourceTokens = getSourceTokenCount(metadata);
+    const sourceTokens = getSourceTokenCount(provenance);
     const narrativeTooLong = narrativeTokenCount > narrativeRepairCeiling;
-    const stateTooLong = stateTokenCount > STATE_SNAPSHOT_MAX_TOKENS;
     return buildRepairDiagnostics({
         scope: 'Layer 0',
         totalTokens: outputTokens,
         sections: [
             {
                 id: 'narrative',
-                label: '[NARRATIVE]',
+                label: '<narrative>',
                 actualTokens: narrativeTokenCount,
                 targetTokens: bounds.target,
                 hardMaxTokens: narrativeTooLong ? bounds.max : 0,
                 minimumTokens: sourceTokens > SUBSTANTIAL_SOURCE_TOKEN_THRESHOLD ? bounds.min : 0,
-                text: sections.narrative,
+                text: narrative,
                 repairInstruction:
                     'remove scene replay, repeated dialogue, micro-actions, and transient detail while preserving durable chronology',
                 preservationInstruction:
                     'keep the accepted event chronology and wording exactly as written',
-            },
-            {
-                id: 'state',
-                label: '[STATE]',
-                actualTokens: stateTokenCount,
-                targetTokens: STATE_SNAPSHOT_SOFT_TARGET_TOKENS,
-                hardMaxTokens: stateTooLong ? STATE_SNAPSHOT_MAX_TOKENS : 0,
-                text: normalizedState,
-                repairInstruction:
-                    'rewrite the complete snapshot more abstractly and remove transient facts without turning it into a delta',
-                preservationInstruction:
-                    'keep the accepted rolling snapshot and key-value wording exactly as written',
             },
         ],
         rejectedDraft: text,
     });
 }
 
-async function compactStateNearMiss(stateText, stateTokens) {
-    // The compactor's own post-trim token check rejects anything that still
-    // cannot fit, so there is no upper bound to tune here. A magnitude-based
-    // refusal would force full LLM retries for blocks that the compactor can
-    // trim below the hard maximum.
-    if (stateTokens.count <= STATE_SNAPSHOT_MAX_TOKENS) {
-        return { text: stateText, block: '', tokens: stateTokens, changed: false };
-    }
-
-    const stateChars = String(stateText || '').length;
-    const compactedState = compactStateSnapshotText(stateText);
-    if (!compactedState) {
-        return { text: stateText, block: '', tokens: stateTokens, changed: false };
-    }
-
-    const compactedStateBody = compactedState.replace(LEADING_STATE_HEADER_RE, '').trim();
-    const compactedTokens = await countTextTokens(compactedStateBody);
-    if (compactedTokens.count > STATE_SNAPSHOT_MAX_TOKENS) {
-        return { text: stateText, block: '', tokens: stateTokens, changed: false };
-    }
-
-    debug(
-        `Compacted oversized Layer 0 state pre-retry: ${stateTokens.count} tokens, ${stateChars} chars -> ${compactedStateBody.length} chars (${compactedTokens.count} tokens)`,
-    );
-    return {
-        text: compactedStateBody,
-        block: compactedState,
-        tokens: compactedTokens,
-        changed: true,
-    };
-}
-
-function rebuildLayer0Output(narrative, stateBlock) {
-    return ['[NARRATIVE]', String(narrative || '').trim(), '', String(stateBlock || '').trim()]
-        .join('\n')
-        .trim();
-}
-
-// Deliberately not parseSnippet: this function requires both headers before it
-// trusts a section split, while parseSnippet needs only [STATE] and tolerates
-// a missing [NARRATIVE].
-function extractLayer0Sections(text) {
-    const lines = String(text || '').split(/\r?\n/);
-    const narrativeIndex = lines.findIndex((line) => NARRATIVE_HEADER_RE.test(line));
-    const stateIndex = lines.findIndex((line) => STATE_HEADER_RE.test(line));
-    return {
-        narrative:
-            narrativeIndex === -1 || stateIndex === -1
-                ? ''
-                : lines
-                      .slice(narrativeIndex + 1, stateIndex)
-                      .join('\n')
-                      .trim(),
-        state:
-            stateIndex === -1
-                ? ''
-                : lines
-                      .slice(stateIndex + 1)
-                      .join('\n')
-                      .trim(),
-    };
+/**
+ * Isolate the enveloped narrative body of a Layer 0 draft: the prose between
+ * the <narrative> open and close tags.
+ * @param {string} text - Cleaned summarizer output
+ * @returns {string}
+ */
+export function extractLayer0Narrative(text) {
+    const envelope = parseNarrativeEnvelope(text);
+    return envelope ? envelope.body.trim() : '';
 }
 
 /**
- * Check the structural contract for a Layer 0 draft: exactly one [NARRATIVE]
- * and one [STATE] header, in order, with non-empty section bodies.
+ * Check the structural contract for a Layer 0 draft: one <narrative> envelope
+ * starting the output, a non-empty body between the tags, and after the close
+ * tag only whitespace or one trailing scene-time line. The close tag is the
+ * document-level contract: whatever prose follows it, the draft is rejected.
  * @param {string} text - Cleaned summarizer output
  * @returns {string} Empty string when valid; a short rejection reason otherwise
  */
 export function validateLayer0Structure(text) {
-    const lines = String(text || '').split(/\r?\n/);
-    const narrativeIndexes = findHeaderIndexes(lines, NARRATIVE_HEADER_RE);
-    const stateIndexes = findHeaderIndexes(lines, STATE_HEADER_RE);
-    if (narrativeIndexes.length === 0 && stateIndexes.length === 0) {
-        return 'missing both [NARRATIVE] and [STATE] headers';
+    const envelope = parseNarrativeEnvelope(text);
+    if (!envelope) {
+        return 'missing <narrative> envelope';
     }
-    if (narrativeIndexes.length === 0) {
-        return 'missing [NARRATIVE] header';
+    if (envelope.tail.toLowerCase().includes('</narrative>')) {
+        return 'duplicate </narrative>';
     }
-    if (stateIndexes.length === 0) {
-        return 'missing [STATE] header';
+    if (!envelope.body.trim()) {
+        return 'empty <narrative> body';
     }
-    if (narrativeIndexes.length > 1 && stateIndexes.length > 1) {
-        return 'duplicate [NARRATIVE] and [STATE] headers';
-    }
-    if (narrativeIndexes.length > 1) {
-        return 'duplicate [NARRATIVE] header';
-    }
-    if (stateIndexes.length > 1) {
-        return 'duplicate [STATE] header';
-    }
-
-    const narrativeIndex = narrativeIndexes[0];
-    const stateIndex = stateIndexes[0];
-    if (narrativeIndex > stateIndex) {
-        return '[NARRATIVE] must appear before [STATE]';
-    }
-    if (!hasNonEmptySection(lines, narrativeIndex + 1, stateIndex)) {
-        return '[NARRATIVE] section is empty';
-    }
-    if (!hasNonEmptySection(lines, stateIndex + 1, lines.length)) {
-        return '[STATE] section is empty';
+    const tailLines = envelope.tail
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    const sceneTimeLines = tailLines.filter((line) => SCENE_TIME_TAIL_LINE_RE.test(line));
+    if (tailLines.length !== sceneTimeLines.length || sceneTimeLines.length > 1) {
+        return 'prose after </narrative>';
     }
     return '';
 }
 
-function findHeaderIndexes(lines, headerRegex) {
-    const indexes = [];
-    for (let i = 0; i < lines.length; i++) {
-        if (headerRegex.test(lines[i])) {
-            indexes.push(i);
-        }
-    }
-    return indexes;
-}
-
-function hasNonEmptySection(lines, start, end) {
-    return lines.slice(start, end).some((line) => line.trim());
-}
-
 /**
  * @param {object} diagnostics - From buildRepairDiagnostics
- * @param {{ sourceStateKeyCount?: number, targetTokens?: number, layer?: 'l0' | 'l1' | 'l2' }} [sourceBudget]
+ * @param {{ targetTokens?: number, layer?: 'l0' | 'l1' | 'l2' }} [sourceBudget]
  * @returns {{ valid: false, error: Error & { retryable?: boolean }, repairFeedback: string, diagnostics: object }}
  */
 function rejectLayer0Size(diagnostics, sourceBudget = {}) {
@@ -484,21 +274,29 @@ function rejectLayer0Size(diagnostics, sourceBudget = {}) {
  * Add non-persisted compression constraints to the final prompt.
  * @param {string} prompt
  * @param {Partial<ExtensionSettings>} settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata]
+ * @param {import('./call-profile.js').CallProfile} profile - Call profile resolved at dispatch
  * @returns {string}
  */
-export function appendLayer0PromptConstraints(prompt, settings, metadata = {}) {
-    if (!isLayer0CompressionCall(metadata)) {
+export function appendLayer0PromptConstraints(prompt, settings, profile) {
+    if (!profile?.policy?.compression) {
         return prompt;
     }
 
-    if (metadata.kind === 'promotion') {
-        return appendPromotionPromptConstraints(prompt, settings, metadata);
+    if (profile.policy.promotionConstraints) {
+        return appendPromotionPromptConstraints(prompt, settings, profile.provenance);
     }
 
-    const sourceRangeLine = buildLayer0SourceRangeLine(metadata);
-    const budgetHint = metadata.budgetHint ? String(metadata.budgetHint).trim() : '';
-    const insert = [budgetHint, sourceRangeLine].filter(Boolean).join('\n\n');
+    const sizeGuard = profile.policy.sizeGuard;
+    if (!sizeGuard) {
+        return prompt;
+    }
+
+    const insert = [
+        buildLayer0BudgetHint({ targetTokens: sizeGuard.target }),
+        buildLayer0SourceRangeLine(profile.provenance),
+    ]
+        .filter(Boolean)
+        .join('\n\n');
     return insertBeforeTrigger(prompt, insert, EXECUTION_TRIGGER_L0);
 }
 
@@ -515,10 +313,9 @@ function buildLayer0SourceRangeLine(metadata = {}) {
 }
 
 /**
- * Add Layer 1+ promotion-specific consolidation constraints.
  * @param {string} prompt
  * @param {Partial<ExtensionSettings>} settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata
+ * @param {import('./call-profile.js').SummarizerCallMetadata} metadata
  * @returns {string}
  */
 function appendPromotionPromptConstraints(prompt, settings, metadata = {}) {
@@ -528,7 +325,7 @@ function appendPromotionPromptConstraints(prompt, settings, metadata = {}) {
     const withSchemaCap = fillSentenceCapPlaceholders(prompt, sentenceCap);
 
     const targetLine = buildSizeTargetLine({
-        label: '[NARRATIVE]',
+        label: '<narrative>',
         verb: 'merge into',
         cap: sentenceCap,
         unit: 'sentences',
@@ -605,7 +402,7 @@ function buildPromotionRepairLine(metadata = {}, sliderTargetTokens) {
             sections: [
                 {
                     id: 'draft',
-                    label: '[NARRATIVE]',
+                    label: '<narrative>',
                     actualTokens: outputTokens,
                     targetTokens: Number(repair.targetTokens),
                     hardMaxTokens,

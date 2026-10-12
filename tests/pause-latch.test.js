@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { installSummaryContext } = await import('./test-helpers.js');
-const { getSettings } = await import('../src/foundation/state.js');
+const { getSettings } = await import('../src/foundation/settings.js');
 const { pauseAutoSummarization, resumeAutoSummarization } =
     await import('../src/core/summarizer-engine.js');
 
@@ -15,8 +15,7 @@ function makeQueue({ busy = false, request = async () => {} } = {}) {
 }
 
 /**
- * Bootstrap a Summaryception context and build stub pause-latch deps.
- * One getSettings() settles one-time settings normalization so later
+ * One getSettings() call settles one-time settings normalization, so later
  * saveSettingsDebounced calls can only come from the code under test.
  */
 function makeDeps({ busy = false, latch = false, request } = {}) {

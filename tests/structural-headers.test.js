@@ -16,29 +16,33 @@ describe('normalizeStructuralHeaderLines', () => {
         expect(normalizeStructuralHeaderLines(text)).toBe(text);
     });
 
-    it('uppercases a line-start marker and separates the following line by exactly one newline', () => {
+    it('normalizes legacy line-start [NARRATIVE] headers to lowercased tags', () => {
         const result = normalizeStructuralHeaderLines('  [narrative]\nfoo');
-        expect(result).toContain('[NARRATIVE]');
-        expect(result).toContain('[NARRATIVE]\nfoo');
-        expect(result).not.toContain('[NARRATIVE]\n\nfoo');
+        expect(result).toContain('<narrative>');
+        expect(result).toContain('<narrative>\nfoo');
+        expect(result).not.toContain('<narrative>\n\nfoo');
     });
 
-    it('uppercases a line-start [state] and breaks before its key:value content', () => {
-        const result = normalizeStructuralHeaderLines('[state] key: v');
-        expect(result).toContain('[STATE]');
-        expect(result).toContain('[STATE]\nkey: v');
+    it('lowercases a line-start narrative open tag onto its own line', () => {
+        const result = normalizeStructuralHeaderLines('  <NARRATIVE>\nfoo');
+        expect(result).toContain('<narrative>');
+        expect(result).toContain('<narrative>\nfoo');
+        expect(result).not.toContain('<narrative>\n\nfoo');
     });
 
-    it('isolates an inline [STATE] followed by a key:value line onto its own line', () => {
-        const result = normalizeStructuralHeaderLines('some text [STATE] key: value');
-        expect(result).toContain('\n[STATE]\n');
+    it('lowercases a line-start narrative close tag onto its own line', () => {
+        const result = normalizeStructuralHeaderLines('prose\n</NARRATIVE> trailing');
+        expect(result).toContain('</narrative>');
+        expect(result).toContain('</narrative>\ntrailing');
     });
 
-    it('normalizes every inline [STATE] occurrence globally', () => {
-        const result = normalizeStructuralHeaderLines(
-            'intro [STATE] alpha: 1 middle [STATE] beta: 2',
-        );
-        const matches = result.match(/\n\[STATE\]\n/g) || [];
-        expect(matches.length).toBe(2);
+    it('leaves inline mid-sentence tags alone', () => {
+        const text = 'she wrote <narrative> on the board';
+        expect(normalizeStructuralHeaderLines(text)).toBe(text);
+    });
+
+    it('lowercases a line-start declined marker onto its own line as one unit', () => {
+        const result = normalizeStructuralHeaderLines('  <DECLINED>cannot summarize</DECLINED>');
+        expect(result).toBe('<declined>cannot summarize</declined>');
     });
 });

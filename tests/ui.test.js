@@ -6,7 +6,8 @@ import {
     bindSliderSettingPairs,
     readLines,
 } from '../src/entry/ui-bind.js';
-import { getSettings } from '../src/foundation/state.js';
+import { initConnectionUI, syncConnectionPanels } from '../src/entry/ui-connection.js';
+import { getSettings } from '../src/foundation/settings.js';
 import { buildTriggerGaugeModel } from '../src/entry/ui-view-models.js';
 import { createJQueryHarness, installSummaryContext } from './test-helpers.js';
 
@@ -175,5 +176,106 @@ describe('data-attr setting binding engine', () => {
         dom.trigger('change', '#sc_memory_token_budget_val');
         expect(getSettings().memoryTokenBudget).toBe(24000);
         expect(dom.element('#sc_memory_token_budget').val()).toBe(24000);
+    });
+});
+
+describe('connection route panels', () => {
+    const AUDITOR_ATTRS = {
+        '#summaryception_auditor_connection_source': {
+            'data-sc-setting': 'auditorConnectionSource',
+        },
+        '#summaryception_auditor_connection_profile': {
+            'data-sc-setting': 'auditorConnectionProfileId',
+        },
+        '#sc_auditor_summarizer_response_length': {
+            type: 'number',
+            'data-sc-setting': 'auditorSummarizerResponseLength',
+            'data-sc-type': 'number',
+            'data-sc-fallback': '0',
+        },
+    };
+
+    beforeEach(() => {
+        installSummaryContext({});
+    });
+    afterEach(() => {
+        delete globalThis.document;
+    });
+
+    it('binds the auditor route and syncs the inherited defaults at init', () => {
+        const dom = createJQueryHarness({ attributes: AUDITOR_ATTRS });
+        globalThis.$ = dom.$;
+        globalThis.document = {};
+
+        initConnectionUI();
+
+        expect(dom.element('#summaryception_auditor_response_length_row').isVisible()).toBe(false);
+        expect(dom.element('#summaryception_auditor_timeout_row').isVisible()).toBe(false);
+
+        dom.element('#summaryception_auditor_connection_source').val('profile');
+        dom.trigger('change', '#summaryception_auditor_connection_source');
+        expect(getSettings().auditorConnectionSource).toBe('profile');
+
+        dom.element('#sc_auditor_summarizer_response_length').val('400');
+        dom.trigger('input', '#sc_auditor_summarizer_response_length');
+        expect(getSettings().auditorSummarizerResponseLength).toBe(400);
+    });
+
+    it('hides the auditor rows while the Auditor inherits Layer 0', () => {
+        const dom = createJQueryHarness({ attributes: AUDITOR_ATTRS });
+        globalThis.$ = dom.$;
+
+        syncConnectionPanels(getSettings());
+
+        expect(dom.element('#summaryception_auditor_response_length_row').isVisible()).toBe(false);
+        expect(dom.element('#summaryception_auditor_timeout_row').isVisible()).toBe(false);
+        expect(dom.element('#summaryception_auditor_profile_settings').isVisible()).toBe(false);
+    });
+
+    it('shows the auditor rows once separated and the profile panel only for profiles', () => {
+        const dom = createJQueryHarness({ attributes: AUDITOR_ATTRS });
+        globalThis.$ = dom.$;
+        const settings = getSettings();
+
+        settings.auditorConnectionSource = 'default';
+        syncConnectionPanels(settings);
+
+        expect(dom.element('#summaryception_auditor_response_length_row').isVisible()).toBe(true);
+        expect(dom.element('#summaryception_auditor_timeout_row').isVisible()).toBe(true);
+        expect(dom.element('#summaryception_auditor_profile_settings').isVisible()).toBe(false);
+
+        settings.auditorConnectionSource = 'profile';
+        syncConnectionPanels(settings);
+
+        expect(dom.element('#summaryception_auditor_profile_settings').isVisible()).toBe(true);
+    });
+});
+
+describe('enabled content rendering', () => {
+    it('maps each mode view-model flag onto its panel selectors', async () => {
+        const { syncEnabledContent } = await import('../src/entry/ui.js');
+        const toggles = {};
+        globalThis.$ = (selector) => ({
+            toggle(visible) {
+                toggles[selector] = visible;
+            },
+        });
+
+        syncEnabledContent({
+            modeLabel: 'Off',
+            off: true,
+            easyPanel: false,
+            advancedPanel: true,
+            continuitySection: false,
+            stop: false,
+            resume: false,
+        });
+
+        expect(toggles['#sc_off_content']).toBe(true);
+        expect(toggles['#sc_easy_content']).toBe(false);
+        expect(toggles['#sc_enabled_content']).toBe(true);
+        expect(toggles['#sc_continuity_section']).toBe(false);
+        expect(toggles['#sc_stop_summarize, #sc_easy_stop_summarize']).toBe(false);
+        expect(toggles['#sc_resume_summarize, #sc_easy_resume_summarize']).toBe(false);
     });
 });

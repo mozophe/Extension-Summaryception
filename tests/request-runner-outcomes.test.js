@@ -1,50 +1,84 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const attemptMocks = vi.hoisted(() => ({
-    runSingleAttempt: vi.fn(),
-    classifyAttemptError: vi.fn(),
-    appendRepairFeedback: vi.fn((prompt) => prompt),
-    notifyRetryAndWait: vi.fn(async () => {}),
-    notifyRouteCycleFailedAndWait: vi.fn(async () => {}),
+const connectionMocks = vi.hoisted(() => ({
+    sendSummarizerRequest: vi.fn(),
 }));
-vi.mock('../src/core/request-attempt.js', () => attemptMocks);
+vi.mock('../src/core/connectionutil.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return { ...actual, ...connectionMocks };
+});
 
 import { RequestRunner } from '../src/core/request-runner.js';
+import { resolveCallProfile } from '../src/core/call-profile.js';
 import { RETRY_CONFIG } from '../src/foundation/retry.js';
-import { makeNotifyRecorder, makeSummarySettings } from './test-helpers.js';
+import { NOTIFY_EVENTS, UI_MODES } from '../src/foundation/constants.js';
+import { makeNotifyRecorder, makeSummarySettings, makeUsageLedger } from './test-helpers.js';
 
+const usageLedger = await makeUsageLedger();
+
+/** Minimal valid summary passage accepted by the real Output Hygiene chain. */
+const VALID_SUMMARY =
+    '<narrative>\nA concise summary.\n</narrative>\n\ncurrent_date_time: 2024-07-04 16 Thu';
+
+/**
+ * Run outcomes through the real Route Series; only the provider call is
+ * mocked. The outcomes, notify events, and call counts below are the
+ * runner's contract (ADR-0019); retries consume the profile frozen at
+ * dispatch (ADR-0023).
+ */
 describe('RequestRunner.run outcomes', () => {
     afterEach(() => {
+        vi.useRealTimers();
         vi.restoreAllMocks();
-        for (const mock of Object.values(attemptMocks)) {
-            mock.mockReset();
-        }
+        connectionMocks.sendSummarizerRequest.mockReset();
     });
 
-    function makeRequest({ signal, notify, settings } = {}) {
+    function makeRequest({ signal, notify, settings, profile } = {}) {
+        const resolvedSettings = settings ?? makeSummarySettings();
         return {
-            settings: settings ?? makeSummarySettings(),
-            systemPrompt: 'system',
             prompt: 'prompt',
             repairPrompt: 'repair',
             signal: signal ?? new AbortController().signal,
-            metadata: { kind: 'layer0' },
+            profile: profile ?? resolveCallProfile(resolvedSettings, { kind: 'layer0' }),
             notify,
+            usage: usageLedger,
         };
     }
 
-    it('returns completed with the summary text on a first-attempt success', async () => {
-        attemptMocks.runSingleAttempt.mockResolvedValue({
-            success: true,
-            result: 'THE SUMMARY',
-            error: undefined,
-            cleanedResult: 'THE SUMMARY',
+    it('returns completed with the summary text and the resolved profile on a first-attempt success', async () => {
+        connectionMocks.sendSummarizerRequest.mockResolvedValue(VALID_SUMMARY);
+
+        const request = makeRequest();
+        const outcome = await new RequestRunner().run(request);
+
+        expect(outcome.status).toBe('completed');
+        expect(outcome.text).toBe(VALID_SUMMARY);
+        expect(outcome.profile).toBe(request.profile);
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledOnce();
+    });
+
+    it('retries consume the profile frozen at dispatch, not live settings', async () => {
+        vi.useFakeTimers();
+        const settings = makeSummarySettings({ layer0SummaryTokenTarget: 300 });
+        const request = makeRequest({ settings });
+        connectionMocks.sendSummarizerRequest.mockImplementationOnce(() => {
+            // A mid-run settings edit must not reach an in-flight call's retries (ADR-0023).
+            settings.uiMode = UI_MODES.EASY;
+            settings.advancedModelContext = 10;
+            settings.layer0SummaryTokenTarget = 999;
+            return Promise.reject(new Error('timeout'));
         });
+        connectionMocks.sendSummarizerRequest.mockResolvedValueOnce(VALID_SUMMARY);
 
-        const outcome = await new RequestRunner().run(makeRequest());
+        const pending = new RequestRunner().run(request);
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
 
-        expect(outcome).toEqual({ status: 'completed', text: 'THE SUMMARY' });
-        expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
+        expect(outcome.status).toBe('completed');
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(2);
+        expect(outcome.profile).toBe(request.profile);
+        expect(outcome.profile.policy.easyContextLimit).toBeNull();
+        expect(outcome.profile.policy.sizeGuard.target).toBe(300);
     });
 
     it('returns aborted for an already-aborted signal without attempting', async () => {
@@ -57,41 +91,34 @@ describe('RequestRunner.run outcomes', () => {
         );
 
         expect(outcome).toEqual({ status: 'aborted' });
-        expect(attemptMocks.runSingleAttempt).not.toHaveBeenCalled();
+        expect(connectionMocks.sendSummarizerRequest).not.toHaveBeenCalled();
         expect(recorder.events).toEqual([{ type: 'transient', kind: 'run-aborted' }]);
     });
 
     it('returns blocked when the Easy context guard rejects the request', async () => {
         const recorder = makeNotifyRecorder();
-        attemptMocks.runSingleAttempt.mockResolvedValue({
-            success: false,
-            error: Object.assign(new Error('blocked'), { easyContextGuard: true }),
-            aborted: false,
-            shouldRetry: false,
-            hardFailover: false,
-        });
+        const settings = makeSummarySettings({ uiMode: UI_MODES.EASY, advancedModelContext: 10 });
 
-        const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
+        const outcome = await new RequestRunner().run(
+            makeRequest({ settings, notify: recorder, prompt: 'x'.repeat(4000) }),
+        );
 
         expect(outcome).toEqual({ status: 'blocked' });
-        expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
-        expect(recorder.events).toEqual([]);
+        expect(connectionMocks.sendSummarizerRequest).not.toHaveBeenCalled();
+        // The attempt layer emits the structured guard event (ADR-0019); the
+        // guard-block branch adds no run-failed event on top.
+        expect(recorder.events).toHaveLength(1);
+        expect(recorder.events[0].kind).toBe(NOTIFY_EVENTS.EASY_GUARD_BLOCKED);
     });
 
     it('returns failed on a non-retryable error without the guard', async () => {
         const recorder = makeNotifyRecorder();
-        attemptMocks.runSingleAttempt.mockResolvedValue({
-            success: false,
-            error: new Error('bad request'),
-            aborted: false,
-            shouldRetry: false,
-            hardFailover: false,
-        });
+        connectionMocks.sendSummarizerRequest.mockRejectedValue(new Error('bad request'));
 
         const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
 
         expect(outcome).toEqual({ status: 'failed', attempts: 1 });
-        expect(attemptMocks.runSingleAttempt).toHaveBeenCalledOnce();
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledOnce();
         expect(recorder.events).toEqual([
             {
                 type: 'transient',
@@ -104,55 +131,139 @@ describe('RequestRunner.run outcomes', () => {
     });
 
     it('returns failed after exhausting retries for retryable errors', async () => {
+        vi.useFakeTimers();
         const recorder = makeNotifyRecorder();
-        attemptMocks.runSingleAttempt.mockResolvedValue({
-            success: false,
-            error: new Error('timeout'),
-            aborted: false,
-            shouldRetry: true,
-            hardFailover: false,
-        });
+        connectionMocks.sendSummarizerRequest.mockRejectedValue(new Error('timeout'));
 
-        const outcome = await new RequestRunner().run(makeRequest({ notify: recorder }));
+        const pending = new RequestRunner().run(makeRequest({ notify: recorder }));
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
 
         expect(outcome).toEqual({ status: 'failed', attempts: RETRY_CONFIG.maxRetries + 1 });
-        expect(attemptMocks.runSingleAttempt).toHaveBeenCalledTimes(RETRY_CONFIG.maxRetries + 1);
-        expect(recorder.events).toEqual([
-            {
-                type: 'transient',
-                kind: 'run-failed',
-                retriesExhausted: true,
-                attempts: RETRY_CONFIG.maxRetries + 1,
-                status: null,
-            },
-        ]);
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(
+            RETRY_CONFIG.maxRetries + 1,
+        );
+        // Mid-run retries surface as structured retry-wait events (ADR-0019).
+        const retryWaits = recorder.events.filter((e) => e.kind === NOTIFY_EVENTS.RETRY_WAIT);
+        expect(retryWaits.map((e) => e.attempt)).toEqual([0, 1, 2]);
+        expect(recorder.events[recorder.events.length - 1]).toEqual({
+            type: 'transient',
+            kind: 'run-failed',
+            retriesExhausted: true,
+            attempts: RETRY_CONFIG.maxRetries + 1,
+            status: null,
+        });
     });
 
     it('gives up with failed after one full primary+fallback cycle instead of looping forever', async () => {
+        vi.useFakeTimers();
         const recorder = makeNotifyRecorder();
-        attemptMocks.runSingleAttempt.mockResolvedValue({
-            success: false,
-            error: new Error('timeout'),
-            aborted: false,
-            shouldRetry: true,
-            hardFailover: false,
+        connectionMocks.sendSummarizerRequest.mockRejectedValue(new Error('timeout'));
+        const settings = makeSummarySettings({ fallbackConnectionSource: 'profile' });
+
+        const pending = new RequestRunner().run(makeRequest({ settings, notify: recorder }));
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
+
+        expect(outcome.status).toBe('failed');
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(
+            2 * (RETRY_CONFIG.maxRetries + 1),
+        );
+        // Three retry waits per route, one route-cycle wait between the
+        // routes, then the run-failed event (ADR-0019).
+        const retryWaits = recorder.events.filter((e) => e.kind === NOTIFY_EVENTS.RETRY_WAIT);
+        expect(retryWaits.map((e) => e.attempt)).toEqual([0, 1, 2, 0, 1, 2]);
+        const routeCycleWaits = recorder.events.filter(
+            (e) => e.kind === NOTIFY_EVENTS.ROUTE_CYCLE_WAIT,
+        );
+        expect(routeCycleWaits).toHaveLength(1);
+        expect(recorder.events[recorder.events.length - 1]).toEqual({
+            type: 'transient',
+            kind: 'run-failed',
+            retriesExhausted: true,
+            attempts: 2 * (RETRY_CONFIG.maxRetries + 1),
+            status: null,
         });
+    });
+
+    it('stops at the failing hop when the error is neither retryable nor a hard failover', async () => {
+        const recorder = makeNotifyRecorder();
+        connectionMocks.sendSummarizerRequest.mockRejectedValue(new Error('bad request'));
         const settings = makeSummarySettings({ fallbackConnectionSource: 'profile' });
 
         const outcome = await new RequestRunner().run(makeRequest({ settings, notify: recorder }));
 
         expect(outcome.status).toBe('failed');
-        expect(attemptMocks.runSingleAttempt).toHaveBeenCalledTimes(
-            2 * (RETRY_CONFIG.maxRetries + 1),
-        );
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(1);
         expect(recorder.events).toEqual([
             {
                 type: 'transient',
                 kind: 'run-failed',
-                retriesExhausted: true,
-                attempts: 2 * (RETRY_CONFIG.maxRetries + 1),
+                retriesExhausted: false,
+                attempts: 1,
                 status: null,
             },
         ]);
+    });
+
+    it('walks the inherited narrative chain for an inherit-sourced auditor on hard failover', async () => {
+        connectionMocks.sendSummarizerRequest
+            .mockRejectedValueOnce(new Error('Failed to fetch'))
+            .mockResolvedValueOnce(VALID_SUMMARY);
+
+        const settings = makeSummarySettings({
+            auditorConnectionSource: 'inherit',
+            requestTimeoutSeconds: 33,
+            fallbackConnectionSource: 'profile',
+            fallbackConnectionProfileId: 'backup',
+            fallbackRequestTimeoutSeconds: 34,
+        });
+        const profile = resolveCallProfile(settings, { kind: 'auditor' });
+
+        const outcome = await new RequestRunner().run(
+            makeRequest({ settings, profile, notify: makeNotifyRecorder() }),
+        );
+
+        expect(outcome.status).toBe('completed');
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(2);
+        const calls = connectionMocks.sendSummarizerRequest.mock.calls;
+        expect(calls[0][0].settings).toBe(settings);
+        expect(calls[1][0].settings.connectionProfileId).toBe('backup');
+        // Route timeouts are resolved by the Call Profile, not read live.
+        expect(profile.policy.routes.map((route) => route.timeoutMs)).toEqual([33000, 34000]);
+    });
+
+    it('runs a separated auditor as one hop with no failover', async () => {
+        vi.useFakeTimers();
+        connectionMocks.sendSummarizerRequest
+            .mockRejectedValueOnce(new Error('timeout'))
+            .mockResolvedValueOnce(VALID_SUMMARY);
+
+        const settings = makeSummarySettings({
+            auditorConnectionSource: 'profile',
+            auditorConnectionProfileId: 'aud-1',
+            auditorRequestTimeoutSeconds: 31,
+            // Removed route keys stay in old stored settings; they are dead.
+            auditorFallbackConnectionSource: 'profile',
+            auditorFallbackConnectionProfileId: 'aud-2',
+            auditorFallbackRequestTimeoutSeconds: 32,
+            auditorNarrativeFallback: true,
+        });
+        const profile = resolveCallProfile(settings, { kind: 'auditor' });
+
+        const pending = new RequestRunner().run(
+            makeRequest({ settings, profile, notify: makeNotifyRecorder() }),
+        );
+        await vi.runAllTimersAsync();
+        const outcome = await pending;
+
+        expect(outcome.status).toBe('completed');
+        expect(connectionMocks.sendSummarizerRequest).toHaveBeenCalledTimes(2);
+        const calls = connectionMocks.sendSummarizerRequest.mock.calls;
+        expect(calls[0][0].settings.connectionProfileId).toBe('aud-1');
+        expect(calls[1][0].settings.connectionProfileId).toBe('aud-1');
+        // The single hop retries itself; there is no second connection to fail over to.
+        expect(profile.policy.routes).toHaveLength(1);
+        expect(profile.policy.routes.map((route) => route.timeoutMs)).toEqual([31000]);
     });
 });

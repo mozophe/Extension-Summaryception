@@ -1,4 +1,7 @@
 import { MEMORY_MODES } from '../src/foundation/constants.js';
+import { createForegroundGate } from '../src/core/foreground-gate.js';
+import { initChatPersistence } from '../src/core/persist-state.js';
+import { createMemoryInjectionWriter } from '../src/features/injection.js';
 import { vi } from 'vitest';
 
 /**
@@ -8,6 +11,68 @@ import { vi } from 'vitest';
  */
 
 let nextMessageId = 0;
+
+/**
+ * Build one Foreground Gate for a test, with recorded collaborators and an
+ * injectable clock so the freeze grace window stays deterministic.
+ * @param {{ now?: () => number }} [overrides]
+ * @returns {{ gate: import('../src/core/foreground-gate.js').ForegroundGate, reassertInjection: import('vitest').Mock, requeue: import('vitest').Mock }}
+ */
+export function makeForegroundGate({ now } = {}) {
+    const reassertInjection = vi.fn();
+    const requeue = vi.fn();
+    const gate = createForegroundGate({ reassertInjection, requeue, ...(now ? { now } : {}) });
+    return { gate, reassertInjection, requeue };
+}
+
+/**
+ * Initialize Chat Persistence with recorded host saves for one test.
+ * @returns {{ saveChat: import('vitest').Mock, saveMetadata: import('vitest').Mock }}
+ */
+export function makeChatPersistence() {
+    const saveChat = vi.fn(async () => {});
+    const saveMetadata = vi.fn(async () => {});
+    initChatPersistence({ saveChat, saveMetadata });
+    return { saveChat, saveMetadata };
+}
+
+/**
+ * Build one Memory Injection writer for a test, so the last-written key and
+ * the committed snapshot stay isolated from other tests' instances.
+ * @returns {ReturnType<typeof createMemoryInjectionWriter>}
+ */
+export function makeMemoryInjectionWriter() {
+    return createMemoryInjectionWriter();
+}
+
+/**
+ * Build one Usage Ledger for a test, so run-scope state stays isolated from
+ * other tests' instances.
+ * Loaded lazily so files that never record usage keep their module graph
+ * free of the summarizer stack.
+ * @returns {Promise<import('../src/core/summarizer-usage.js').UsageLedger>}
+ */
+export async function makeUsageLedger() {
+    const { createUsageLedger } = await import('../src/core/summarizer-usage.js');
+    return createUsageLedger();
+}
+
+/**
+ * Build one Summarizer Dispatch for a test, so live-request state stays
+ * isolated from other tests' instances. Tests control the request runner
+ * through their own `vi.mock` of `src/core/request-runner.js`.
+ * Loaded lazily so files that never build a dispatch keep their module graph
+ * free of the request stack. The dispatch builds its own Usage Ledger, so
+ * every test dispatch records into an isolated instance.
+ * @returns {Promise<import('../src/core/summarizer-request.js').SummarizerDispatch>}
+ */
+export async function makeSummarizerDispatch() {
+    const [{ createSummarizerDispatch }, { createUsageLedger }] = await Promise.all([
+        import('../src/core/summarizer-request.js'),
+        import('../src/core/summarizer-usage.js'),
+    ]);
+    return createSummarizerDispatch({ usage: createUsageLedger() });
+}
 
 export function makeMessage(options = {}) {
     const {
@@ -65,7 +130,7 @@ export function messageLineTokens(isUser, mesLength) {
     return (isUser ? 'Player: ' : 'Assistant: ').length + mesLength;
 }
 
-/** Build common summarization settings with overrides. */
+/** Baseline summarization settings; every preset helper overrides it. */
 export function makeSummarySettings(overrides = {}) {
     return {
         enabled: true,
@@ -143,7 +208,7 @@ export function makeToastrMock() {
 
 /**
  * Build a silent notify adapter that records every structured event
- * (ADR-0004 seam). Events are flat records: `type` plus the structured payload.
+ * (ADR-0019 seam). Events are flat records: `type` plus the structured payload.
  * @returns {{ events: Array<object>, transient: (event: object) => void, progress: (event: object) => object, update: (handle: unknown, event: object) => void, clear: (handle: unknown, event?: object) => void }}
  */
 export function makeNotifyRecorder() {
@@ -325,7 +390,7 @@ export function installSummaryContext(opts = {}) {
  */
 export function installOverflowingStore() {
     const snippets = Array.from({ length: 24 }, (_, i) => ({
-        text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}\n[STATE]\nlocation: room${i}`,
+        text: `[NARRATIVE]\nScene ${i}: ${'memory detail '.repeat(10)}`,
         sourceMessageIds: [`msg-${i}`],
     }));
     installSummaryContext({

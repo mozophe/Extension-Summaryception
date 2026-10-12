@@ -1,31 +1,24 @@
-import { defaultSettings } from '../foundation/constants.js';
+import { getName1 } from '../foundation/context.js';
 import { isTraceEnabled, trace } from '../foundation/logger.js';
-import { getEffectiveSettings, getPlayerName } from '../foundation/state.js';
-import {
-    appendLayer0PromptConstraints,
-    getLayer0SummaryTokenTarget,
-    isLayer0SizeGuardCall,
-} from './layer0-compression.js';
-import { estimateSummarizerUsage, recordSummarizerUsage } from './summarizer-usage.js';
+import { getEffectiveSettings } from '../foundation/settings.js';
+import { appendLayer0PromptConstraints } from './layer0-compression.js';
+import { resolveCallProfile } from './call-profile.js';
 import { countTextTokens, formatTokenCount } from './token-count.js';
-import {
-    buildLayer0BudgetHint,
-    countLayer0SourceBudget,
-    getSourceTokenCount,
-} from './token-budget.js';
-import { buildStateSchemaText } from '../foundation/state-categories.js';
 
 /**
  * @typedef {object} SummarizerPipelineInputRequest
  * @property {string} storyTxt - The story text to summarize
  * @property {string} contextStr - The accumulated context string
- * @property {import('./summarizer-usage.js').SummarizerCallMetadata} [metadata] - Call metadata
+ * @property {import('./call-profile.js').SummarizerCallMetadata} [metadata] - Resolver input: call category plus provenance
  * @property {ExtensionSettings} [settings] - Effective settings override
  */
 
 /**
+ * Resolve the call profile once at dispatch and render its prompts. The
+ * returned profile is frozen policy: the runner consumes it instead of
+ * re-deriving per-attempt decisions from the live settings.
  * @param {SummarizerPipelineInputRequest} request
- * @returns {Promise<{ settings: ExtensionSettings, systemPrompt: string, prompt: string, repairPrompt: string, metadata: import('./summarizer-usage.js').SummarizerCallMetadata }>}
+ * @returns {Promise<{ prompt: string, repairPrompt: string, profile: import('./call-profile.js').CallProfile }>}
  */
 export async function buildSummarizerPipelineInput({
     storyTxt,
@@ -33,38 +26,29 @@ export async function buildSummarizerPipelineInput({
     metadata = {},
     settings = getEffectiveSettings(),
 }) {
-    const usageMetadata = await attachBudgetHint(
-        await buildUsageMetadata(metadata, storyTxt),
-        settings,
-    );
-    const promptConfig = resolveSummarizerPromptConfig(settings, usageMetadata);
+    const call = await buildUsageMetadata(metadata, storyTxt);
+    const profile = resolveCallProfile(settings, call);
     const prompt = buildSummarizerPrompt({
-        template: promptConfig.userPromptTemplate,
+        template: profile.policy.userPromptTemplate,
         storyTxt,
         contextStr,
         settings,
-        metadata: usageMetadata,
+        profile,
     });
-    const repairPromptTemplate = resolveLayer0RepairPromptTemplate(settings, usageMetadata);
-    const repairPrompt = repairPromptTemplate
+    const repairPrompt = profile.policy.repairPromptTemplate
         ? buildSummarizerPrompt({
-              template: repairPromptTemplate,
+              template: profile.policy.repairPromptTemplate,
               storyTxt,
               contextStr,
               settings,
-              metadata: {
-                  ...usageMetadata,
-                  layer0Repair: true,
-              },
+              profile,
           })
         : '';
 
     return {
-        settings,
-        systemPrompt: promptConfig.systemPrompt,
         prompt,
         repairPrompt,
-        metadata: usageMetadata,
+        profile,
     };
 }
 
@@ -88,27 +72,10 @@ export async function traceSummarizerInputTokens(storyTxt, contextStr) {
 }
 
 /**
- * @param {object} p
- * @param {string} p.systemPrompt - System prompt sent to the summarizer
- * @param {string} p.prompt - Fully substituted user prompt
- * @param {string} p.summary - Cleaned summarizer response
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} p.metadata - Call metadata
- * @returns {Promise<import('./summarizer-usage.js').SummarizerTokenUsage>}
- */
-export async function recordSuccessfulSummarizerUsage({ systemPrompt, prompt, summary, metadata }) {
-    const usage = await estimateSummarizerUsage(systemPrompt, prompt, summary);
-    recordSummarizerUsage({
-        metadata,
-        ...usage,
-    });
-    return usage;
-}
-
-/**
  * Add usage-only details that should not affect prompt labels or routing.
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata - Call metadata
+ * @param {import('./call-profile.js').SummarizerCallMetadata} metadata - Call metadata
  * @param {string} storyTxt - Source text being summarized
- * @returns {Promise<import('./summarizer-usage.js').SummarizerCallMetadata>}
+ * @returns {Promise<import('./call-profile.js').SummarizerCallMetadata>}
  */
 async function buildUsageMetadata(metadata = {}, storyTxt = '') {
     let usageMetadata = metadata;
@@ -143,105 +110,19 @@ function hasSourceTokenMetadata(metadata = {}) {
 }
 
 /**
- * Pre-compute the source-relative Layer 0 budget hint so that downstream
- * synchronous prompt assembly can inject it without awaiting a tokenizer.
- * No-op for non-L0/regen calls. Assigns `budgetHint` onto the metadata
- * clone so the original metadata object is not mutated across calls.
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata
- * @param {ExtensionSettings} settings
- * @returns {Promise<import('./summarizer-usage.js').SummarizerCallMetadata>}
- */
-async function attachBudgetHint(metadata, settings) {
-    if (!isLayer0SizeGuardCall(metadata)) {
-        return metadata;
-    }
-    const sourceNarrativeTokens = getSourceTokenCount(metadata);
-    const sourceStateText = String(metadata.sourceState || '');
-    const { stateTokens, stateKeyCount } = await countLayer0SourceBudget({
-        sourceNarrativeTokens,
-        sourceStateText,
-    });
-    const budgetHint = buildLayer0BudgetHint({
-        sourceStateTokens: stateTokens,
-        sourceStateKeyCount: stateKeyCount,
-        targetTokens: getLayer0SummaryTokenTarget(settings),
-        settings,
-    });
-    return { ...metadata, budgetHint };
-}
-
-/**
- * @param {ExtensionSettings} settings - Settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata - Call metadata
- * @returns {{ systemPrompt: string, userPromptTemplate: string }}
- */
-function resolveSummarizerPromptConfig(settings, metadata = {}) {
-    if (metadata.kind === 'promotion') {
-        return {
-            systemPrompt: getStringSetting(
-                settings.promotionSystemPrompt,
-                defaultSettings.promotionSystemPrompt,
-            ),
-            userPromptTemplate: getStringSetting(
-                metadata.promotionRepair
-                    ? settings.promotionRepairPrompt
-                    : settings.promotionUserPrompt,
-                metadata.promotionRepair
-                    ? defaultSettings.promotionRepairPrompt
-                    : defaultSettings.promotionUserPrompt,
-            ),
-        };
-    }
-
-    return {
-        systemPrompt: getStringSetting(
-            settings.summarizerSystemPrompt,
-            defaultSettings.summarizerSystemPrompt,
-        ),
-        userPromptTemplate: getStringSetting(
-            settings.summarizerUserPrompt,
-            defaultSettings.summarizerUserPrompt,
-        ),
-    };
-}
-
-function resolveLayer0RepairPromptTemplate(settings, metadata = {}) {
-    if (metadata.kind !== 'layer0' && metadata.kind !== 'regenerate') {
-        return '';
-    }
-    return getStringSetting(
-        settings.summarizerRepairPrompt,
-        defaultSettings.summarizerRepairPrompt,
-    );
-}
-
-/**
- * Return a string setting while preserving intentionally empty strings.
- * @param {unknown} value - Candidate setting value
- * @param {string} fallback - Default value for malformed legacy settings
- * @returns {string}
- */
-function getStringSetting(value, fallback) {
-    return typeof value === 'string' ? value : fallback;
-}
-
-/**
  * @param {object} p
  * @param {string} p.template - User prompt template
  * @param {string} p.storyTxt - Story text
  * @param {string} p.contextStr - Context text
  * @param {ExtensionSettings} p.settings - Active settings
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} p.metadata - Call metadata
+ * @param {import('./call-profile.js').CallProfile} p.profile - Resolved call profile
  * @returns {string}
  */
-function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, metadata }) {
-    const sourceState = metadata.sourceState || '(none)';
+function buildSummarizerPrompt({ template, storyTxt, contextStr, settings, profile }) {
     // replaceAll on purpose: every placeholder occurrence is replaced; user templates may repeat one.
     const prompt = template
-        .replaceAll('{{player_name}}', getPlayerName())
+        .replaceAll('{{player_name}}', getName1())
         .replaceAll('{{context_str}}', contextStr || '(none yet)')
-        .replaceAll('{{source_state}}', sourceState)
-        .replaceAll('{{story_txt}}', storyTxt)
-        .replaceAll('{{state_schema}}', buildStateSchemaText(settings));
-    return appendLayer0PromptConstraints(prompt, settings, metadata);
+        .replaceAll('{{story_txt}}', storyTxt);
+    return appendLayer0PromptConstraints(prompt, settings, profile);
 }

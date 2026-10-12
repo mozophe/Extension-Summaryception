@@ -1,20 +1,15 @@
 import { getChat } from '../foundation/context.js';
 import { sleep } from '../foundation/retry.js';
-import {
-    getChatStore,
-    getCurrentSummarizedBoundary,
-    getEffectiveSettings,
-    getSettings,
-    saveSettings,
-} from '../foundation/state.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getEffectiveSettings, getSettings, saveSettings } from '../foundation/settings.js';
 import { debug, info, trace, warn } from '../foundation/logger.js';
-import { summarizeAtomicLayer0Partitions, summarizeBatchFromTurns } from './summarizer-batch.js';
+import { runLayer0 } from './layer0-run.js';
+import { getCurrentSummarizedBoundary } from './snippet-provenance.js';
 import { drainPromotionOverflow } from './summarizer-promotion.js';
 import { flushPendingChatSave } from './persist-state.js';
-import { promptWorkGate } from './summarizer-commit.js';
+import { deriveManualRunOutcome } from './run-outcome.js';
 import { formatTokenValue } from './token-count.js';
 import {
-    SUMMARY_COMMIT_MODES,
     buildAutoSummaryRoutePlan,
     buildForceSummaryRoutePlan,
     buildSlopSummaryRoutePlan,
@@ -25,25 +20,14 @@ export const ELASTIC_STRATEGIES = Object.freeze({
     SLOP: 'SLOP',
 });
 
-/**
- * @typedef {object} ManualRunOutcome
- * @property {boolean} cancelled - Whether the manual run was cancelled.
- * @property {boolean} blocked - Whether the prompt guard blocked completion.
- * @property {string} [blockReason] - 'no-progress' when a batch succeeded without moving the boundary.
- * @property {number} completed - Number of committed batches.
- * @property {number} failed - Number of failed batches.
- * @property {number} totalBatches - Estimated total batches for the run.
- * @property {boolean} fullyCommitted - Whether all requested work was committed and normalized.
- * @property {boolean} failureLimitReached - Whether consecutive failures halted the run.
- */
+/** @typedef {import('./run-outcome.js').ManualRunOutcome} ManualRunOutcome */
+/** @typedef {import('./run-outcome.js').ManualRunTally} ManualRunTally */
 
 /**
  * @typedef {object} ManualRunProgress
  * @property {number} completed - Number of committed batches so far.
  * @property {number} failed - Number of failed batches so far.
  * @property {number} totalBatches - Estimated total batches for the run.
- * @property {string} label - Short progress label for the active operation.
- * @property {string} title - User-visible progress title.
  */
 
 /**
@@ -58,16 +42,18 @@ export const ELASTIC_STRATEGIES = Object.freeze({
  * @typedef {object} ManualRunnerDeps
  * @property {import('./summarizer-queue.js').SummarizerQueue} queue - Shared summarizer queue.
  * @property {() => void} refreshUi - Refreshes visible extension UI state.
- * @property {function(string, function(): Promise<*>): Promise<*>} withUsageRun - Runs work inside a usage accounting scope.
+ * @property {import('./summarizer-usage.js').UsageLedger['withRun']} withRun - Runs work inside a usage accounting scope.
+ * @property {import('./foreground-gate.js').ForegroundGate} gate - Foreground Gate every prompt mutation of the run crosses.
+ * @property {import('./summarizer-request.js').SummarizerDispatch['call']} dispatch - Summarizer Dispatch whose call runs every summarizer request.
  */
 
 /**
  * @param {import('./summarizer-queue.js').SummarizerQueueContext} queue
- * @param {{ refreshUi?: () => void, notify?: import('./notify.js').NotifyAdapter }} [opts]
+ * @param {{ refreshUi?: () => void, notify?: import('./notify.js').NotifyAdapter, gate: import('./foreground-gate.js').ForegroundGate, dispatch: import('./summarizer-request.js').SummarizerDispatch['call'] }} opts
  * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
-export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
-    if ((await promptWorkGate('auto worker', { refreshUi })) === 'blocked') {
+export async function runElasticAutoCycle(queue, { refreshUi, notify, gate, dispatch }) {
+    if ((await gate.promptWorkGate('auto worker', { refreshUi })) === 'blocked') {
         queue.setPhase('paused');
         return { status: 'blocked' };
     }
@@ -80,7 +66,12 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
 
     const prepared = await prepareSummaryCycle();
     queue.setPhase('promoting');
-    const promotion = await drainPromotionOverflow({ maxConsecutiveFailures: 1, notify });
+    const promotion = await drainPromotionOverflow({
+        maxConsecutiveFailures: 1,
+        notify,
+        gate,
+        dispatch,
+    });
     if (promotion.attempts > 0 || promotion.status !== 'completed') {
         return promotion;
     }
@@ -93,7 +84,7 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
     }
 
     queue.setPhase('layer0');
-    return await processRoutePlan(routePlan, notify);
+    return await processRoutePlan(routePlan, notify, gate, dispatch);
 }
 
 /**
@@ -107,34 +98,40 @@ export async function runElasticAutoCycle(queue, { refreshUi, notify } = {}) {
 export async function runManual(deps, strategy, options = {}) {
     const manualStrategy = MANUAL_STRATEGIES[strategy];
     if (!manualStrategy) {
-        return createManualRunOutcome();
+        return deriveManualRunOutcome(createManualRunTally());
     }
-    return await deps.withUsageRun(manualStrategy.usageLabel, async () => {
+    return await deps.withRun(manualStrategy.usageLabel, async () => {
         if (!(await prepareManualRun(deps, `manual ${strategy.toLowerCase()}`))) {
-            return createManualRunOutcome({ blocked: true });
+            return deriveManualRunOutcome({ ...createManualRunTally(), blocked: true });
         }
 
         const prepared = await prepareSummaryCycle();
         const initialRoutePlan = await manualStrategy.buildBatch(prepared);
         const targetIndex = initialRoutePlan.targetIndex;
         if (!initialRoutePlan.ready || typeof targetIndex !== 'number') {
-            return createManualRunOutcome();
+            return deriveManualRunOutcome(createManualRunTally());
         }
 
-        const outcome = await executeManualTask(
+        const tally = await executeManualTask(
             deps,
             manualStrategy,
             { targetIndex, totalBatches: initialRoutePlan.totalBatches },
             options,
         );
-        const promotionStatus = await normalizeManualMemory(outcome, options.notify);
+        const promotionStatus = await normalizeManualMemory(
+            tally,
+            options.notify,
+            deps.gate,
+            deps.dispatch,
+        );
         deps.refreshUi();
-        return {
-            ...outcome,
-            blocked: outcome.blocked || promotionStatus === 'blocked',
-            fullyCommitted:
-                isManualRunComplete(outcome, targetIndex) && promotionStatus === 'completed',
-        };
+        return deriveManualRunOutcome(
+            { ...tally, blocked: tally.blocked || promotionStatus === 'blocked' },
+            {
+                targetReached: isManualTargetReached(targetIndex),
+                promotionCompleted: promotionStatus === 'completed',
+            },
+        );
     });
 }
 
@@ -144,8 +141,8 @@ export async function runManual(deps, strategy, options = {}) {
  */
 
 /**
- * Stop path for the pause latch: abort any live run, persist `autoPaused`, and
- * let the queue settle. Callers only map the returned status to a notice.
+ * Stop half of the Pause Latch seam. Callers only map the returned status to
+ * a notice; the abort and the persisted latch stay inside this seam.
  * @param {PauseLatchDeps} deps
  * @returns {Promise<'paused' | 'already-paused' | 'idle'>}
  */
@@ -161,8 +158,8 @@ export async function pauseAutoSummarization(deps) {
 }
 
 /**
- * Resume path for the pause latch: clear `autoPaused` and fire-and-forget one
- * automatic cycle.
+ * Resume half of the Pause Latch seam. Callers only map the returned status
+ * to a notice; the kicked cycle is fire-and-forget.
  * @param {PauseLatchDeps} deps
  * @returns {Promise<'resumed' | 'not-paused'>}
  */
@@ -196,46 +193,28 @@ export async function describeManualRun(strategy) {
 }
 
 /**
- * Commit a route plan and apply the auto-run gate on top of the batch outcome.
+ * Run a route plan and apply the auto-run gate on top of the run outcome. A run
+ * that waited for the Foreground Gate or found no work is terminal, not failed.
  * @param {import('./summarization-routes.js').SummaryRoutePlan} routePlan
- * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for automatic runs.
+ * @param {import('./notify.js').NotifyAdapter | undefined} notify - Notify adapter for automatic runs.
+ * @param {import('./foreground-gate.js').ForegroundGate} gate - Foreground Gate the run crosses.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} dispatch - Summarizer Dispatch the run calls through.
  * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
  */
-async function processRoutePlan(routePlan, notify) {
-    const outcome = await commitRoutePlan(routePlan, { catchExceptions: true }, notify);
+async function processRoutePlan(routePlan, notify, gate, dispatch) {
+    const outcome = await runLayer0(routePlan, { notify, gate, dispatch });
 
+    if (outcome.status === 'blocked' || outcome.status === 'idle') {
+        return outcome;
+    }
     if (outcome.status !== 'completed') {
         debug('Route batch failed, stopping summarization cycle to avoid retry loop.');
         return outcome;
     }
-    if ((await promptWorkGate('route plan')) === 'blocked') {
+    if ((await gate.promptWorkGate('route plan')) === 'blocked') {
         return { ...outcome, status: 'blocked' };
     }
     return outcome;
-}
-
-/**
- * Commit one normalized route plan.
- * @param {import('./summarization-routes.js').SummaryRoutePlan} routePlan
- * @param {{ catchExceptions?: boolean }} [options]
- * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter for automatic runs; manual runs own their progress UI and stay silent.
- * @returns {Promise<import('./run-outcome.js').SummarizationRunOutcome>}
- */
-async function commitRoutePlan(routePlan, options = {}, notify) {
-    if (routePlan.commitMode === SUMMARY_COMMIT_MODES.ATOMIC_PARTITIONS) {
-        return await summarizeAtomicLayer0Partitions(routePlan.partitions, options, notify);
-    }
-    if (routePlan.commitMode === SUMMARY_COMMIT_MODES.TURNS_WITH_SOURCE_END) {
-        return await summarizeBatchFromTurns(
-            routePlan.batchTurns,
-            {
-                ...options,
-                sourceEndIdx: routePlan.sourceEndIdx,
-            },
-            notify,
-        );
-    }
-    return await summarizeBatchFromTurns(routePlan.batchTurns, options, notify);
 }
 
 const isManualTargetReached = (targetIndex) =>
@@ -246,8 +225,6 @@ const isManualTargetReached = (targetIndex) =>
  * boundary movement around one batch commit into the batch result flags.
  * @typedef {object} ManualStrategy
  * @property {string} usageLabel - Usage accounting scope label for the run.
- * @property {string} label - Short progress label for the active operation.
- * @property {string} title - User-visible progress title.
  * @property {(prepared?: { chat: ChatMessage[], store: SummaryceptionStore }, targetIndex?: number) => Promise<import('./summarization-routes.js').SummaryRoutePlan>} buildBatch - Builds the next route plan.
  * @property {(plan: import('./summarization-routes.js').SummaryRoutePlan, beforeIndex: number, afterIndex: number) => { committed: boolean, done?: boolean }} assessCommit - Boundary assessment for one committed batch.
  */
@@ -255,8 +232,6 @@ const isManualTargetReached = (targetIndex) =>
 const MANUAL_STRATEGIES = Object.freeze({
     [ELASTIC_STRATEGIES.FORCE]: {
         usageLabel: 'force summarize catch-up',
-        label: 'Processing',
-        title: 'Summaryception Catch-Up',
         buildBatch: buildForceBatch,
         assessCommit: (_plan, beforeIndex, afterIndex) => ({
             committed: afterIndex > beforeIndex,
@@ -264,8 +239,6 @@ const MANUAL_STRATEGIES = Object.freeze({
     },
     [ELASTIC_STRATEGIES.SLOP]: {
         usageLabel: 'slop breaker',
-        label: 'Breaking slop',
-        title: 'Summaryception Slop Breaker',
         buildBatch: buildSlopBatch,
         assessCommit: (plan, _beforeIndex, afterIndex) => ({
             committed: plan.sourceEndIdx !== undefined && afterIndex >= plan.sourceEndIdx,
@@ -309,15 +282,15 @@ async function buildSlopBatch(prepared, targetIndex) {
  * @param {ManualStrategy} strategy
  * @param {{ targetIndex: number, totalBatches: number }} target - Values captured from the initial route plan.
  * @param {ManualRunOptions} options
- * @returns {Promise<ManualRunOutcome>}
+ * @returns {Promise<ManualRunTally>}
  */
 async function executeManualTask(deps, strategy, target, options) {
-    const outcome = createManualRunOutcome({ totalBatches: target.totalBatches });
+    const tally = createManualRunTally({ totalBatches: target.totalBatches });
     let consecutiveFailures = 0;
     const runToken = deps.queue.beginRun('manual-run');
 
     try {
-        options.onStart?.(createProgress(outcome, strategy));
+        options.onStart?.(createProgress(tally));
 
         while (!isCancelled(options.signal) && !runToken.isStopped()) {
             const batch = await strategy.buildBatch(undefined, target.targetIndex);
@@ -325,13 +298,19 @@ async function executeManualTask(deps, strategy, target, options) {
                 break;
             }
 
-            const result = await processStrategyBatch(batch, strategy, options.notify);
+            const result = await processStrategyBatch(batch, strategy, {
+                notify: options.notify,
+                gate: deps.gate,
+                dispatch: deps.dispatch,
+            });
             const step = await applyManualLoopStep({
-                outcome,
+                tally,
                 result,
                 signal: options.signal,
                 runToken,
                 notify: options.notify,
+                gate: deps.gate,
+                dispatch: deps.dispatch,
                 consecutiveFailures,
             });
             consecutiveFailures = step.consecutiveFailures;
@@ -343,14 +322,14 @@ async function executeManualTask(deps, strategy, target, options) {
                 deps.refreshUi();
             }
 
-            options.onProgress?.(createProgress(outcome, strategy));
+            options.onProgress?.(createProgress(tally));
             await sleep(200);
         }
 
         if (isCancelled(options.signal) || runToken.isStopped()) {
-            outcome.cancelled = true;
+            tally.aborted = true;
         }
-        return outcome;
+        return tally;
     } finally {
         runToken.end();
         await flushPendingChatSave();
@@ -365,122 +344,128 @@ const MANUAL_FAILURE_LIMIT = 3;
  * and a success whose boundary did not move preserves it.
  * @param {object} step - One loop step's inputs.
  * @param {import('./summarizer-queue.js').WorkGateRun} step.runToken - The run's work gate lease; a stopped lease detects external stops.
- * @param {ManualRunOutcome} step.outcome - Run outcome updated in place.
- * @param {{ success: boolean, committed: boolean, done?: boolean }} step.result - Batch result flags.
+ * @param {ManualRunTally} step.tally - Run state updated in place.
+ * @param {{ success: boolean, committed: boolean, blocked: boolean, done?: boolean }} step.result - Batch result flags.
  * @param {AbortSignal} [step.signal] - Cancellation signal for the run.
  * @param {import('./notify.js').NotifyAdapter} [step.notify] - Notify adapter for promotions.
+ * @param {import('./foreground-gate.js').ForegroundGate} step.gate - Foreground Gate the loop step asks before continuing.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} step.dispatch - Summarizer Dispatch the promotion drain calls through.
  * @param {number} step.consecutiveFailures - Failure streak before this step.
  * @returns {Promise<{ exit: boolean, consecutiveFailures: number }>} Exit decision and the updated streak.
  */
 async function applyManualLoopStep({
-    outcome,
+    tally,
     result,
     signal,
     runToken,
     notify,
+    gate,
+    dispatch,
     consecutiveFailures,
 }) {
-    if (result.success && result.committed) {
-        outcome.completed++;
+    if (result.blocked) {
+        tally.blocked = true;
+    } else if (result.success && result.committed) {
+        tally.completed++;
         consecutiveFailures = 0;
-        if ((await promptWorkGate('manual outcome')) === 'blocked') {
-            outcome.blocked = true;
+        if ((await gate.promptWorkGate('manual outcome')) === 'blocked') {
+            tally.blocked = true;
         }
     } else if (result.success) {
-        outcome.blocked = true;
-        outcome.blockReason = 'no-progress';
+        // A completed run that moved nothing has no batch to count, so the loop
+        // halts instead of re-planning the same work.
+        tally.blocked = true;
+        tally.blockReason = 'no-progress';
     } else {
-        outcome.failed++;
+        tally.failed++;
     }
 
-    if (result.success && result.committed && !outcome.blocked) {
-        const promotion = await normalizePromotions(notify);
+    if (result.success && result.committed) {
+        const promotion = await normalizePromotions(notify, gate, dispatch);
         if (promotion.status === 'blocked') {
-            outcome.blocked = true;
+            tally.blocked = true;
         } else if (promotion.status === 'failed') {
-            outcome.failed++;
+            tally.failed++;
             return { exit: true, consecutiveFailures };
         }
     }
 
-    if (result.done || outcome.blocked) {
+    if (result.done || tally.blocked) {
         return { exit: true, consecutiveFailures };
     }
     if (isCancelled(signal) || runToken.isStopped()) {
-        outcome.cancelled = true;
+        tally.aborted = true;
         return { exit: true, consecutiveFailures };
     }
 
     if (!result.success) {
         consecutiveFailures++;
-        outcome.failureLimitReached = consecutiveFailures >= MANUAL_FAILURE_LIMIT;
+        tally.failureLimitReached = consecutiveFailures >= MANUAL_FAILURE_LIMIT;
     }
-    return { exit: outcome.failureLimitReached, consecutiveFailures };
+    return { exit: tally.failureLimitReached, consecutiveFailures };
 }
 
 /**
- * Commit one route plan through the strategy's boundary assessment.
+ * Run one route plan through the strategy's boundary assessment.
  * @param {import('./summarization-routes.js').SummaryRoutePlan} plan
  * @param {ManualStrategy} strategy
- * @param {import('./notify.js').NotifyAdapter} [notify]
- * @returns {Promise<{ success: boolean, committed: boolean, done?: boolean }>}
+ * @param {object} p - The notify adapter, Foreground Gate, and summarizer dispatch the batch runs through.
+ * @param {import('./notify.js').NotifyAdapter | undefined} p.notify
+ * @param {import('./foreground-gate.js').ForegroundGate} p.gate
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} p.dispatch - Summarizer Dispatch the run calls through.
+ * @returns {Promise<{ success: boolean, committed: boolean, blocked: boolean, done?: boolean }>}
  */
-async function processStrategyBatch(plan, strategy, notify) {
+async function processStrategyBatch(plan, strategy, { notify, gate, dispatch }) {
     const beforeIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
-    const outcome = await commitRoutePlan(plan, { catchExceptions: true }, notify);
+    const outcome = await runLayer0(plan, { notify, gate, dispatch });
     const afterIndex = getCurrentSummarizedBoundary(getChat(), getChatStore());
     return {
         success: outcome.status === 'completed',
+        blocked: outcome.status === 'blocked',
         ...strategy.assessCommit(plan, beforeIndex, afterIndex),
     };
 }
 
-async function normalizeManualMemory(outcome, notify) {
-    if (outcome.cancelled || outcome.blocked || outcome.completed === 0 || outcome.failed > 0) {
+async function normalizeManualMemory(tally, notify, gate, dispatch) {
+    if (tally.aborted || tally.blocked || tally.completed === 0 || tally.failed > 0) {
         return 'skipped';
     }
-    if ((await promptWorkGate('manual promotion')) === 'blocked') {
+    if ((await gate.promptWorkGate('manual promotion')) === 'blocked') {
         info('Manual promotion deferred; prompt mutation guard is active.');
         return 'blocked';
     }
-    return (await normalizePromotions(notify)).status;
+    return (await normalizePromotions(notify, gate, dispatch)).status;
 }
 
-async function normalizePromotions(notify) {
-    return await drainPromotionOverflow({ maxConsecutiveFailures: 3, notify });
-}
-
-function isManualRunComplete(outcome, targetIndex) {
-    if (outcome.cancelled || outcome.blocked || outcome.failed > 0 || outcome.completed === 0) {
-        return false;
-    }
-    return isManualTargetReached(targetIndex);
+async function normalizePromotions(notify, gate, dispatch) {
+    return await drainPromotionOverflow({ maxConsecutiveFailures: 3, notify, gate, dispatch });
 }
 
 async function prepareManualRun(deps, recoverReason) {
-    return (await promptWorkGate(recoverReason, { refreshUi: deps.refreshUi })) === 'open';
+    return (
+        (await deps.gate.promptWorkGate(recoverReason, { refreshUi: deps.refreshUi })) === 'open'
+    );
 }
 
-function createManualRunOutcome(overrides = {}) {
+/** @param {Partial<ManualRunTally>} [overrides] @returns {ManualRunTally} */
+function createManualRunTally(overrides = {}) {
     return {
-        cancelled: false,
-        blocked: false,
         completed: 0,
         failed: 0,
         totalBatches: 0,
-        fullyCommitted: false,
+        aborted: false,
+        blocked: false,
         failureLimitReached: false,
         ...overrides,
     };
 }
 
-function createProgress(outcome, strategy) {
+/** @param {ManualRunTally} tally @returns {ManualRunProgress} */
+function createProgress(tally) {
     return {
-        completed: outcome.completed,
-        failed: outcome.failed,
-        totalBatches: outcome.totalBatches,
-        label: strategy.label,
-        title: strategy.title,
+        completed: tally.completed,
+        failed: tally.failed,
+        totalBatches: tally.totalBatches,
     };
 }
 
@@ -490,7 +475,7 @@ function isCancelled(signal) {
 
 function logRoutePlan(routePlan, s) {
     const stats = routePlan.tokenStats;
-    debug(
+    trace(
         `Mode: ${s.memoryMode}, recent: ${formatTokenValue(stats.verbatimTokens)}/` +
             `${formatTokenValue(stats.verbatimBudget)}, queued: ${formatTokenValue(stats.queuedTokens)}/` +
             `${formatTokenValue(stats.queuedBudget)}, partitions: ${stats.partitionCount}`,

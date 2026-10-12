@@ -1,5 +1,6 @@
 import { getContext } from '../foundation/context.js';
-import { getEffectiveSettings, getChatStore } from '../foundation/state.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getEffectiveSettings } from '../foundation/settings.js';
 import { debug } from '../foundation/logger.js';
 import { buildFullContext } from './chatutils.js';
 import { generateValidatedPromotion } from './promotion-candidate.js';
@@ -8,33 +9,34 @@ import {
     buildPromotedSnippetMetadata,
     formatAnchoredSnippetNarrative,
 } from './snippet-metadata.js';
-import { compileGlobalState, serializeState } from './summarizer-state.js';
 import { commitSnippetMutation } from './snippet-commit.js';
-import { commitWhenSafe, promptWorkGate } from './summarizer-commit.js';
 import { buildSnapshotBasis, isSnapshotStoreCurrent } from './summarizer-snapshot.js';
 import { countTextTokens } from './token-count.js';
 
 /**
- * Attempt one promotion for the plan's over-limit candidate.
  * @param {object} plan - Promotion plan from buildPromotionPlan.
  * @param {ExtensionSettings} s - Effective settings.
- * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter threaded from the drain; runs without one stay silent.
+ * @param {object} p - The notify adapter, Foreground Gate, and summarizer dispatch the merge runs through.
+ * @param {import('./notify.js').NotifyAdapter | undefined} p.notify - Notify adapter threaded from the drain; runs without one stay silent.
+ * @param {import('./foreground-gate.js').ForegroundGate} p.gate - Foreground Gate the merge commit crosses.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} p.dispatch - Summarizer Dispatch the merge requests through.
  * @returns {Promise<boolean>} Whether the promotion merged and committed.
  */
-async function attemptPromotion(plan, s, notify) {
-    return await mergeLayerSnippets({ plan, candidate: plan.candidate, s, notify });
+async function attemptPromotion(plan, s, { notify, gate, dispatch }) {
+    return await mergeLayerSnippets({ plan, candidate: plan.candidate, s, notify, gate, dispatch });
 }
 
 /**
- * Merge snippets into the next layer using the summarizer.
  * @param {object} p
  * @param {object} p.plan - Promotion plan supplying the merge count and retention-floor verdict.
  * @param {{ layerIndex: number, quota: number, tokens: number, count: number }} p.candidate - Over-limit layer from the plan.
  * @param {ExtensionSettings} p.s
  * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter; runs without one stay silent.
+ * @param {import('./foreground-gate.js').ForegroundGate} p.gate - Foreground Gate the merge commit crosses.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} p.dispatch - Summarizer Dispatch the merge requests through.
  * @returns {Promise<boolean>}
  */
-async function mergeLayerSnippets({ plan, candidate, s, notify }) {
+async function mergeLayerSnippets({ plan, candidate, s, notify, gate, dispatch }) {
     const outcome = await prepareLayerPromotion({
         layerIndex: candidate.layerIndex,
         settings: s,
@@ -48,7 +50,10 @@ async function mergeLayerSnippets({ plan, candidate, s, notify }) {
         return false;
     }
 
-    const promotedSnippet = await generateValidatedPromotion(outcome.prepared, notify);
+    const promotedSnippet = await generateValidatedPromotion(outcome.prepared, {
+        notify,
+        dispatch,
+    });
     if (!promotedSnippet) {
         return false;
     }
@@ -57,11 +62,11 @@ async function mergeLayerSnippets({ plan, candidate, s, notify }) {
         prepared: outcome.prepared,
         snapshot: outcome.snapshot,
         promotedSnippet,
+        gate,
     });
 }
 
 /**
- * Assemble the promotion request inputs for one over-limit layer.
  * @param {object} p
  * @param {number} p.layerIndex
  * @param {ExtensionSettings} p.settings
@@ -98,9 +103,6 @@ async function prepareLayerPromotion({
         .filter(Boolean)
         .join('\n\n');
     const sourceNarrativeText = storyTxt;
-    const mergedState = compileGlobalState([toMerge]);
-    const serializedState = serializeState(mergedState);
-    const sourceState = serializedState || '(none)';
     const memoryTokensBefore = await countTextTokens(storyTxt);
     const contextStr = buildFullContext(layerIndex + 1);
     const promotedMetadata = buildPromotedSnippetMetadata(toMerge);
@@ -122,7 +124,6 @@ async function prepareLayerPromotion({
         overflowMemoryLimit: settings.snippetsPerLayer,
         overflowTokens: layerTokens,
         overflowTokenQuota: quota,
-        sourceState,
     };
 
     return {
@@ -142,10 +143,9 @@ async function prepareLayerPromotion({
     };
 }
 
-async function commitValidatedPromotion({ prepared, snapshot, promotedSnippet }) {
-    const result = await commitWhenSafe({
+async function commitValidatedPromotion({ prepared, snapshot, promotedSnippet, gate }) {
+    const result = await gate.commitWhenSafe({
         kind: 'promotion-merge',
-        snapshot,
         apply: async () =>
             applyMergePromotion({
                 snapshot,
@@ -173,7 +173,6 @@ function capturePromotionSnapshot(layerIndex) {
 }
 
 /**
- * Apply an LLM-backed merge promotion after validating the source layers.
  * @param {object} p
  * @param {object} p.snapshot
  * @param {number} p.layerIndex
@@ -215,12 +214,19 @@ async function applyMergePromotion({ snapshot, layerIndex, promotedSnippet }) {
  * Repeatedly promotes the shallowest over-limit layer until layers fit, the
  * retention floor refuses the candidate, the Foreground Gate blocks, or
  * consecutive failed promotions reach `maxConsecutiveFailures`.
- * @param {object} [options]
+ * @param {object} options
  * @param {number} [options.maxConsecutiveFailures] - Consecutive failed promotions tolerated before stopping.
  * @param {import('./notify.js').NotifyAdapter} [options.notify] - Notify adapter threaded from the engine; runs without one stay silent.
+ * @param {import('./foreground-gate.js').ForegroundGate} options.gate - Foreground Gate the drain asks before and after every attempt.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} options.dispatch - Summarizer Dispatch every promotion request goes through.
  * @returns {Promise<{status: 'completed', attempts: number} | {status: 'blocked', attempts: number} | {status: 'failed', attempts: number}>} Run status and the number of promotions attempted.
  */
-export async function drainPromotionOverflow({ maxConsecutiveFailures = Infinity, notify } = {}) {
+export async function drainPromotionOverflow({
+    maxConsecutiveFailures = Infinity,
+    notify,
+    gate,
+    dispatch,
+}) {
     const s = getEffectiveSettings();
     let failures = 0;
     let attempts = 0;
@@ -229,12 +235,12 @@ export async function drainPromotionOverflow({ maxConsecutiveFailures = Infinity
         if (!plan.candidate || plan.retentionFloorViolated) {
             return { status: 'completed', attempts };
         }
-        if ((await promptWorkGate('promotion drain')) === 'blocked') {
+        if ((await gate.promptWorkGate('promotion drain')) === 'blocked') {
             return { status: 'blocked', attempts };
         }
-        const promoted = await attemptPromotion(plan, s, notify);
+        const promoted = await attemptPromotion(plan, s, { notify, gate, dispatch });
         attempts++;
-        if ((await promptWorkGate('promotion drain')) === 'blocked') {
+        if ((await gate.promptWorkGate('promotion drain')) === 'blocked') {
             return { status: 'blocked', attempts };
         }
         if (promoted) {

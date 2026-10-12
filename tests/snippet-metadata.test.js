@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
     buildPromotedSnippetMetadata,
+    buildSnippetMetadataFromText,
     extractSnippetMetadata,
     formatCompactSnippetAnchor,
     formatSnippetAnchor,
     getSnippetDisplayMeta,
+    parseSnippet,
 } from '../src/core/snippet-metadata.js';
 import { installSummaryContext, makeMessages } from './test-helpers.js';
 
@@ -90,5 +92,85 @@ describe('getSnippetDisplayMeta', () => {
             fromLayer: undefined,
             promoted: false,
         });
+    });
+});
+
+describe('parseSnippet', () => {
+    it('reads an enveloped snippet: body between the tags, scene time after the close tag', () => {
+        const parsed = parseSnippet(
+            '<narrative>\nScene.\n</narrative>\ncurrent_date_time: 2024-07-04 16 Thu',
+        );
+        expect(parsed.narrative).toBe('Scene.');
+        expect(parsed.currentDateTime).toBe('2024-07-04 16 Thu');
+    });
+
+    it('keeps multi-line enveloped prose intact', () => {
+        const parsed = parseSnippet(
+            '<narrative>\nScene one.\nScene two.\n</narrative>\ncurrent_date_time: 2024-07-04 16 Thu',
+        );
+        expect(parsed.narrative).toBe('Scene one.\nScene two.');
+        expect(parsed.currentDateTime).toBe('2024-07-04 16 Thu');
+    });
+
+    it('keeps enveloped prose without a scene time whole', () => {
+        const parsed = parseSnippet('<narrative>\nScene.\n</narrative>');
+        expect(parsed.narrative).toBe('Scene.');
+        expect(parsed.currentDateTime).toBeUndefined();
+    });
+
+    it('still strips the legacy [NARRATIVE] header from snippets stored before the envelope', () => {
+        const parsed = parseSnippet('[NARRATIVE]\nScene.\n\ncurrent_date_time: 2024-07-04 16 Thu');
+        expect(parsed.narrative).toBe('Scene.');
+        expect(parsed.currentDateTime).toBe('2024-07-04 16 Thu');
+    });
+
+    it('corrects a hallucinated weekday against the ISO date', () => {
+        const parsed = parseSnippet('[NARRATIVE]\nScene.\n\ncurrent_date_time: 2024-12-03 06 Fri');
+        expect(parsed.currentDateTime).toBe('2024-12-03 06 Tue');
+    });
+
+    it('inserts the weekday when the model omitted it', () => {
+        const parsed = parseSnippet('[NARRATIVE]\nScene.\n\ncurrent_date_time: 2024-07-07 06');
+        expect(parsed.currentDateTime).toBe('2024-07-07 06 Sun');
+    });
+
+    it('drops stray minutes and re-derives the weekday', () => {
+        const parsed = parseSnippet(
+            '[NARRATIVE]\nScene.\n\ncurrent_date_time: 2024-07-04 16:32 Wed',
+        );
+        expect(parsed.currentDateTime).toBe('2024-07-04 16 Thu');
+    });
+
+    it.each(['someday soon', '2024-02-30 06 Sat', 'Feb 30, 2024 03 06'])(
+        'leaves malformed scene times untouched rather than fabricating (%s)',
+        (value) => {
+            const parsed = parseSnippet(`[NARRATIVE]\nScene.\n\ncurrent_date_time: ${value}`);
+            expect(parsed.currentDateTime).toBe(value);
+        },
+    );
+
+    it('keeps the whole text as narrative when no scene-time key line exists', () => {
+        const parsed = parseSnippet('Plain prose without any headers.');
+        expect(parsed.narrative).toBe('Plain prose without any headers.');
+        expect(parsed.currentDateTime).toBeUndefined();
+    });
+
+    it('returns an empty narrative for empty input', () => {
+        expect(parseSnippet('')).toEqual({ narrative: '', currentDateTime: undefined });
+        expect(parseSnippet('   ')).toEqual({ narrative: '', currentDateTime: undefined });
+    });
+});
+
+describe('buildSnippetMetadataFromText', () => {
+    it('extracts the normalized scene time from a snippet', () => {
+        expect(
+            buildSnippetMetadataFromText(
+                '[NARRATIVE]\nScene.\n\ncurrent_date_time: 2024-12-03 06 Fri',
+            ),
+        ).toEqual({ currentDateTime: '2024-12-03 06 Tue' });
+    });
+
+    it('omits currentDateTime when the text carries no scene time', () => {
+        expect(buildSnippetMetadataFromText('[NARRATIVE]\nScene.')).toEqual({});
     });
 });

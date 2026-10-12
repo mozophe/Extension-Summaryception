@@ -1,3 +1,4 @@
+import { ELASTIC_STRATEGIES } from '../core/summarizer-engine.js';
 import { formatTokenValue } from '../core/token-count.js';
 import {
     BATCH_PROGRESS,
@@ -6,11 +7,19 @@ import {
     TOAST_TITLE,
 } from '../foundation/constants.js';
 
+const IDLE_MESSAGES = {
+    [ELASTIC_STRATEGIES.FORCE]: 'Nothing eligible to summarize.',
+    [ELASTIC_STRATEGIES.SLOP]: 'Nothing to reset yet. Wait for an AI reply first.',
+};
+
 /**
+ * The one "nothing to run" renderer: a pre-check that found no work and a run
+ * that reported `idle` both land here.
+ * @param {string} strategy Manual run strategy.
  * @returns {void}
  */
-export function showSlopBreakerNoop() {
-    toastr.info('Nothing to reset yet. Wait for an AI reply first.', TOAST_TITLE);
+export function showManualRunIdle(strategy) {
+    toastr.info(IDLE_MESSAGES[strategy], TOAST_TITLE);
 }
 /**
  * @returns {void}
@@ -27,19 +36,17 @@ export function showForegroundActiveToast() {
 }
 
 /**
- * @param {import('../core/summarizer-engine.js').ManualRunOutcome} outcome
- * @returns {void}
+ * Catch-up notices: the status picks the notice, the counts phrase it. A gate
+ * block with no batch planned never started, which is its own notice.
+ * @type {Record<string, ManualRunNotice>}
  */
-export function showCatchupOutcome(outcome) {
-    if (outcome.blocked && outcome.totalBatches === 0) {
-        showForegroundActiveToast();
-    } else if (outcome.cancelled) {
-        toastr.warning(
-            `Catch-up paused at ${outcome.completed}/${outcome.totalBatches}. Progress saved - will continue on next message.`,
-            TOAST_TITLE,
-            { timeOut: 5000 },
-        );
-    } else if (outcome.blocked) {
+const CATCHUP_NOTICES = {
+    idle: () => showManualRunIdle(ELASTIC_STRATEGIES.FORCE),
+    blocked: (outcome) => {
+        if (outcome.totalBatches === 0) {
+            showForegroundActiveToast();
+            return;
+        }
         const hint =
             outcome.blockReason === 'no-progress'
                 ? 'a batch made no progress. Click Force Summarize again to continue.'
@@ -49,85 +56,142 @@ export function showCatchupOutcome(outcome) {
             TOAST_TITLE,
             { timeOut: 5000 },
         );
-    } else if (outcome.failureLimitReached) {
+    },
+    aborted: (outcome) =>
+        toastr.warning(
+            `Catch-up paused at ${outcome.completed}/${outcome.totalBatches}. Progress saved - will continue on next message.`,
+            TOAST_TITLE,
+            { timeOut: 5000 },
+        ),
+    failed: () =>
         toastr.error(
             '3 consecutive failures - API may be down. Pausing catch-up. Progress saved; will resume on next message.',
             TOAST_TITLE,
             { timeOut: 8000 },
-        );
-    } else if (outcome.totalBatches > 0 && outcome.failed === 0) {
+        ),
+    completed: (outcome) =>
         toastr.success(`Catch-up complete! ${outcome.completed} batches processed.`, TOAST_TITLE, {
             timeOut: 4000,
-        });
-    } else if (outcome.failed > 0) {
+        }),
+    partial: (outcome) =>
         toastr.warning(
             `Catch-up finished. ${outcome.completed} succeeded, ${outcome.failed} failed (will retry on next trigger).`,
             TOAST_TITLE,
             { timeOut: 6000 },
-        );
-    }
-}
+        ),
+};
+
+const SLOP_STOPPED_NOTICE =
+    'Slop Breaker stopped. Partial progress was saved, but the intended cut was not completed.';
 
 /**
- * @param {import('../core/summarizer-engine.js').ManualRunOutcome} outcome
- * @returns {void}
+ * A Slop Breaker that committed nothing reports failure; one that committed
+ * part of the cut reports where it stopped.
+ * @type {ManualRunNotice}
  */
-export function showSlopBreakerOutcome(outcome) {
-    if (outcome.fullyCommitted) {
-        toastr.success('Slop Breaker complete. Reloading chat context.', TOAST_TITLE, {
-            timeOut: 3000,
-        });
-    } else if (outcome.blocked && outcome.totalBatches === 0) {
-        showForegroundActiveToast();
-    } else if (outcome.totalBatches === 0) {
-        showSlopBreakerNoop();
-    } else if (outcome.cancelled && outcome.completed === 0) {
-        toastr.warning('Slop Breaker stopped. No new cut was completed.', TOAST_TITLE, {
-            timeOut: 5000,
-        });
-    } else if (outcome.cancelled || outcome.blocked) {
-        toastr.warning(
-            'Slop Breaker stopped. Partial progress was saved, but the intended cut was not completed.',
-            TOAST_TITLE,
-            { timeOut: 6000 },
-        );
-    } else if (outcome.completed === 0) {
+function showSlopIncomplete(outcome) {
+    if (outcome.completed === 0) {
         toastr.error('Slop Breaker failed. No new cut was completed.', TOAST_TITLE, {
             timeOut: 6000,
         });
-    } else {
-        toastr.warning(
-            `Slop Breaker paused after ${outcome.completed} batch${outcome.completed === 1 ? '' : 'es'}. ` +
-                `${outcome.failed} failed; the intended cut was not completed.`,
-            TOAST_TITLE,
-            { timeOut: 6000 },
-        );
+        return;
     }
+    toastr.warning(
+        `Slop Breaker paused after ${outcome.completed} batch${outcome.completed === 1 ? '' : 'es'}. ` +
+            `${outcome.failed} failed; the intended cut was not completed.`,
+        TOAST_TITLE,
+        { timeOut: 6000 },
+    );
+}
+
+/** @type {Record<string, ManualRunNotice>} */
+const SLOP_NOTICES = {
+    idle: () => showManualRunIdle(ELASTIC_STRATEGIES.SLOP),
+    completed: () =>
+        toastr.success('Slop Breaker complete. Reloading chat context.', TOAST_TITLE, {
+            timeOut: 3000,
+        }),
+    blocked: (outcome) => {
+        if (outcome.totalBatches === 0) {
+            showForegroundActiveToast();
+            return;
+        }
+        toastr.warning(SLOP_STOPPED_NOTICE, TOAST_TITLE, { timeOut: 6000 });
+    },
+    aborted: (outcome) => {
+        if (outcome.completed === 0) {
+            toastr.warning('Slop Breaker stopped. No new cut was completed.', TOAST_TITLE, {
+                timeOut: 5000,
+            });
+            return;
+        }
+        toastr.warning(SLOP_STOPPED_NOTICE, TOAST_TITLE, { timeOut: 6000 });
+    },
+    failed: showSlopIncomplete,
+    partial: showSlopIncomplete,
+};
+
+/**
+ * @typedef {(outcome: import('../core/run-outcome.js').ManualRunOutcome) => void} ManualRunNotice
+ */
+
+/**
+ * Display policy for one manual run strategy: the progress text core reports
+ * counts for, and the notice each terminal status renders (ADR-0019).
+ * @typedef {object} ManualRunView
+ * @property {string} label - Progress text label for the active operation.
+ * @property {string} title - User-visible progress toast title.
+ * @property {Record<string, ManualRunNotice>} notices - Notice per Run Outcome status; an unmapped status stays silent.
+ */
+
+/** @type {Record<string, ManualRunView>} */
+const MANUAL_RUN_VIEWS = {
+    [ELASTIC_STRATEGIES.FORCE]: {
+        label: 'Processing',
+        title: 'Summaryception Catch-Up',
+        notices: CATCHUP_NOTICES,
+    },
+    [ELASTIC_STRATEGIES.SLOP]: {
+        label: 'Breaking slop',
+        title: 'Summaryception Slop Breaker',
+        notices: SLOP_NOTICES,
+    },
+};
+
+/**
+ * @param {string} strategy Manual run strategy.
+ * @returns {ManualRunView}
+ */
+export function manualRunView(strategy) {
+    return MANUAL_RUN_VIEWS[strategy];
 }
 
 /**
- * @param {import('../core/summarizer-engine.js').ManualRunProgress & { onCancel: () => void }} progress
+ * @param {import('../core/summarizer-engine.js').ManualRunProgress} progress
+ * @param {ManualRunView} view - Display policy of the running strategy.
+ * @param {() => void} onCancel - Cancels the run from the toast's close button.
  * @returns {unknown}
  */
-export function createManualProgressToast(progress) {
-    return toastr.info(getProgressText(progress), progress.title, {
+export function createManualProgressToast(progress, view, onCancel) {
+    return toastr.info(getProgressText(progress, view.label), view.title, {
         timeOut: 0,
         extendedTimeOut: 0,
         tapToDismiss: false,
         closeButton: true,
-        onCloseClick: progress.onCancel,
+        onCloseClick: onCancel,
     });
 }
 
 /**
  * @param {unknown} progressToast
  * @param {import('../core/summarizer-engine.js').ManualRunProgress} progress
+ * @param {ManualRunView} view - Display policy of the running strategy.
  * @returns {void}
  */
-export function updateManualProgressToast(progressToast, progress) {
+export function updateManualProgressToast(progressToast, progress, view) {
     $(progressToast)
         .find('.toast-message')
-        .text(`${getProgressText(progress)}\nClick x to pause`);
+        .text(`${getProgressText(progress, view.label)}\nClick x to pause`);
 }
 
 /**
@@ -141,8 +205,8 @@ export function clearManualProgressToast(progressToast) {
 }
 
 /**
- * The delegated click handler in ui-manual-run.js handles the Force
- * Summarize button.
+ * The toast action button has no handler at render time; the delegated
+ * document click binding picks it up after the toast enters the DOM.
  * @param {import('../core/cache-staleness.js').StaleCacheAdvice} advice
  * @returns {unknown}
  */
@@ -240,7 +304,7 @@ const NOTIFY_PROGRESS_VIEWS = {
 const DEFAULT_PROGRESS_VIEW = { subtitle: 'Working', text: 'Working', everyN: 1 };
 
 /**
- * Terminal notices render right after the progress toast closes (ADR-0004).
+ * Terminal notices render right after the progress toast closes (ADR-0019).
  * Unknown kinds close silently.
  * @type {Record<string, () => void>}
  */
@@ -257,12 +321,12 @@ const NOTIFY_TERMINAL_VIEWS = {
 
 /**
  * Fixed display duration for retry warnings. Independent of the backoff wait,
- * which lives in retry policy (ADR-0004).
+ * which lives in retry policy (ADR-0019).
  */
 const RETRY_NOTICE_MS = 5000;
 
 /**
- * Per-kind transient notice policy (ADR-0004): severity, fixed display
+ * Per-kind transient notice policy (ADR-0019): severity, fixed display
  * duration, and phrasing built from the event's structured payload. Durations
  * never derive from core wait times; unknown kinds stay silent.
  * @type {Record<string, (event: import('../core/notify.js').NotifyTransientEvent) => void>}
@@ -336,7 +400,7 @@ export function pauseMemoryToastForGeneration() {
 
 /**
  * Display durations and update cadence live here. Events carry structured
- * data only (ADR-0004).
+ * data only (ADR-0019).
  * @returns {import('../core/notify.js').NotifyAdapter}
  */
 export function createToastrNotifyAdapter() {
@@ -400,10 +464,11 @@ export function createToastrNotifyAdapter() {
 
 /**
  * @param {import('../core/summarizer-engine.js').ManualRunProgress} progress
+ * @param {string} label - Progress text label for the active operation.
  * @returns {string}
  */
-function getProgressText(progress) {
+function getProgressText(progress, label) {
     const pct = Math.round((progress.completed / progress.totalBatches) * 100);
     const failStr = progress.failed > 0 ? ` | ${progress.failed} failed` : '';
-    return `${progress.label}: ${progress.completed} / ${progress.totalBatches} batches (${pct}%)${failStr}`;
+    return `${label}: ${progress.completed} / ${progress.totalBatches} batches (${pct}%)${failStr}`;
 }

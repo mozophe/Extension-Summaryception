@@ -8,18 +8,16 @@ import {
 } from '../foundation/constants.js';
 import { error, warn } from '../foundation/logger.js';
 import { clampInteger } from '../foundation/numeric.js';
-import { refreshFull, refreshPreview } from '../foundation/refresh.js';
+import { selectOff, setComplexity, setEnabled } from '../foundation/operation-mode.js';
+import { refreshFull, refreshPreview, refreshUi } from '../foundation/refresh.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getSettings, resetSettingsToDefaults, saveSettings } from '../foundation/settings.js';
 import {
     deriveAdvancedEngineTuning,
     enforceRetentionInvariants,
-    getSettings,
-    resetSettingsToDefaults,
-    saveSettings,
-    getChatStore,
-} from '../foundation/state.js';
-import { requestSummarization } from '../core/summarizer-queue.js';
-import { clearSummaryceptionMemory, importSummaryceptionMemory } from '../features/memory.js';
-import { updateUI } from './ui.js';
+} from '../foundation/settings-normalizer.js';
+import { clearChatData } from '../core/chat-data.js';
+import { importSummaryceptionMemory } from '../features/memory.js';
 import {
     SETTING_SLIDER_SELECTOR,
     bindDataSettingElements,
@@ -29,7 +27,7 @@ import {
     readString,
     syncRoleMaskModeControl,
 } from './ui-bind.js';
-import { bindManualRunControls, reloadPage } from './ui-manual-run.js';
+import { bindManualRunControls } from './ui-manual-run.js';
 import { bindPromptProfiles } from './ui-prompts.js';
 
 /**
@@ -40,26 +38,25 @@ function saveAndRefreshUi() {
     refreshFull();
 }
 
-// Event bindings
-
 /**
- * Bind document event handlers for the Summaryception UI.
- * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
- * @param {import('../core/summarizer-engine.js').ManualRunnerDeps} manualRunnerDeps - Engine deps for manual runs.
- * @param {import('../core/summarizer-engine.js').PauseLatchDeps} pauseLatchDeps - Engine deps for the pause latch.
+ * @param {object} deps
+ * @param {import('../core/notify.js').NotifyAdapter} deps.notify - Toastr-backed adapter distributed to core calls.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} deps.gate - Foreground Gate the import commit crosses.
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} deps.queue - Summarizer Queue settings changes kick.
+ * @param {import('../core/summarizer-engine.js').ManualRunnerDeps} deps.manualRunnerDeps - Engine deps for manual runs and the pause latch.
  * @returns {void}
  */
-export function bindUIEvents(notify, manualRunnerDeps, pauseLatchDeps) {
-    bindModeHandlers();
-    bindToggleHandlers();
+export function bindUIEvents({ notify, gate, queue, manualRunnerDeps }) {
+    bindModeHandlers(queue);
+    bindToggleHandlers(queue);
     bindSliderHandlers();
     bindTextareaHandlers();
-    bindClickHandlers(notify);
-    bindManualRunControls({ notify, manualRunnerDeps, pauseLatchDeps });
+    bindClickHandlers(notify, gate);
+    bindManualRunControls({ notify, manualRunnerDeps });
     bindPromptProfiles();
 }
 
-function bindModeHandlers() {
+function bindModeHandlers(queue) {
     $(document).on('change', 'input[name="sc_ui_mode"]', function () {
         const mode = String($(this).val());
         if (!(/** @type {string[]} */ (Object.values(UI_MODES)).includes(mode))) {
@@ -71,17 +68,14 @@ function bindModeHandlers() {
             return;
         }
 
-        s.uiMode = mode;
-        s.enabled = mode !== UI_MODES.OFF;
-        // Remember the complexity panel so it stays visible when the
-        // extension is off. Selecting Easy or Advanced updates it. Off
-        // leaves it unchanged.
-        if (mode === UI_MODES.EASY || mode === UI_MODES.ADVANCED) {
-            s.configMode = mode;
+        if (mode === UI_MODES.OFF) {
+            selectOff(s);
+        } else {
+            setComplexity(s, mode);
         }
         saveAndRefreshUi();
         if (s.enabled) {
-            requestAutoSummaryRefresh('mode changed');
+            requestAutoSummaryRefresh(queue, 'mode changed');
         }
     });
 }
@@ -89,16 +83,13 @@ function bindModeHandlers() {
 /**
  * @returns {void}
  */
-function bindToggleHandlers() {
+function bindToggleHandlers(queue) {
     $(document).on('change', '#sc_enabled', function () {
         const s = getSettings();
-        s.enabled = $(this).prop('checked');
-        // Preserve the chosen complexity panel. This toggle flips on/off
-        // only, never Easy/Advanced.
-        s.uiMode = s.enabled ? s.configMode || UI_MODES.EASY : UI_MODES.OFF;
+        setEnabled(s, $(this).prop('checked'));
         saveAndRefreshUi();
         if (s.enabled) {
-            requestAutoSummaryRefresh('enabled');
+            requestAutoSummaryRefresh(queue, 'enabled');
         }
     });
 
@@ -109,24 +100,15 @@ function bindToggleHandlers() {
         '#sc_trace_mode',
         '#sc_prompt_input_log_mode',
         '#sc_prompt_output_log_mode',
+        '#sc_continuity_state_log_mode',
+        '#sc_continuity_state_log_full_mode',
         '#sc_apply_regex_scripts',
         '#sc_hide_non_text_messages',
         '#sc_strip_chinese_ideographs',
-        '#sc_state_cat_bonds',
-        '#sc_state_cat_chekhov',
-        '#sc_state_cat_gm_notes',
-        '#sc_state_cat_inventory',
-        '#sc_state_cat_location',
+        '#sc_continuity_enabled',
     ].join(', ');
     bindDataSettingElements(plainToggles, { eventName: 'change' });
 
-    bindDocumentSetting({
-        eventName: 'change',
-        selector: '#sc_inject_current_state',
-        key: 'injectCurrentState',
-        read: readChecked,
-        afterSave: refreshPreview,
-    });
     bindDocumentSetting({
         eventName: 'change',
         selector: '#sc_mask_user_role_as_assistant',
@@ -163,8 +145,8 @@ function bindToggleHandlers() {
 }
 
 function bindCustomPlacementHandlers() {
-    // Position and role are plain selects: key and fixed option values live in
-    // settings.html, so the engine reads and writes them identically.
+    // Position and role are plain selects: the markup declares the key and the
+    // fixed option values, so the data-attribute engine binds them directly.
     bindDataSettingElements('#sc_custom_memory_position, #sc_custom_memory_role', {
         eventName: 'change',
         afterSave: refreshFull,
@@ -180,12 +162,13 @@ function bindCustomPlacementHandlers() {
     });
 }
 
-function requestAutoSummaryRefresh(reason) {
-    void requestSummarization()
+function requestAutoSummaryRefresh(queue, reason) {
+    void queue
+        .request()
         .catch((e) => {
             warn(`Auto summarization request after ${reason} failed:`, e);
         })
-        .finally(updateUI);
+        .finally(refreshUi);
 }
 
 /**
@@ -222,7 +205,8 @@ function enforceRetentionConstraints(changedKey) {
  * @returns {void}
  */
 function bindTextareaHandlers() {
-    // Strip patterns: key and "lines" type are declared in settings.html.
+    // Strip patterns: the markup declares the key and the "lines" type, so the
+    // data-attribute engine binds them.
     bindDataSettingElements('#sc_strip_patterns', { eventName: 'change' });
     bindDocumentSetting({
         eventName: 'change',
@@ -235,12 +219,12 @@ function bindTextareaHandlers() {
 /**
  * Import summary memory from a JSON file.
  *
- * The ephemeral <input type="file"> never enters the live DOM, so vanilla
- * document.createElement suffices. We read its files and discard it.
+ * The file input is ephemeral and never enters the live DOM, so it needs no
+ * cleanup after the read.
  * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for the import commit.
  * @returns {void}
  */
-function triggerImport(notify) {
+function triggerImport(notify, gate) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
@@ -253,7 +237,7 @@ function triggerImport(notify) {
         try {
             const text = await file.text();
             const data = JSON.parse(text);
-            const outcome = await importSummaryceptionMemory(data, { notify });
+            const outcome = await importSummaryceptionMemory(data, { notify, gate });
             if (outcome.status === 'invalid') {
                 toastr.error('Invalid file format.');
                 return;
@@ -274,7 +258,6 @@ function triggerImport(notify) {
 }
 
 /**
- * Reset advanced settings to defaults.
  * @returns {void}
  */
 function onResetDefaults() {
@@ -299,24 +282,20 @@ function onResetDefaults() {
 }
 
 /**
- * Bind action button click handlers (clear, refresh, export, import, reset).
  * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter for the import commit.
  * @returns {void}
  */
-function bindClickHandlers(notify) {
+function bindClickHandlers(notify, gate) {
     $(document).on('click', '#sc_clear_memory', async function () {
         if (!confirm('Clear ALL Summaryception memory for this chat and unghost all messages?')) {
             return;
         }
 
         try {
-            await clearSummaryceptionMemory({ updateUi: true });
-            toastr.success(
-                'Memory cleared & messages unghosted. Reloading chat context.',
-                TOAST_TITLE,
-                { timeOut: 2000 },
-            );
-            reloadPage();
+            await clearChatData();
+            toastr.success('Memory cleared & messages unghosted.', TOAST_TITLE, {
+                timeOut: 2000,
+            });
         } catch (e) {
             error('Clear memory failed:', e);
             toastr.error(
@@ -327,7 +306,7 @@ function bindClickHandlers(notify) {
         }
     });
 
-    $(document).on('click', '#sc_refresh_preview', () => updateUI());
+    $(document).on('click', '#sc_refresh_preview', () => refreshUi());
 
     $(document).on('click', '#sc_export', function () {
         const store = getChatStore();
@@ -341,7 +320,7 @@ function bindClickHandlers(notify) {
         toastr.success('Memory exported', TOAST_TITLE);
     });
 
-    $(document).on('click', '#sc_import', () => triggerImport(notify));
+    $(document).on('click', '#sc_import', () => triggerImport(notify, gate));
 
     $(document).on('click', '#sc_reset_defaults', onResetDefaults);
 

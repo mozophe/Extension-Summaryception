@@ -1,31 +1,27 @@
 import {
     MEMORY_MODES,
     MEMORY_POSITIONS,
-    UI_MODES,
     layerLabel,
     listNonEmptyLayers,
 } from '../foundation/constants.js';
 import { getChat } from '../foundation/context.js';
 import { warn } from '../foundation/logger.js';
-import {
-    getEffectiveSettings,
-    getSettings,
-    getChatStore,
-    getCurrentSummarizedBoundary,
-} from '../foundation/state.js';
+import { readOperationMode } from '../foundation/operation-mode.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getEffectiveSettings, getSettings } from '../foundation/settings.js';
 import { countGhostedMessages } from '../core/ghosting.js';
-import { isBusy } from '../core/summarizer-queue.js';
-import { countTextTokens, formatCompactTokenCount } from '../core/token-count.js';
+import { getCurrentSummarizedBoundary } from '../core/snippet-provenance.js';
+import { formatCompactTokenCount } from '../core/token-count.js';
 
 import { describeAutoWork } from '../core/summarization-routes.js';
 import { estimateContextPreview } from '../core/token-budget.js';
-import { getEffectiveMemoryUsage } from '../core/memory-budget.js';
-import { assembleSummaryBlock } from '../features/injection.js';
+import { buildInjection, measureInjection } from '../core/memory-injection.js';
 import { syncAllSettingsToDOM, syncRoleMaskModeControl } from './ui-bind.js';
 import { updateSnippetBrowser } from './ui-snippets.js';
 import { syncConnectionPanels } from './ui-connection.js';
 import {
     buildContextBudgetViewModel,
+    buildEnabledContentModel,
     buildTriggerGaugeModel,
     formatBudgetTokenLabel,
     getContextColorClass,
@@ -35,34 +31,47 @@ const CONTEXT_COLOR_CLASSES = 'sc-ctx-safe sc-ctx-warn sc-ctx-caution sc-ctx-dan
 
 /**
  * Re-render the entire Summaryception UI from current settings and chat store.
+ * Entry re-renders through the Refresh Port, whose composition root binding
+ * supplies the queue.
+ * @param {{ queue: import('../core/summarizer-queue.js').SummarizerQueue }} deps
  * @returns {Promise<void>}
  */
-export async function updateUI() {
+export async function updateUI({ queue }) {
     try {
         const s = getSettings();
         const effectiveSettings = getEffectiveSettings();
         const store = getChatStore();
 
         syncSettingsInputs(s, effectiveSettings);
-        syncEnabledContent(s);
+        const enabledContent = buildEnabledContentModel(readOperationMode(s), {
+            autoPaused: s.autoPaused,
+        });
+        syncEnabledContent(enabledContent);
 
         syncRoleMaskModeControl(s.maskUserRoleAsAssistant);
-        // alwaysOn category: markup disables the input, so show it as
-        // permanently ticked. The persisted flag for this category is ignored.
-        $('#sc_state_cat_date_time').prop('checked', true);
         const work = await describeAutoWork(getChat(), store, effectiveSettings).catch(() => null);
         const ghostedCount = countGhostedMessages();
         const metrics = {
             totalSnippets: listNonEmptyLayers(store).reduce((n, { layer }) => n + layer.length, 0),
         };
 
-        const overview = { settings: effectiveSettings, work, ghostedCount, metrics };
+        const overview = {
+            settings: effectiveSettings,
+            modeLabel: enabledContent.modeLabel,
+            work,
+            ghostedCount,
+            metrics,
+            busy: queue.isBusy(),
+        };
+        const memoryInjection = buildInjection(store.layers, effectiveSettings);
+        const memoryUsage = await measureInjection(memoryInjection);
+
         await renderStatusOverview('sc_status', 'enabled', overview);
         await renderStatusOverview('sc_easy_status', 'mode', overview);
-        await renderBudgetStatus(effectiveSettings, store, work);
-        await renderMemoryBudget(effectiveSettings, store, 'easy_memory');
+        await renderBudgetStatus(effectiveSettings, work, memoryUsage);
+        await renderMemoryBudget(effectiveSettings, memoryUsage, 'easy_memory');
         renderLayerStats(effectiveSettings, store, ghostedCount);
-        await renderPreview();
+        await renderPreview(memoryInjection, memoryUsage);
         updateSnippetBrowser();
     } catch (e) {
         warn('updateUI error:', e);
@@ -70,7 +79,6 @@ export async function updateUI() {
 }
 
 /**
- * Sync all static settings inputs from the settings object.
  * @param {ReturnType<typeof getSettings>} s
  * @param {ReturnType<typeof getEffectiveSettings>} effectiveSettings
  * @returns {void}
@@ -83,19 +91,17 @@ function syncSettingsInputs(s, effectiveSettings) {
     syncConnectionPanels(s);
 }
 
-function syncEnabledContent(s) {
-    // Off shows the banner and keeps the complexity panel (from configMode)
-    // visible, so configuration stays editable while the extension is off.
-    const off = s.uiMode === UI_MODES.OFF;
-    const complexity = off ? s.configMode || UI_MODES.EASY : s.uiMode;
-    $('#sc_off_content').toggle(off);
-    $('#sc_easy_content').toggle(complexity === UI_MODES.EASY);
-    $('#sc_enabled_content').toggle(complexity === UI_MODES.ADVANCED);
-    // Stop sets the autoPaused latch. Show Resume while paused so users can
-    // continue without re-triggering automatic work.
-    const paused = Boolean(s.autoPaused);
-    $('#sc_stop_summarize, #sc_easy_stop_summarize').toggle(s.enabled && !paused);
-    $('#sc_resume_summarize, #sc_easy_resume_summarize').toggle(s.enabled && paused);
+/**
+ * @param {{ off: boolean, easyPanel: boolean, advancedPanel: boolean, continuitySection: boolean, stop: boolean, resume: boolean }} view
+ * @returns {void}
+ */
+export function syncEnabledContent(view) {
+    $('#sc_off_content').toggle(view.off);
+    $('#sc_easy_content').toggle(view.easyPanel);
+    $('#sc_enabled_content').toggle(view.advancedPanel);
+    $('#sc_continuity_section').toggle(view.continuitySection);
+    $('#sc_stop_summarize, #sc_easy_stop_summarize').toggle(view.stop);
+    $('#sc_resume_summarize, #sc_easy_resume_summarize').toggle(view.resume);
 }
 
 function syncEasyPayloadSchematic(s = getEffectiveSettings()) {
@@ -131,31 +137,21 @@ function setContextValueColor($element, tokens) {
 }
 
 async function renderStatusOverview(prefix, modeField, overview) {
-    const { settings: s, work, ghostedCount, metrics } = overview;
-    $(`#${prefix}_${modeField}`).text(getModeLabel(s));
-    $(`#${prefix}_worker`).text(await getWorkerLabel(s, work));
+    const { settings: s, modeLabel, work, ghostedCount, metrics, busy } = overview;
+    $(`#${prefix}_${modeField}`).text(modeLabel);
+    $(`#${prefix}_worker`).text(await getWorkerLabel(s, work, busy));
     $(`#${prefix}_snippets`).text(String(metrics.totalSnippets));
     $(`#${prefix}_ghosted`).text(String(ghostedCount));
 }
 
-function getModeLabel(s) {
-    if (s.uiMode === UI_MODES.EASY) {
-        return 'Easy';
-    }
-    if (s.uiMode === UI_MODES.ADVANCED) {
-        return 'Advanced';
-    }
-    return 'Off';
-}
-
 /**
- * Build the worker status label from the auto work read model.
  * @param {ReturnType<typeof getEffectiveSettings>} s
  * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
+ * @param {boolean} busy - Whether any summarizer work is live
  * @returns {Promise<string>}
  */
-async function getWorkerLabel(s, work) {
-    if (isBusy()) {
+async function getWorkerLabel(s, work, busy) {
+    if (busy) {
         return 'Running';
     }
     if (!s.enabled) {
@@ -178,15 +174,13 @@ function syncMemoryModeControls(s) {
     $('.sc-cache-mode-row').toggle(isPrefixCache);
 }
 
-async function renderBudgetStatus(s, store, work) {
+async function renderBudgetStatus(s, work, memoryUsage) {
     await renderVerbatimBudget(s, work);
     await renderTriggerGauge(s, work);
-    await renderMemoryBudget(s, store);
+    await renderMemoryBudget(s, memoryUsage);
 }
 
 /**
- * Render a context budget card into the `#sc_<prefix>_budget_{total,bar,legend}`
- * selector triple, clearing it when the view model cannot be built.
  * @param {string} prefix
  * @param {Function} build - Returns the buildContextBudgetViewModel inputs.
  * @returns {Promise<void>}
@@ -204,7 +198,6 @@ async function renderBudgetCard(prefix, build) {
 }
 
 /**
- * Render the verbatim budget card from the auto work read model.
  * @param {ReturnType<typeof getEffectiveSettings>} s
  * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
  * @returns {Promise<void>}
@@ -228,7 +221,6 @@ async function renderVerbatimBudget(s, work) {
 }
 
 /**
- * Render the queued-chat trigger gauge from the auto work read model.
  * @param {ReturnType<typeof getEffectiveSettings>} s
  * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
  * @returns {Promise<void>}
@@ -253,15 +245,12 @@ async function renderTriggerGauge(s, work) {
     });
 }
 
-async function renderMemoryBudget(s, store, prefix = 'memory') {
-    await renderBudgetCard(prefix, async () => {
-        const usage = await getEffectiveMemoryUsage(store.layers, s);
-        return {
-            budget: s.memoryTokenBudget,
-            verbatim: { label: 'Live Chat', kind: 'verbatim', count: 0, estimated: false },
-            layers: orderMemoryBudgetParts(usage.parts),
-        };
-    });
+async function renderMemoryBudget(s, usage, prefix = 'memory') {
+    await renderBudgetCard(prefix, () => ({
+        budget: s.memoryTokenBudget,
+        verbatim: { label: 'Live Chat', kind: 'verbatim', count: 0, estimated: false },
+        layers: orderMemoryBudgetParts(usage.parts),
+    }));
 }
 
 function orderMemoryBudgetParts(parts) {
@@ -339,7 +328,6 @@ function getBudgetSegmentTitle(segment) {
 }
 
 /**
- * Build and render the layer statistics panel.
  * @param {ReturnType<typeof getSettings>} s
  * @param {ReturnType<typeof getChatStore>} store
  * @param {number} ghostedCount - Ghosted message count, computed once per updateUI.
@@ -366,19 +354,15 @@ function renderLayerStats(s, store, ghostedCount) {
 }
 
 /**
- * Build and render the injection preview textarea and token count.
- * @returns {Promise<void>}
+ * Render the injection preview textarea and the token count of the very same
+ * text that was measured for the budget bar.
+ * @param {import('../core/memory-injection.js').MemoryInjection} injection
+ * @param {import('../core/memory-injection.js').MemoryInjectionUsage} usage
+ * @returns {void}
  */
-async function renderPreview() {
-    const preview = assembleSummaryBlock();
-    $('#sc_preview').val(preview || '(empty - no summaries yet)');
-    if (!preview) {
-        $('#sc_preview_token_count').text('0 tokens');
-        return;
-    }
-
-    const tokens = await countTextTokens(preview);
+function renderPreview(injection, usage) {
+    $('#sc_preview').val(injection.text || '(empty - no summaries yet)');
     $('#sc_preview_token_count').text(
-        `${formatBudgetTokenLabel(tokens.count, tokens.estimated)} tokens`,
+        `${formatBudgetTokenLabel(usage.total.count, usage.total.estimated)} tokens`,
     );
 }

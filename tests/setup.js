@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, vi } from 'vitest';
 
 import { installSummaryContext } from './test-helpers.js';
+import { initChatPersistence } from '../src/core/persist-state.js';
 
 const foundationMocks = vi.hoisted(() => {
     const MODULE_NAME = 'summaryception';
@@ -10,6 +11,8 @@ const foundationMocks = vi.hoisted(() => {
         traceMode: false,
         promptInputLogMode: false,
         promptOutputLogMode: false,
+        continuityStateLogMode: true,
+        continuityStateLogFullMode: true,
     };
 
     function getContext() {
@@ -30,6 +33,7 @@ const foundationMocks = vi.hoisted(() => {
         getChat: vi.fn(),
         getChatMetadata: vi.fn(),
         getExtensionSettings: vi.fn(),
+        getGroupId: vi.fn(),
         getName1: vi.fn(),
         saveSettingsDebounced: vi.fn(),
         saveMetadata: vi.fn(),
@@ -50,6 +54,7 @@ const foundationMocks = vi.hoisted(() => {
         getEventTypes: vi.fn(),
         getStreamingProcessor: vi.fn(),
         isSendButtonInStopMode: vi.fn(),
+        isGeneratingFlagSet: vi.fn(),
     };
 
     const logger = {
@@ -57,12 +62,15 @@ const foundationMocks = vi.hoisted(() => {
         isTraceEnabled: vi.fn(),
         isPromptInputLogEnabled: vi.fn(),
         isPromptOutputLogEnabled: vi.fn(),
+        isContinuityStateLogEnabled: vi.fn(),
+        isContinuityStateLogFullEnabled: vi.fn(),
         isPromptLogEnabled: vi.fn(),
         info: vi.fn(),
         debug: vi.fn(),
         trace: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),
+        serializeError: vi.fn((error) => ({ message: String(error?.message || error) })),
     };
 
     function resetContext() {
@@ -70,6 +78,7 @@ const foundationMocks = vi.hoisted(() => {
         context.getChat.mockImplementation(() => getContext().chat);
         context.getChatMetadata.mockImplementation(() => getContext().chatMetadata);
         context.getExtensionSettings.mockImplementation(() => getContext().extensionSettings);
+        context.getGroupId.mockImplementation(() => getContext().groupId);
         context.getName1.mockImplementation(() => getContext().name1 || 'User');
         context.saveSettingsDebounced.mockImplementation(() =>
             getContext().saveSettingsDebounced(),
@@ -128,7 +137,7 @@ const foundationMocks = vi.hoisted(() => {
                     return fn();
                 }
             } catch {
-                // Fall through to the JSON default.
+                // Host request headers may be unavailable in tests; the JSON default keeps requests well-formed.
             }
             return { 'Content-Type': 'application/json' };
         });
@@ -148,6 +157,9 @@ const foundationMocks = vi.hoisted(() => {
             () => getContext().streamingProcessor || null,
         );
         context.isSendButtonInStopMode.mockImplementation(() => false);
+        context.isGeneratingFlagSet.mockImplementation(
+            () => globalThis.document?.body?.dataset?.generating === 'true',
+        );
     }
 
     function isDebugEnabled() {
@@ -167,6 +179,14 @@ const foundationMocks = vi.hoisted(() => {
         return Boolean(getDebugSettings().promptOutputLogMode);
     }
 
+    function isContinuityStateLogEnabled() {
+        return Boolean(getDebugSettings().continuityStateLogMode);
+    }
+
+    function isContinuityStateLogFullEnabled() {
+        return Boolean(getDebugSettings().continuityStateLogFullMode);
+    }
+
     function isPromptLogEnabled() {
         return isPromptInputLogEnabled() || isPromptOutputLogEnabled();
     }
@@ -176,6 +196,8 @@ const foundationMocks = vi.hoisted(() => {
         logger.isTraceEnabled.mockImplementation(isTraceEnabled);
         logger.isPromptInputLogEnabled.mockImplementation(isPromptInputLogEnabled);
         logger.isPromptOutputLogEnabled.mockImplementation(isPromptOutputLogEnabled);
+        logger.isContinuityStateLogEnabled.mockImplementation(isContinuityStateLogEnabled);
+        logger.isContinuityStateLogFullEnabled.mockImplementation(isContinuityStateLogFullEnabled);
         logger.isPromptLogEnabled.mockImplementation(isPromptLogEnabled);
         logger.info.mockImplementation((...args) => {
             if (isDebugEnabled()) {
@@ -222,6 +244,11 @@ globalThis.summaryceptionFoundationMocks = foundationMocks;
 beforeEach(() => {
     foundationMocks.reset();
     installSummaryContext();
+    // Holder must reference the same facade mocks existing suites assert on.
+    initChatPersistence({
+        saveChat: foundationMocks.context.saveChat,
+        saveMetadata: foundationMocks.context.saveMetadata,
+    });
 });
 
 // Host display mocks are installed per test. Clear only what a test installed.

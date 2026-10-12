@@ -9,24 +9,26 @@
  */
 
 import { LOG_PREFIX } from './src/foundation/constants.js';
-import { getContext } from './src/foundation/context.js';
-import { initRefreshPort, refreshUi } from './src/foundation/refresh.js';
-import { getSettings } from './src/foundation/state.js';
+import { getChat, getContext, saveChat, saveMetadata } from './src/foundation/context.js';
+import { saveChatStore } from './src/foundation/chat-store.js';
+import { initChatPersistence } from './src/core/persist-state.js';
+import { initRefreshPort, refreshPreview, refreshUi } from './src/foundation/refresh.js';
+import { getSettings } from './src/foundation/settings.js';
 import { initSnippetBrowser } from './src/entry/ui-snippets.js';
-import { requestSummarization, setNotify, summarizerQueue } from './src/core/summarizer-queue.js';
-import { initCommitCallbacks } from './src/core/summarizer-commit.js';
-import { withUsageRun } from './src/core/summarizer-usage.js';
+import { createSummarizerQueue } from './src/core/summarizer-queue.js';
+import { createSummarizerDispatch } from './src/core/summarizer-request.js';
+import { createContinuityAuditor } from './src/core/continuity-audit.js';
+import { createForegroundGate } from './src/core/foreground-gate.js';
+import { createUsageLedger } from './src/core/summarizer-usage.js';
 import { createToastrNotifyAdapter } from './src/entry/ui-dialogs.js';
 import { syncLLMContextPreview, updateUI } from './src/entry/ui.js';
 import { bindUIEvents } from './src/entry/ui-events.js';
 import { initConnectionUI } from './src/entry/ui-connection.js';
 import { initSettingsHelp } from './src/entry/settings-help.js';
 import { initSettingsTabs } from './src/entry/ui-tabs.js';
-import {
-    registerSummaryceptionMemoryMacro,
-    reassertInjectionSnapshot,
-    updateInjection,
-} from './src/features/injection.js';
+import { createMemoryInjectionWriter } from './src/features/injection.js';
+import { updateContinuityInjection } from './src/features/continuity-injection.js';
+import { updateContinuityMarker } from './src/entry/continuity-marker.js';
 import {
     bindPromptFreezeRecoveryEvents,
     onAppReady,
@@ -46,20 +48,60 @@ import { registerSlashCommands } from './src/entry/commands.js';
         throw new Error('Summaryception requires SillyTavern extension rendering and event APIs.');
     }
 
+    // Chat Persistence is the one root-initialized holder (ADR-0031).
+    initChatPersistence({ saveChat, saveMetadata });
     getSettings();
-    initCommitCallbacks({
-        updateInjection,
-        reassertInjection: reassertInjectionSnapshot,
+    // The gate's requeue reads the queue lazily; the queue is built next.
+    const writer = createMemoryInjectionWriter();
+    const gate = createForegroundGate({
+        reassertInjection: writer.reassert,
         requeue: () => {
-            void requestSummarization();
+            void queue.request();
         },
     });
     const notify = createToastrNotifyAdapter();
-    setNotify(notify);
-    const manualRunnerDeps = { queue: summarizerQueue, refreshUi, withUsageRun };
-    const pauseLatchDeps = { queue: summarizerQueue };
-    initRefreshPort({ updateInjection, updateUI, updatePreview: syncLLMContextPreview });
-    initSnippetBrowser(notify);
+    const usage = createUsageLedger();
+    const dispatch = createSummarizerDispatch({ usage });
+    const queue = createSummarizerQueue({ gate, notify, dispatch, usage });
+    const manualRunnerDeps = {
+        queue,
+        refreshUi,
+        withRun: usage.withRun,
+        gate,
+        dispatch: dispatch.call,
+    };
+    const continuityAuditor = createContinuityAuditor({
+        dispatch: dispatch.call,
+        saveChatStore,
+        refreshPreview,
+        getChat,
+    });
+    initRefreshPort({
+        // Every prompt-affecting effect enters through the Foreground Gate
+        // (ADR-0016); mid-generation requests queue until the freeze lifts.
+        updateInjection: (options) => {
+            void gate.runEffect({
+                kind: 'injection-refresh',
+                apply: () => {
+                    writer.update(options);
+                    return true;
+                },
+            });
+        },
+        updateContinuityInjection: () => {
+            void gate.runEffect({
+                kind: 'continuity-refresh',
+                apply: () => {
+                    updateContinuityInjection({ rerollTail: gate.isRerollTail() });
+                    return true;
+                },
+            });
+        },
+        updateContinuityMarker,
+        updateUI: (options) => updateUI({ ...options, queue }),
+        updatePreview: syncLLMContextPreview,
+    });
+    initSnippetBrowser({ notify, gate, queue, dispatch, usage });
 
     const html = await renderExtensionTemplateAsync(
         'third-party/Extension-Summaryception',
@@ -69,23 +111,33 @@ import { registerSlashCommands } from './src/entry/commands.js';
     $('#extensions_settings2').append(html);
 
     initSettingsHelp();
-    bindUIEvents(notify, manualRunnerDeps, pauseLatchDeps);
-    bindPromptFreezeRecoveryEvents();
+    bindUIEvents({ notify, gate, queue, manualRunnerDeps });
+    bindPromptFreezeRecoveryEvents({ gate });
     initSettingsTabs();
     initConnectionUI();
-    await registerSummaryceptionMemoryMacro();
+    await writer.registerMacro();
 
-    eventSource.on(eventTypes.MESSAGE_RECEIVED, onMessageReceived);
-    eventSource.on(eventTypes.CHAT_CHANGED, onChatChanged);
-    eventSource.on(eventTypes.GENERATION_STARTED, onGenerationStarted);
+    eventSource.on(eventTypes.MESSAGE_RECEIVED, (messageIndex, type) =>
+        onMessageReceived(/** @type {number} */ (messageIndex), {
+            notify,
+            type,
+            auditor: continuityAuditor,
+            queue,
+            gate,
+        }),
+    );
+    eventSource.on(eventTypes.CHAT_CHANGED, () => onChatChanged({ gate, queue }));
+    eventSource.on(eventTypes.GENERATION_STARTED, (...args) =>
+        onGenerationStarted(args, { gate, queue }),
+    );
     if (eventTypes.GENERATE_AFTER_DATA) {
         eventSource.on(eventTypes.GENERATE_AFTER_DATA, onGenerateAfterData);
     }
     if (eventTypes.GENERATION_ENDED) {
-        eventSource.on(eventTypes.GENERATION_ENDED, onGenerationEnded);
+        eventSource.on(eventTypes.GENERATION_ENDED, () => onGenerationEnded({ gate, queue }));
     }
     if (eventTypes.GENERATION_STOPPED) {
-        eventSource.on(eventTypes.GENERATION_STOPPED, onGenerationEnded);
+        eventSource.on(eventTypes.GENERATION_STOPPED, () => onGenerationEnded({ gate, queue }));
     }
     if (eventTypes.CHAT_COMPLETION_PROMPT_READY) {
         eventSource.on(eventTypes.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
@@ -93,7 +145,7 @@ import { registerSlashCommands } from './src/entry/commands.js';
     registerSlashCommands();
 
     eventSource.on(eventTypes.APP_READY, async () => {
-        await onAppReady();
+        await onAppReady({ gate, queue });
         console.log(LOG_PREFIX, 'loaded. Connection Settings available');
     });
 })();

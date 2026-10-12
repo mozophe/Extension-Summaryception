@@ -57,6 +57,26 @@ export function ensureChatScIds(chat) {
 }
 
 /**
+ * Drop the stable identifier from every message. Clear removes Extension Chat
+ * Data whole (ADR-0027), so the identifiers go with the provenance that
+ * referenced them; reconciliation re-mints them.
+ * @param {ChatMessage[] | unknown} chat
+ * @returns {void}
+ */
+export function removeMessageIdentities(chat) {
+    if (!Array.isArray(chat)) {
+        return;
+    }
+    for (const message of chat) {
+        if (!message || typeof message !== 'object') {
+            continue;
+        }
+        const target = /** @type {{ sc_id?: string }} */ (message);
+        delete target.sc_id;
+    }
+}
+
+/**
  * @param {ChatMessage[] | unknown} chat
  * @returns {Map<string, number>}
  */
@@ -77,7 +97,7 @@ export function getMessageIndexByScId(chat) {
 /**
  * @param {ChatMessage[] | unknown} chat
  * @param {unknown} ids
- * @returns {number[]}
+ * @returns {number[]} Matching chat indices, sorted ascending so callers can fold them into contiguous ranges.
  */
 export function resolveScIdsToIndices(chat, ids) {
     if (!Array.isArray(ids)) {

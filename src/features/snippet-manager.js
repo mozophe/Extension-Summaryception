@@ -1,14 +1,10 @@
 import { getChat } from '../foundation/context.js';
 import { resolveScIdsToIndices } from '../foundation/message-identity.js';
-import { getChatStore } from '../foundation/state.js';
+import { getChatStore } from '../foundation/chat-store.js';
 import { buildPassageFromRangeWithStats } from '../core/chatutils.js';
-import { validateSummarizerOutputIntegrity } from '../core/summarizer-output.js';
+import { buildPassageNameCensus } from '../core/refusal-guard.js';
 import { commitSnippetMutation } from '../core/snippet-commit.js';
-import { buildSnippetMetadataFromState } from '../core/snippet-metadata.js';
-import { parseSnippet } from '../core/summarizer-state.js';
-import { callSummarizer } from '../core/summarizer-request.js';
-import { beginRun, isBusy } from '../core/summarizer-queue.js';
-import { withUsageRun } from '../core/summarizer-usage.js';
+import { buildSnippetMetadataFromText } from '../core/snippet-metadata.js';
 
 /**
  * @typedef {{ status: 'ready', snippet: SummaryceptionSnippet, range: [number, number], context?: string }} RegenerationTarget
@@ -33,10 +29,16 @@ export function getSnippetTextAt(layerIndex, snippetIndex) {
 /**
  * @param {number} layerIndex
  * @param {number} snippetIndex
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue - Summarizer Queue whose busy state blocks regeneration.
  * @returns {RegenerationTarget | RegenerationUnavailable}
  */
-export function getSnippetRegenerationTarget(layerIndex, snippetIndex) {
-    return resolveRegenerationTarget(getChatStore(), getChat(), { layerIndex, snippetIndex });
+export function getSnippetRegenerationTarget(layerIndex, snippetIndex, queue) {
+    return resolveRegenerationTarget(
+        getChatStore(),
+        getChat(),
+        { layerIndex, snippetIndex },
+        { queue },
+    );
 }
 
 /**
@@ -44,14 +46,16 @@ export function getSnippetRegenerationTarget(layerIndex, snippetIndex) {
  * summarization is busy, so the caller can report the busy status.
  * @param {number} layerIndex
  * @param {number} snippetIndex
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue - Summarizer Queue whose busy state blocks regeneration.
  * @returns {boolean}
  */
-export function isRegenerationCandidate(layerIndex, snippetIndex) {
+export function isRegenerationCandidate(layerIndex, snippetIndex, queue) {
     const target = resolveRegenerationTarget(
         getChatStore(),
         getChat(),
         { layerIndex, snippetIndex },
         {
+            queue,
             includeContext: false,
         },
     );
@@ -62,9 +66,10 @@ export function isRegenerationCandidate(layerIndex, snippetIndex) {
  * @param {number} layerIndex
  * @param {number} snippetIndex
  * @param {string} text
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate }} options
  * @returns {Promise<{ status: 'updated' | 'missing' | 'empty' | 'unchanged' }>}
  */
-export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
+export async function updateSnippetTextAt(layerIndex, snippetIndex, text, options) {
     const store = getChatStore();
     const snippet = getSnippetAt(store, layerIndex, snippetIndex);
     if (!snippet) {
@@ -79,12 +84,16 @@ export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
         return { status: 'unchanged' };
     }
 
-    await commitSnippetMutation(store, () => {
-        snippet.text = newText;
-        if (layerIndex === 0) {
-            Object.assign(snippet, buildSnippetMetadataFromState(parseSnippet(newText).state));
-        }
-    });
+    await commitSnippetMutation(
+        store,
+        () => {
+            snippet.text = newText;
+            if (layerIndex === 0) {
+                Object.assign(snippet, buildSnippetMetadataFromText(newText));
+            }
+        },
+        { gate: options.gate },
+    );
     return { status: 'updated' };
 }
 
@@ -92,40 +101,51 @@ export async function updateSnippetTextAt(layerIndex, snippetIndex, text) {
  * Deletion also repairs any Layer 0 ghosting ownership.
  * @param {number} layerIndex
  * @param {number} snippetIndex
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate }} options
  * @returns {Promise<{ status: 'deleted', layerIndex: number } | { status: 'missing' }>}
  */
-export async function deleteSnippetAt(layerIndex, snippetIndex) {
+export async function deleteSnippetAt(layerIndex, snippetIndex, options) {
     const store = getChatStore();
     const layer = store.layers[layerIndex];
     if (!layer || !layer[snippetIndex]) {
         return { status: 'missing' };
     }
 
-    await commitSnippetMutation(store, () => {
-        layer.splice(snippetIndex, 1);
-    });
+    await commitSnippetMutation(
+        store,
+        () => {
+            layer.splice(snippetIndex, 1);
+        },
+        { gate: options.gate },
+    );
     return { status: 'deleted', layerIndex };
 }
 
 /**
  * @param {number} layerIndex
  * @param {number} snippetIndex
- * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices; absent runs stay silent.
+ * @param {{ notify?: import('../core/notify.js').NotifyAdapter, gate: import('../core/foreground-gate.js').ForegroundGate, queue: import('../core/summarizer-queue.js').SummarizerQueue, dispatch: import('../core/summarizer-request.js').SummarizerDispatch['call'], withRun: import('../core/summarizer-usage.js').UsageLedger['withRun'] }} options - Regeneration notices, the Foreground Gate the commit crosses, the Summarizer Queue the run leases, the Summarizer Dispatch the request goes through, and the Usage Ledger scope the call records into.
  * @returns {Promise<RegenerateSnippetResult>}
  */
-export async function regenerateSnippetAt(layerIndex, snippetIndex, notify) {
-    const target = resolveRegenerationTarget(getChatStore(), getChat(), {
-        layerIndex,
-        snippetIndex,
-    });
+export async function regenerateSnippetAt(layerIndex, snippetIndex, options) {
+    const { notify, gate, queue, dispatch, withRun } = options;
+    const target = resolveRegenerationTarget(
+        getChatStore(),
+        getChat(),
+        {
+            layerIndex,
+            snippetIndex,
+        },
+        { queue },
+    );
     if (target.status !== 'ready') {
         return target;
     }
 
-    const run = beginRun('regeneration');
+    const run = queue.beginRun('regeneration');
     try {
-        return await withUsageRun('snippet regeneration', async () => {
-            return await regenerateSnippetWithTarget(target, notify);
+        return await withRun('snippet regeneration', async () => {
+            return await regenerateSnippetWithTarget(target, notify, gate, dispatch);
         });
     } finally {
         run.end();
@@ -134,10 +154,12 @@ export async function regenerateSnippetAt(layerIndex, snippetIndex, notify) {
 
 /**
  * @param {RegenerationTarget} target
- * @param {import('../core/notify.js').NotifyAdapter} [notify] - Adapter for regeneration notices.
+ * @param {import('../core/notify.js').NotifyAdapter | undefined} notify - Adapter for regeneration notices.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate - Foreground Gate the commit crosses.
+ * @param {import('../core/summarizer-request.js').SummarizerDispatch['call']} dispatch - Summarizer Dispatch the request goes through.
  * @returns {Promise<RegenerationRunResult>}
  */
-async function regenerateSnippetWithTarget(target, notify) {
+async function regenerateSnippetWithTarget(target, notify, gate, dispatch) {
     const chat = getChat();
     const [rangeStart, rangeEnd] = target.range;
     const passage = await buildPassageFromRangeWithStats(chat, rangeStart, rangeEnd);
@@ -145,39 +167,33 @@ async function regenerateSnippetWithTarget(target, notify) {
         return { status: 'empty-source' };
     }
 
-    const outcome = await callSummarizer(
-        passage.text,
-        /** @type {string} */ (target.context),
-        {
+    const outcome = await dispatch({
+        storyTxt: passage.text,
+        contextStr: /** @type {string} */ (target.context),
+        metadata: {
             kind: 'regenerate',
             sourceRange: target.range,
             regexStats: passage.stats,
+            passageNames: buildPassageNameCensus(passage.text).join(', '),
         },
         notify,
-    );
+    });
 
     if (outcome.status !== 'completed') {
         return { status: outcome.status };
     }
-    const newSummary = /** @type {string} */ (outcome.text);
-    const integrityResult = validateSummarizerOutputIntegrity(newSummary, {
-        kind: 'regenerate',
-        sourceRange: target.range,
-        regexStats: passage.stats,
-    });
-    if (!integrityResult.valid) {
-        return { status: 'failed' };
-    }
+    const newSummary = outcome.text;
 
-    await commitSnippetMutation(getChatStore(), () => {
-        target.snippet.text = newSummary;
-        target.snippet.timestamp = Date.now();
-        target.snippet.regenerated = true;
-        Object.assign(
-            target.snippet,
-            buildSnippetMetadataFromState(parseSnippet(newSummary).state),
-        );
-    });
+    await commitSnippetMutation(
+        getChatStore(),
+        () => {
+            target.snippet.text = newSummary;
+            target.snippet.timestamp = Date.now();
+            target.snippet.regenerated = true;
+            Object.assign(target.snippet, buildSnippetMetadataFromText(newSummary));
+        },
+        { gate },
+    );
     return { status: 'regenerated', range: target.range };
 }
 
@@ -188,10 +204,10 @@ async function regenerateSnippetWithTarget(target, notify) {
  * @param {SummaryceptionStore} store
  * @param {ChatMessage[]} chat
  * @param {{ layerIndex: number, snippetIndex: number }} position
- * @param {{ includeContext?: boolean }} [options] - Skip context building for status-only callers.
+ * @param {{ queue: import('../core/summarizer-queue.js').SummarizerQueue, includeContext?: boolean }} options - The Summarizer Queue whose busy state blocks regeneration; skip context building for status-only callers.
  * @returns {RegenerationTarget | RegenerationUnavailable}
  */
-function resolveRegenerationTarget(store, chat, position, { includeContext = true } = {}) {
+function resolveRegenerationTarget(store, chat, position, { queue, includeContext = true }) {
     const { layerIndex, snippetIndex } = position;
     const snippet = getSnippetAt(store, layerIndex, snippetIndex);
     if (!snippet) {
@@ -207,7 +223,7 @@ function resolveRegenerationTarget(store, chat, position, { includeContext = tru
     ) {
         return { status: 'unsupported' };
     }
-    if (isBusy()) {
+    if (queue.isBusy()) {
         return { status: 'busy' };
     }
 

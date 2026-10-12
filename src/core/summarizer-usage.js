@@ -1,34 +1,9 @@
 import { debug } from '../foundation/logger.js';
 import { countTextTokens, formatTokenValue } from './token-count.js';
 
-// Call-label and token-range formatting lives here only. Prompt logs (request-attempt-log.js)
-// and usage lines import it; do not duplicate it per caller.
-/**
- * @typedef {import('./chatutils.js').PassageRegexStats} PassageRegexStats
- */
-
-/**
- * @typedef {object} SummarizerCallMetadata
- * @property {'layer0' | 'promotion' | 'regenerate' | string} [kind] - Call category
- * @property {[number, number]} [sourceRange] - Source chat index range
- * @property {PassageRegexStats} [regexStats] - Passage regex stats
- * @property {number} [sourceTokensBefore] - Source text size before summarization
- * @property {boolean} [sourceTokensBeforeEstimated] - Whether sourceTokensBefore was estimated
- * @property {number} [layerIndex] - Source layer for promotion calls
- * @property {number} [mergedSnippetCount] - Snippets merged for promotion calls
- * @property {number} [memoryTokensBefore] - Source memory size before promotion
- * @property {boolean} [memoryTokensBeforeEstimated] - Whether memoryTokensBefore was estimated
- * @property {number} [overflowLayerIndex] - Layer that exceeded promotion limits
- * @property {number} [overflowMemoryCount] - Memory count in the overflowing layer
- * @property {number} [overflowMemoryLimit] - Configured memory count limit for the layer
- * @property {number} [overflowTokens] - Token count in the overflowing layer
- * @property {number} [overflowTokenQuota] - Token quota for the overflowing layer
- * @property {boolean} [useFallback] - Whether this call is routed through fallback
- * @property {boolean} [layer0Repair] - Whether a Layer 0 validation retry uses the repair prompt
- * @property {string} [sourceState] - Serialized source state for promotion reconciliation and L0 budget-hint computation
- * @property {string} [budgetHint] - Pre-rendered `<summaryception_source_budget>` prompt block for L0/regen calls
- * @property {{ outputTokens?: number, targetTokens?: number, hardMaxTokens?: number, requiredMaxTokens?: number, sourceTokens?: number, rejectedSummary?: string, diagnostics?: object }} [promotionRepair] - Promotion repair feedback
- */
+// Usage recording and token-range formatting live here only. The per-call
+// human label resolves once into the Call Profile at dispatch; do not
+// re-derive label switches per caller.
 
 /**
  * @typedef {object} SummarizerTokenUsage
@@ -42,7 +17,7 @@ import { countTextTokens, formatTokenValue } from './token-count.js';
 
 /**
  * @typedef {object} SummarizerUsageInput
- * @property {SummarizerCallMetadata} [metadata] - Call metadata
+ * @property {import('./call-profile.js').CallProfile} profile - Resolved call profile of this call
  * @property {number | null} promptTokens - Estimated prompt tokens
  * @property {number | null} completionTokens - Estimated completion tokens
  * @property {number | null} totalTokens - Estimated total tokens
@@ -63,112 +38,156 @@ import { countTextTokens, formatTokenValue } from './token-count.js';
  * @property {boolean} ended - Whether the run has ended
  */
 
-/** @type {UsageRun | null} */
-let activeRun = null;
+/**
+ * The Usage Ledger: the nested scope that records each summarizer call's
+ * token usage against the run that made it — an automatic drain, a manual
+ * run, a regeneration — and reports the run's largest call when the scope
+ * ends. One instance exists, built at the composition root (ADR-0031); the
+ * Call Session carries it, so the request series records without reaching
+ * module state.
+ * @typedef {object} UsageLedger
+ * @property {function(string, function(): Promise<*>): Promise<*>} withRun - Runs work inside a usage accounting scope.
+ * @property {(input: { systemPrompt: string, prompt: string, summary: string, profile: import('./call-profile.js').CallProfile }) => Promise<SummarizerTokenUsage>} record - Estimates one successful LLM call and appends it to every open run.
+ * @property {(systemPrompt: string, userPrompt: string, completionText: string) => Promise<SummarizerTokenUsage>} estimate - Estimates prompt and completion tokens with the active tokenizer.
+ */
 
 /**
- * @param {string} label - Human-readable run label
- * @returns {UsageRun}
+ * Build one Usage Ledger instance. The run chain lives in the closure, so
+ * the composition root and tests build isolated instances.
+ * @returns {UsageLedger}
  */
-export function beginUsageRun(label) {
-    const run = {
-        label,
-        calls: [],
-        parent: activeRun,
-        ended: false,
-    };
-    activeRun = run;
-    return run;
-}
+export function createUsageLedger() {
+    /** @type {UsageRun | null} */
+    let activeRun = null;
 
-/**
- * Finish a usage run and log the largest single LLM call if any were recorded.
- * @param {UsageRun} run - Run object returned by beginUsageRun
- * @returns {void}
- */
-export function endUsageRun(run) {
-    if (!run || run.ended) {
-        return;
+    /**
+     * @param {string} label - Human-readable run label
+     * @returns {UsageRun}
+     */
+    function beginUsageRun(label) {
+        const run = {
+            label,
+            calls: [],
+            parent: activeRun,
+            ended: false,
+        };
+        activeRun = run;
+        return run;
     }
 
-    run.ended = true;
-    logRunMax(run);
+    /**
+     * Finish a usage run and log the largest single LLM call if any were recorded.
+     * @param {UsageRun} run - Run object returned by beginUsageRun
+     * @returns {void}
+     */
+    function endUsageRun(run) {
+        if (!run || run.ended) {
+            return;
+        }
 
-    if (activeRun === run) {
-        activeRun = run.parent;
-        return;
+        run.ended = true;
+        logRunMax(run);
+
+        if (activeRun === run) {
+            activeRun = run.parent;
+            return;
+        }
+
+        detachEndedRun(run);
     }
 
-    detachEndedRun(run);
-}
-
-/**
- * @template T
- * @param {string} label - Human-readable run label
- * @param {() => Promise<T>} callback - Work to run
- * @returns {Promise<T>}
- */
-export async function withUsageRun(label, callback) {
-    const run = beginUsageRun(label);
-    try {
-        return await callback();
-    } finally {
-        endUsageRun(run);
-    }
-}
-
-/**
- * Estimate prompt and completion tokens with SillyTavern's active tokenizer.
- * @param {string} systemPrompt - System prompt sent to the summarizer
- * @param {string} userPrompt - Fully rendered user prompt sent to the summarizer
- * @param {string} completionText - Cleaned summarizer response
- * @returns {Promise<SummarizerTokenUsage>}
- */
-export async function estimateSummarizerUsage(systemPrompt, userPrompt, completionText) {
-    const [promptTokenCount, completionTokenCount] = await Promise.all([
-        countTextTokens(`${systemPrompt || ''}\n${userPrompt || ''}`),
-        countTextTokens(completionText || ''),
-    ]);
-    const totalTokens = promptTokenCount.count + completionTokenCount.count;
-    const totalTokensEstimated = promptTokenCount.estimated || completionTokenCount.estimated;
-
-    return {
-        promptTokens: promptTokenCount.count,
-        completionTokens: completionTokenCount.count,
-        totalTokens,
-        promptTokensEstimated: promptTokenCount.estimated,
-        completionTokensEstimated: completionTokenCount.estimated,
-        totalTokensEstimated,
-    };
-}
-
-/**
- * Record one successful LLM call and emit its compact debug log line.
- * @param {SummarizerUsageInput} usage - Estimated usage and call metadata
- * @returns {void}
- */
-export function recordSummarizerUsage(usage) {
-    /** @type {SummarizerUsageEntry | null} */
-    let logEntry = null;
-
-    for (let run = activeRun; run; run = run.parent) {
-        const entry = addUsageToRun(run, usage);
-        logEntry ||= entry;
+    /**
+     * Remove an out-of-order completed run from the active parent chain.
+     * @param {UsageRun} run - Completed run
+     * @returns {void}
+     */
+    function detachEndedRun(run) {
+        for (let cursor = activeRun; cursor?.parent; cursor = cursor.parent) {
+            if (cursor.parent === run) {
+                cursor.parent = run.parent;
+                return;
+            }
+        }
     }
 
-    logEntry ||= { ...usage, callNumber: 0 };
-    debug(formatCallUsageLine(logEntry));
+    /**
+     * @template T
+     * @param {string} label - Human-readable run label
+     * @param {() => Promise<T>} callback - Work to run
+     * @returns {Promise<T>}
+     */
+    async function withRun(label, callback) {
+        const run = beginUsageRun(label);
+        try {
+            return await callback();
+        } finally {
+            endUsageRun(run);
+        }
+    }
+
+    /**
+     * Estimate and record one successful LLM call, appending it to every run
+     * open on the chain; the innermost run owns the per-call log line. With
+     * no open run the call logs on its own.
+     * @param {object} input
+     * @param {string} input.systemPrompt - System prompt sent to the summarizer
+     * @param {string} input.prompt - Fully substituted user prompt
+     * @param {string} input.summary - Cleaned summarizer response
+     * @param {import('./call-profile.js').CallProfile} input.profile - Resolved call profile
+     * @returns {Promise<SummarizerTokenUsage>}
+     */
+    async function record({ systemPrompt, prompt, summary, profile }) {
+        const usage = await estimate(systemPrompt, prompt, summary);
+
+        /** @type {SummarizerUsageEntry | null} */
+        let logEntry = null;
+
+        for (let run = activeRun; run; run = run.parent) {
+            const entry = addUsageToRun(run, { profile, ...usage });
+            logEntry ||= entry;
+        }
+
+        logEntry ||= { profile, ...usage, callNumber: 0 };
+        debug(formatCallUsageLine(logEntry));
+        return usage;
+    }
+
+    /**
+     * Estimate prompt and completion tokens with SillyTavern's active tokenizer.
+     * @param {string} systemPrompt - System prompt sent to the summarizer
+     * @param {string} userPrompt - Fully rendered user prompt sent to the summarizer
+     * @param {string} completionText - Cleaned summarizer response
+     * @returns {Promise<SummarizerTokenUsage>}
+     */
+    async function estimate(systemPrompt, userPrompt, completionText) {
+        const [promptTokenCount, completionTokenCount] = await Promise.all([
+            countTextTokens(`${systemPrompt || ''}\n${userPrompt || ''}`),
+            countTextTokens(completionText || ''),
+        ]);
+        const totalTokens = promptTokenCount.count + completionTokenCount.count;
+        const totalTokensEstimated = promptTokenCount.estimated || completionTokenCount.estimated;
+
+        return {
+            promptTokens: promptTokenCount.count,
+            completionTokens: completionTokenCount.count,
+            totalTokens,
+            promptTokensEstimated: promptTokenCount.estimated,
+            completionTokensEstimated: completionTokenCount.estimated,
+            totalTokensEstimated,
+        };
+    }
+
+    return { withRun, record, estimate };
 }
 
 /**
  * @param {UsageRun} run - Active run
- * @param {SummarizerUsageInput} usage - Usage input
+ * @param {SummarizerUsageInput} usage
  * @returns {SummarizerUsageEntry}
  */
 function addUsageToRun(run, usage) {
     const entry = {
         ...usage,
-        metadata: usage.metadata || {},
         callNumber: run.calls.length + 1,
     };
     run.calls.push(entry);
@@ -198,7 +217,7 @@ function logRunMax(run) {
 
     debug(
         `LLM run ${run.label} max call: #${maxCall.callNumber} ` +
-            `${describeCall(maxCall.metadata)} total=${formatTokenValue(
+            `${maxCall.profile.policy.label} total=${formatTokenValue(
                 maxCall.totalTokens,
                 isTotalEstimated(maxCall),
             )} ` +
@@ -214,34 +233,21 @@ function logRunMax(run) {
 }
 
 /**
- * Remove an out-of-order completed run from the active parent chain.
- * @param {UsageRun} run - Completed run
- * @returns {void}
- */
-function detachEndedRun(run) {
-    for (let cursor = activeRun; cursor?.parent; cursor = cursor.parent) {
-        if (cursor.parent === run) {
-            cursor.parent = run.parent;
-            return;
-        }
-    }
-}
-
-/**
- * @param {SummarizerUsageEntry} entry - Usage entry
+ * @param {SummarizerUsageEntry} entry
  * @returns {string}
  */
 function formatCallUsageLine(entry) {
     const callNumber = entry.callNumber > 0 ? `#${entry.callNumber} ` : '';
     const inputTokens = getInputTokenCount(entry);
     const promptTokens = getPromptOverheadTokenCount(entry, inputTokens);
-    const regexStats = formatRegexStats(entry.metadata);
-    const overflowStats = formatPromotionOverflowStats(entry.metadata);
+    const provenance = entry.profile.provenance;
+    const regexStats = formatRegexStats(provenance);
+    const overflowStats = formatPromotionOverflowStats(provenance);
     const memoryStats = formatPromotionMemoryStats(entry);
     const statsParts = [regexStats, overflowStats, memoryStats].filter(Boolean);
     const statsPart = statsParts.length > 0 ? `; ${statsParts.join('; ')}` : '';
     return (
-        `LLM call ${callNumber}${describeCall(entry.metadata)}: ` +
+        `LLM call ${callNumber}${entry.profile.policy.label}: ` +
         `input ${formatTokenValue(inputTokens.count, inputTokens.estimated)}, ` +
         `prompt ${formatTokenValue(promptTokens.count, promptTokens.estimated)}, ` +
         `output ${formatTokenValue(
@@ -252,23 +258,24 @@ function formatCallUsageLine(entry) {
 }
 
 /**
- * Get source text tokens for the LLM call.
- * @param {SummarizerUsageEntry} entry - Usage entry
+ * Get source text tokens for the LLM call. Provenance decides: promotion
+ * calls carry memory tokens, direct calls carry the passage regex stats.
+ * @param {SummarizerUsageEntry} entry
  * @returns {{ count: number | null | undefined, estimated: boolean }}
  */
 function getInputTokenCount(entry) {
-    if (entry.metadata?.kind === 'promotion') {
+    const provenance = entry.profile.provenance;
+    if (typeof provenance.memoryTokensBefore === 'number') {
         return {
-            count: entry.metadata.memoryTokensBefore,
-            estimated: Boolean(entry.metadata.memoryTokensBeforeEstimated),
+            count: provenance.memoryTokensBefore,
+            estimated: Boolean(provenance.memoryTokensBeforeEstimated),
         };
     }
 
-    const regexStats = entry.metadata?.regexStats;
-    if (regexStats) {
+    if (provenance.regexStats) {
         return {
-            count: regexStats.finalTokens,
-            estimated: Boolean(regexStats.finalTokensEstimated),
+            count: provenance.regexStats.finalTokens,
+            estimated: Boolean(provenance.regexStats.finalTokensEstimated),
         };
     }
 
@@ -279,7 +286,7 @@ function getInputTokenCount(entry) {
 }
 
 /**
- * @param {SummarizerUsageEntry} entry - Usage entry
+ * @param {SummarizerUsageEntry} entry
  * @param {{ count: number | null | undefined, estimated: boolean }} inputTokens - Source tokens
  * @returns {{ count: number | null | undefined, estimated: boolean }}
  */
@@ -305,17 +312,15 @@ function getPromptOverheadTokenCount(entry, inputTokens) {
 }
 
 /**
- * @param {SummarizerUsageEntry} entry - Usage entry
+ * @param {SummarizerUsageEntry} entry
  * @returns {string}
  */
 function formatPromotionMemoryStats(entry) {
-    if (entry.metadata?.kind !== 'promotion') {
+    const memoryTokensBefore = entry.profile.provenance.memoryTokensBefore;
+    if (typeof memoryTokensBefore !== 'number') {
         return '';
     }
-    if (typeof entry.metadata.memoryTokensBefore !== 'number') {
-        return '';
-    }
-    const savedPercent = getSavedPercent(entry.metadata.memoryTokensBefore, entry.completionTokens);
+    const savedPercent = getSavedPercent(memoryTokensBefore, entry.completionTokens);
     if (savedPercent === null) {
         return '';
     }
@@ -323,24 +328,22 @@ function formatPromotionMemoryStats(entry) {
 }
 
 /**
- * @param {SummarizerCallMetadata | undefined} metadata - Call metadata
+ * Overflow stats read only the provenance fields promotion dispatches set.
+ * @param {import('./call-profile.js').CallProvenance} provenance
  * @returns {string}
  */
-function formatPromotionOverflowStats(metadata = {}) {
-    if (metadata.kind !== 'promotion') {
-        return '';
-    }
-    if (typeof metadata.overflowLayerIndex !== 'number') {
+function formatPromotionOverflowStats(provenance = {}) {
+    if (typeof provenance.overflowLayerIndex !== 'number') {
         return '';
     }
 
     return (
-        `overflow L${metadata.overflowLayerIndex} ` +
-        `${formatOverflowValue(metadata.overflowMemoryCount)}/${formatOverflowValue(
-            metadata.overflowMemoryLimit,
+        `overflow L${provenance.overflowLayerIndex} ` +
+        `${formatOverflowValue(provenance.overflowMemoryCount)}/${formatOverflowValue(
+            provenance.overflowMemoryLimit,
         )} memories, ` +
-        `${formatTokenValue(metadata.overflowTokens)}/${formatTokenValue(
-            metadata.overflowTokenQuota,
+        `${formatTokenValue(provenance.overflowTokens)}/${formatTokenValue(
+            provenance.overflowTokenQuota,
         )} tokens`
     );
 }
@@ -364,7 +367,7 @@ function getSavedPercent(before, after) {
 }
 
 /**
- * @param {number | undefined} value - Count value
+ * @param {number | undefined} value
  * @returns {string}
  */
 function formatOverflowValue(value) {
@@ -375,49 +378,19 @@ function formatOverflowValue(value) {
 }
 
 /**
- * @param {SummarizerCallMetadata | undefined} metadata - Call metadata
+ * Regex stats read only the provenance field direct calls set.
+ * @param {import('./call-profile.js').CallProvenance} provenance
  * @returns {string}
  */
-function describeCall(metadata = {}) {
-    if (metadata.kind === 'layer0') {
-        return `CHAT -> L0 turns ${formatRange(metadata.sourceRange)}`;
-    }
-    if (metadata.kind === 'promotion') {
-        return `promotion ${formatPromotionLabel(metadata)}`;
-    }
-    if (metadata.kind === 'regenerate') {
-        return `CHAT -> L0 regenerate turns ${formatRange(metadata.sourceRange)}`;
-    }
-    return metadata.kind || 'summarizer';
-}
-
-/**
- * Contributes only the source layer, destination layer, and merged snippet
- * count; callers keep their own arrow spacing and prefix text.
- * @param {SummarizerCallMetadata | undefined} metadata - Call metadata
- * @param {string} [arrow] - Separator between source and destination layer
- * @returns {string}
- */
-export function formatPromotionLabel(metadata = {}, arrow = ' -> ') {
-    const sourceLayer = metadata.layerIndex ?? '?';
-    const destLayer = typeof metadata.layerIndex === 'number' ? metadata.layerIndex + 1 : '?';
-    const count = formatCount(metadata.mergedSnippetCount, 'snippet');
-    return `L${sourceLayer}${arrow}L${destLayer} (${count})`;
-}
-
-/**
- * @param {SummarizerCallMetadata | undefined} metadata - Call metadata
- * @returns {string}
- */
-function formatRegexStats(metadata = {}) {
-    if (metadata.kind === 'promotion' || !metadata.regexStats) {
+function formatRegexStats(provenance = {}) {
+    if (!provenance.regexStats) {
         return '';
     }
-    return `regex saved ${formatNumber(metadata.regexStats.savedPercent, 0)}%`;
+    return `regex saved ${formatNumber(provenance.regexStats.savedPercent, 0)}%`;
 }
 
 /**
- * @param {SummarizerUsageInput} entry - Usage entry
+ * @param {SummarizerUsageInput} entry
  * @returns {boolean}
  */
 function isTotalEstimated(entry) {
@@ -429,8 +402,8 @@ function isTotalEstimated(entry) {
 }
 
 /**
- * @param {number} value - Number to format
- * @param {number} [digits] - Decimal digits
+ * @param {number} value
+ * @param {number} [digits]
  * @returns {string}
  */
 function formatNumber(value, digits) {
@@ -438,27 +411,4 @@ function formatNumber(value, digits) {
         return '?';
     }
     return typeof digits === 'number' ? value.toFixed(digits) : String(value);
-}
-
-/**
- * @param {[number, number] | undefined} range - Source range
- * @returns {string}
- */
-export function formatRange(range) {
-    if (!Array.isArray(range) || range.length < 2) {
-        return '?';
-    }
-    return `${range[0]}-${range[1]}`;
-}
-
-/**
- * @param {number | undefined} count - Count value
- * @param {string} singular - Singular label
- * @returns {string}
- */
-export function formatCount(count, singular) {
-    if (typeof count !== 'number' || !Number.isFinite(count)) {
-        return `? ${singular}s`;
-    }
-    return `${count} ${singular}${count === 1 ? '' : 's'}`;
 }

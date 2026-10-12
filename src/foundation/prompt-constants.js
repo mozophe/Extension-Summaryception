@@ -1,9 +1,52 @@
 import {
     buildSystemPrompt,
     buildUserPrompt,
+    EXECUTION_TRIGGER_AUDITOR,
     EXECUTION_TRIGGER_L0,
     EXECUTION_TRIGGER_PROMO,
 } from './prompt-parts.js';
+
+/**
+ * GM-note budget, declared once. The Auditor prompt states these numbers and
+ * the state module enforces them, so the Auditor prunes to fit instead of
+ * preserving notes the cap would discard (ADR-0029). The declaration lives
+ * with the prompt contract because the prompt is what the budget constrains;
+ * the state module imports it so the two cannot drift.
+ */
+export const AUDITOR_NOTE_KIND_CAPS = Object.freeze({ R: 4, T: 8, S: 12 });
+export const AUDITOR_NOTE_TOTAL_CAP = 24;
+
+/**
+ * The budget sentence the Auditor prompt carries, built from the caps so a
+ * rebalanced budget updates the prompt with it.
+ */
+export const AUDITOR_NOTE_BUDGET = `at most ${AUDITOR_NOTE_KIND_CAPS.R} [R] reminders, ${AUDITOR_NOTE_KIND_CAPS.T} [T] threads, and ${AUDITOR_NOTE_KIND_CAPS.S} [S] secrets — ${AUDITOR_NOTE_TOTAL_CAP} notes total`;
+
+/**
+ * Where each Continuity State fact lives, so retiring a field cannot push its
+ * content into an unrelated section instead of deleting it (ADR-0029).
+ */
+export const AUDITOR_FACT_ROUTING_RULE =
+    "What belongs where: a character's goal, progress, and on-screen state belong in agendas; a character's physical condition and the scene's positioning belong in physics; who knows what belongs in the [S] notes.";
+
+/**
+ * Full State Rewrite preservation contract. The state is a bounded working set
+ * (ADR-0029), so a note survives only while its fact still steers the main
+ * model, and the Auditor is told the budget the code enforces instead of
+ * preserving notes the cap would discard.
+ */
+const AUDITOR_PRESERVATION_RULES = `[PRESERVATION & PRUNING CONTRACT]
+1. PRUNE ON RESOLUTION: Carry a note forward only while its fact still matters — someone on-screen still does not know it, or the commitment it records is still open. Rewrite a live note in place to its current state. Delete a resolved or finished one outright instead of annotating it (e.g., when an appointment is over, purge the arrival note).
+2. NOTE BUDGET: ${AUDITOR_NOTE_BUDGET}. This is a hard cap. When a new note earns its place, delete the least load-bearing note of the same kind rather than dropping the new one. Order notes most important first: the cap keeps the earliest entries.
+3. NO SECOND HOME FOR A FACT: A fact an agenda's task, step, or status already states does not belong in a note as well, and a character's physical condition belongs in physics, not in [S].
+4. EXCLUDE STATIC CARD LORE: Do NOT add static character backstory, permanent family relationships, or card definitions (e.g., do not log that Quipsy is a stepsister; that is already permanent lore).
+5. ASYMMETRIC KNOWLEDGE: If an event happened off-screen or was witnessed by only one character, flag it with [S] and explicitly note who knows and who is ignorant.`;
+
+export const AUDITOR_NAME_RULE =
+    'JSON keys copy each character\'s name exactly as the character card spells it (Latin spelling); never inflected prose forms; the player is always "User"; bond pair keys are "<Name>↔User".';
+
+export const AUDITOR_DISCOVERY_RULE =
+    'first appearance in the exchanges initializes the agenda (task from context, step 1/N); a pair absent from prior state is judged from context.';
 
 export const ENGLISH_FIRST_LANGUAGE_RULE =
     'Write the output mainly in English. Short non-English names, titles, quoted terms, or source-language phrases are allowed when useful, but do not write Chinese prose or Han ideographs.';
@@ -11,28 +54,20 @@ export const ENGLISH_FIRST_LANGUAGE_RULE =
 export const ANTI_RUN_ON_RULE =
     'Write in short, direct sentences. Prefer periods over commas and semicolons; do not chain actions together with commas, semicolons, or conjunctions into run-on sentences. Limit each sentence to roughly two actions or events.';
 
-export const STATE_SNAPSHOT_SOFT_TARGET_TOKENS = 700;
-export const STATE_SNAPSHOT_MAX_TOKENS = 1000;
-/**
- * Highest [STATE] token count still eligible for deterministic compaction
- * before a full LLM retry. Overshoots up to this ceiling are trimmed
- * in-process; anything larger is treated as unrepairable and retried. The
- * ~1.67x ratio to STATE_SNAPSHOT_MAX_TOKENS keeps multi-category overshoots
- * inside the in-process path.
- */
-export const STATE_SNAPSHOT_REPAIR_CEILING_TOKENS = 1667;
-/**
- * Char budget the deterministic state compactor aims for. Kept below the
- * hard max so accepted trims land comfortably under STATE_SNAPSHOT_MAX_TOKENS
- * even for denser scripts (Cyrillic averages ~3.5 chars/token vs ~4.2 English).
- */
-export const STATE_SNAPSHOT_COMPACTION_TARGET_CHARS = 4400;
-export const STATE_SNAPSHOT_MAX_CHARS = 5000;
 /**
  * Shared salience quartet for "core moments" across L0 and promotion slots;
  * single source so the short mentions cannot drift apart.
  */
 const CORE_MOMENT_TYPES = 'firsts, shifts, breaks, and unpaid choices';
+
+/**
+ * The sanctioned refusal channel: the Declined Marker. A model that will not
+ * comply confesses in one parsable line instead of prose that wears the
+ * output structure; the Refusal Guard classifies it and the route retries.
+ */
+export const DECLINED_MARKER_RULE =
+    'If you will not or cannot summarize the passage, output only <declined>your reason</declined> and nothing else. ' +
+    'Never wrap the declined marker in the <narrative> envelope and never mix a refusal into the envelope prose.';
 
 export const LAYER0_DURABILITY_RULES =
     'Preserve each major durable beat once; shrink its wording, but never delete a beat the present situation depends on. ' +
@@ -41,22 +76,19 @@ export const LAYER0_DURABILITY_RULES =
     'Omit brands, shopping routes, meals, clothing, poses, body mechanics, ordinary props, small talk, and temporary physical conditions unless they create a lasting decision, rule, resource, injury, or unresolved hook. ' +
     'Keep the cause-to-effect chain intact: never drop the link that explains how the present situation came to be.';
 
-export const STATE_DEDUPLICATION_RULES =
-    'Use at most one line per supported key. Do not repeat the same fact across bonds, chekhov, gm_notes, inventory, or location. Bonds holds one pair per line. Chekhov holds one bullet per line. Inventory tracks the player only. GM Notes logs only what no other category owns.';
-
 export const PROMOTION_MODERATE_MACRO_RULES =
     'Keep named people and places only when needed to understand a lasting relationship, obligation, location, or unresolved hook. Drop ages, brands, shopping routes, meals, clothing, one-off supplies, and mechanical scene replay; keep dialogue only when it is the reveal or the choice. Prefer cumulative outcomes over a list of scene beats; deeper folds cut harder.';
 
 /**
  * Prose date format rule, shared across Layer 0 and Layer 1+ prompts.
- * The current year is already carried in [STATE]/[NARRATIVE]'s current_date_time,
+ * The current year is already carried in the snippet's current_date_time metadata,
  * so repeating it in prose wastes tokens and creates opener-style drift.
  * ISO dates and clock times are data-channel formats reserved for current_date_time only.
  * Story-relevant clock time (alarm, deadline, shift boundary) may still appear once
  * mid-sentence in the narrative body, never as a date lead-in.
  */
 export const PROSE_DATE_FORMAT_RULE =
-    'In [NARRATIVE] prose, write dates in calendar form only: month name and day number, no year, no ISO syntax, no clock time. ' +
+    'Inside the <narrative> envelope, write dates in calendar form only: month name and day number, no year, no ISO syntax, no clock time. ' +
     'Write "On July 6" not "On July 6, 2024", not "On 2024-07-06", not "On July 6 at 19:00". ' +
     'The current year and exact hour live only in current_date_time; never duplicate them into prose. ' +
     'A clock time may appear once mid-sentence when it carries story weight (an alarm, a deadline, a shift boundary); never use it as a date lead-in.';
@@ -64,7 +96,7 @@ export const PROSE_DATE_FORMAT_RULE =
 export const DEFAULT_INJECTION_TEMPLATE =
     '<summaryception_memory>\n' +
     'Compressed continuity. Newer verbatim chat and the current user message take priority.\n' +
-    "[CURRENT STATE] = active facts. [CHRONOLOGY] = past events, oldest to newest. [X-Y@YYYY-MM-DDTHH] = source messages X-Y; scene time at Y also serves as that passage's reference date; resolve any relative time words (tomorrow, today, in N days, next/bare weekday, this evening) in the adjacent narrative against it.\n" +
+    "[CHRONOLOGY] = past events, oldest to newest. [X-Y@YYYY-MM-DDTHH] = source messages X-Y; scene time at Y also serves as that passage's reference date; resolve any relative time words (tomorrow, today, in N days, next/bare weekday, this evening) in the adjacent narrative against it.\n" +
     '{{summary}}\n' +
     '</summaryception_memory>';
 
@@ -77,7 +109,7 @@ export const RECALL_REPEAT_INJECTION_TEMPLATE =
     DEFAULT_INJECTION_TEMPLATE + '\n\n---REPEATED FOR RECALL---\n\n' + DEFAULT_INJECTION_TEMPLATE;
 
 export const DEFAULT_SUMMARIZER_SYSTEM_PROMPT = buildSystemPrompt(
-    'Role: editorial narrative-state compressor. Distill the passage into one [NARRATIVE] paragraph and one [STATE] key-value block, keeping ' +
+    'Role: editorial narrative compressor. Distill the passage into one <narrative> envelope, keeping ' +
         CORE_MOMENT_TYPES +
         ' while cutting excess tissue.',
     'No preamble, no commentary, no markdown code fences.\nNever use second-person pronouns in the output.\nWrite the output mainly in English; short non-English names, titles, and source-language phrases are allowed.',
@@ -95,27 +127,20 @@ const LAYER0_INPUT_BLOCKS = `<player_name>
 {{story_txt}}
 </passage_in_question>`;
 
-const LAYER0_SCHEMA_BLOCK = `Output exactly two sections:
+const LAYER0_SCHEMA_BLOCK = `Output exactly one <narrative> envelope, followed by a current_date_time line:
 
-[NARRATIVE]
-<one dense chronological prose paragraph covering the passage's events, actions, dialogue, outcomes, and its core emotional moments (${CORE_MOMENT_TYPES}). Do NOT include factual parameters like dates, inventory lists, or status flags here. ${ANTI_RUN_ON_RULE}>
+<narrative>
+One dense chronological prose paragraph covering the passage's events, actions, dialogue, outcomes, and its core emotional moments (${CORE_MOMENT_TYPES}). Do NOT include factual parameters like dates, inventory lists, or status flags here. ${ANTI_RUN_ON_RULE}
+</narrative>
 Resolve any relative time reference in the passage (tomorrow, today, in N days, next/bare weekday, this evening) against the known scene date and write the RESOLVED ABSOLUTE DATE inline in the prose instead of the relative word. Never leave a bare relative time word in the narrative.
 ${PROSE_DATE_FORMAT_RULE}
 ${LAYER0_DURABILITY_RULES}
 
-[STATE]
-Rewrite the COMPLETE current snapshot as key: value lines. Omission means the fact is no longer active or important enough for state; omitted values are not inherited.
-Do NOT extract static character background/profile facts such as origins, hometowns, backstory, personality traits, age, species, nationality, or static job descriptions. Those belong in character cards or lorebooks.
-Do NOT write descriptive sentences in the state block. Use concise keys and values only.
-Always include temporal key:
-- current_date_time: YYYY-MM-DD HH ddd
-Use 24-hour, hour-level precision only, e.g. 2024-07-04 16 Thu. Derive the ddd weekday from the ISO date (2024-07-04 = Thu); never carry it over from the prior snapshot when the date changed. Normalize from raw bracket headers or passage timestamps when present. Drop minutes instead of preserving them.
-If no explicit time appears in the passage, carry forward the prior current_date_time if known.
+current_date_time: YYYY-MM-DD HH ddd
+Use 24-hour, hour-level precision only, e.g. 2024-07-04 16 Thu. Derive the ddd weekday from the ISO date (2024-07-04 = Thu); never reuse the prior scene time when the passage moves to a new date. Normalize from raw bracket headers or passage timestamps when present. Drop minutes instead of preserving them. If no explicit time appears in the passage, carry forward the prior current_date_time if known.`;
 
-Use only these keys and omit empty categories:
-{{state_schema}}`;
-
-const LAYER0_CRITICAL_RULES = `${ENGLISH_FIRST_LANGUAGE_RULE}
+const LAYER0_CRITICAL_RULES = `${DECLINED_MARKER_RULE}
+${ENGLISH_FIRST_LANGUAGE_RULE}
 ${LAYER0_DURABILITY_RULES}
 ${PROSE_DATE_FORMAT_RULE}
 ${ANTI_RUN_ON_RULE}`;
@@ -130,28 +155,24 @@ const PROMOTION_INPUT_BLOCKS = `<player_name>
 
 <narratives_to_consolidate>
 {{story_txt}}
-</narratives_to_consolidate>
+</narratives_to_consolidate>`;
 
-<source_state>
-{{source_state}}
-</source_state>`;
-
-const PROMOTION_CRITICAL_RULES = `${ENGLISH_FIRST_LANGUAGE_RULE}
+const PROMOTION_CRITICAL_RULES = `${DECLINED_MARKER_RULE}
+${ENGLISH_FIRST_LANGUAGE_RULE}
 ${PROSE_DATE_FORMAT_RULE}
 ${ANTI_RUN_ON_RULE}`;
 
 export const DEFAULT_SUMMARIZER_USER_PROMPT = buildUserPrompt({
     inputBlocks: LAYER0_INPUT_BLOCKS,
     schemaBlock: LAYER0_SCHEMA_BLOCK,
-    taskRules: `Compress only the essential narrative progression from <passage_in_question>, then rewrite the complete compact current-state snapshot at the end of that passage using <prior_context> as the baseline.
+    taskRules: `Compress only the essential narrative progression from <passage_in_question> using <prior_context> as the baseline.
 Read the entire provided passage before writing; never summarize only its tail.
 Treat <prior_context> as settled history: never restate it; add only what the passage changed: stakes, goals, feelings, trust, attraction, power, obligations, knowledge, resources, threats, or direction. If the passage repeats a prior pattern without escalation, record it in one clause or not at all.
-A relationship or emotional change recorded in [STATE] must have its causing moment in [NARRATIVE].
+A relationship or emotional change must have its causing moment shown in the narrative.
 If the prose uses 2nd person ('you'), map it directly to <player_name>. Never use second-person pronouns in the output.
-Keep [STATE] compact; follow the sentence and line caps provided at the end of this prompt. Put the most important facts first within each value.
-${STATE_DEDUPLICATION_RULES}
-Durable state belongs in [STATE]; ephemeral trivia does not. Do NOT preserve clothing, pose, momentary mood/arousal, ordinary props, completed errands, resolved hooks, physiological or sex counters, consumed food/drink, or soiled/used/disposed temporary items.
-Do not narrate events inside [STATE]. Only facts that remain useful after the recent verbatim window is gone.`,
+Keep the narrative compact; follow the sentence cap provided at the end of this prompt.
+Durable changes belong in the narrative; ephemeral trivia does not. Do NOT preserve clothing, pose, momentary mood/arousal, ordinary props, completed errands, resolved hooks, physiological or sex counters, consumed food/drink, or soiled/used/disposed temporary items.
+End with the current_date_time line described in the output schema.`,
     criticalRules: LAYER0_CRITICAL_RULES,
     triggerLine: EXECUTION_TRIGGER_L0,
 });
@@ -163,28 +184,27 @@ export const DEFAULT_SUMMARIZER_REPAIR_PROMPT = buildUserPrompt({
 Apply the durability rules strictly: keep ${CORE_MOMENT_TYPES} with their cause-to-effect chain; cut excess tissue harder than the first attempt; read the entire provided passage.
 If the prose uses 2nd person ('you'), map it directly to <player_name>. Never use second-person pronouns in the output.
 Omission removes a fact rather than preserving it. Exclude transient scene detail, completed tasks, resolved hooks, and ordinary items.
-Keep the state compact; follow the sentence and line caps provided at the end of this prompt.
-${STATE_DEDUPLICATION_RULES}
+Keep the narrative compact; follow the sentence cap provided at the end of this prompt.
 Always include current_date_time using YYYY-MM-DD HH ddd, carrying forward the prior value if no explicit time appears.
-Do not include prose, bullets, tables, duplicate section headers, markdown, or commentary inside [STATE].`,
+Do not include prose, bullets, tables, duplicate section headers, markdown, or commentary after the current_date_time line.`,
     criticalRules: LAYER0_CRITICAL_RULES,
     triggerLine: EXECUTION_TRIGGER_L0,
 });
 
 export const DEFAULT_PROMOTION_SYSTEM_PROMPT = buildSystemPrompt(
-    'Role: editorial memory synthesizer. Fold older layers into one consolidated [NARRATIVE] paragraph that keeps the plot skeleton and core emotional moments while cutting excess tissue.',
-    'No [STATE] block, no preamble, no commentary, no markdown.\nNever use second-person pronouns in the output.\nWrite the output mainly in English; short non-English names, titles, and source-language phrases are allowed.',
+    'Role: editorial memory synthesizer. Fold older layers into one consolidated <narrative> envelope that keeps the plot skeleton and core emotional moments while cutting excess tissue.',
+    'No preamble, no commentary, no markdown.\nNever use second-person pronouns in the output.\nWrite the output mainly in English; short non-English names, titles, and source-language phrases are allowed.',
 );
 
 export const DEFAULT_PROMOTION_USER_PROMPT = buildUserPrompt({
     inputBlocks: PROMOTION_INPUT_BLOCKS,
-    schemaBlock: `Output exactly one section:
+    schemaBlock: `Output exactly one <narrative> envelope:
 
-[NARRATIVE]
-One single prose paragraph containing AT MOST {{max_sentences_word}} ({{max_sentences}}) sentences total. Summarize major plot outcomes only.
-<one dense third-person chronological prose paragraph. Never use second-person. Do not output [STATE]. ${ANTI_RUN_ON_RULE}>`,
+<narrative>
+One single prose paragraph containing AT MOST {{max_sentences_word}} ({{max_sentences}}) sentences total. Summarize major plot outcomes only. One dense third-person chronological prose paragraph. Never use second-person. ${ANTI_RUN_ON_RULE}
+</narrative>`,
     taskRules: `### LENGTH CONTRACT (HARD LIMIT):
-The consolidated [NARRATIVE] must stay within the sentence cap given at the end of this prompt. This is a hard limit: if a draft runs long, delete whole beats rather than trimming wording. Overlong output is rejected and regenerated.
+The consolidated <narrative> must stay within the sentence cap given at the end of this prompt. This is a hard limit: if a draft runs long, delete whole beats rather than trimming wording. Overlong output is rejected and regenerated.
 ### LOSSY COMPRESSION:
 The input memories overlap heavily: each was written with the prior ones as context, so they restate the same relationships, rules, locations, and props. Treat that overlap as redundancy, not emphasis. Compress by deletion, not summarization-in-place:
 - State each relationship, rule, location, and prop exactly once, at the point it was established or last changed.
@@ -196,8 +216,8 @@ The input memories overlap heavily: each was written with the prior ones as cont
 3. **Appended Continuity:** Structure the output so that it chronologically and seamlessly appends directly to the end of <prior_context> without looking back or repeating past timelines.
 4. **Temporal Anchors:** Preserve lower-layer anchors such as [msgs 100-120; current 2024-12-03 09 Wed]. Keep hour-level 24-hour timestamps exactly when provided. Do not reduce inferable absolute timing to vague relative timing; future goals/plans should retain explicit date/hour anchors when available. Each source narrative is prefixed with a scene-time anchor like [msgs X-Y; current YYYY-MM-DD HH ddd]; treat that anchor's date AS the scene's "today" for that passage, compute every relative word in that narrative against it, and emit absolute dates in your output. Bare weekday names (e.g. "Friday") are forbidden; write the full calendar date instead of a relative word.
 ### PROSE-FOLDING RULES:
-The <source_state> block contains dynamic facts extracted from the source memories. Do NOT list every item from <source_state>. Fold in only major plot-arc changes that affect future events; ignore minor inventory items, temporary rules, and transient positions.
-Do not output a [STATE] block, key-value lines, tables, bullets, or structured state syntax.
+Fold in only major plot-arc changes from the source memories that affect future events; ignore minor inventory items, temporary rules, and transient positions.
+Do not output key-value lines, tables, bullets, or other structured state syntax.
 Omit stale transient scene facts and static character background/profile facts such as origins, hometowns, backstory, personality traits, age, species, nationality, or static job descriptions.
 Omit ephemeral trivia: physiological or sex counters, consumed food/drink, soiled/used/disposed temporary items, and momentary pose/arousal/mood counters. Preserve obligation counters only when clearly unresolved, pending, owed, or referenced by an unresolved hook.
 ### SYNTHESIS PRIORITIES:
@@ -213,13 +233,91 @@ ${PROMOTION_MODERATE_MACRO_RULES}`,
 
 export const DEFAULT_PROMOTION_REPAIR_PROMPT = buildUserPrompt({
     inputBlocks: PROMOTION_INPUT_BLOCKS,
-    schemaBlock: `Output exactly one section:
+    schemaBlock: `Output exactly one <narrative> envelope:
 
-[NARRATIVE]
-<one dense third-person chronological prose paragraph. Never use second-person. Do not output [STATE]. ${ANTI_RUN_ON_RULE}>`,
+<narrative>
+One dense third-person chronological prose paragraph. Never use second-person. ${ANTI_RUN_ON_RULE}
+</narrative>`,
     taskRules: `Repair the previous Layer 1+ promotion draft. It failed the compression guard, so rewrite the same source memories more abstractly instead of adding detail.
-Keep only durable macro-level chronology, current position, relationship/state changes, core emotional moments, permanent rules, and open threads (unresolved hooks, debts, promises); revise threads in place and never silently drop one with residual consequences; do not output [STATE], lists, markdown, commentary, or key-value syntax.
+Keep only durable macro-level chronology, current position, relationship changes, core emotional moments, permanent rules, and open threads (unresolved hooks, debts, promises); revise threads in place and never silently drop one with residual consequences; do not output lists, markdown, commentary, or key-value syntax.
 Resolve every relative time word against the source snippets' scene-date anchors and emit absolute dates only; never leave a bare relative time word.`,
     criticalRules: PROMOTION_CRITICAL_RULES,
     triggerLine: EXECUTION_TRIGGER_PROMO,
+});
+
+const AUDITOR_INPUT_BLOCKS = `<player_name>
+{{player_name}}
+</player_name>
+
+<prior_continuity_state>
+{{context_str}}
+</prior_continuity_state>
+
+<latest_exchanges>
+{{story_txt}}
+</latest_exchanges>`;
+
+/**
+ * Per-pair flag vocabulary only; this module (JavaScript) is the sole writer
+ * of bond/sparks/grudge numbers, so the schema forbids numeric counters.
+ */
+const AUDITOR_SCHEMA_BLOCK = `Output exactly one JSON object with these sections:
+
+{
+  "turn_count": <integer placeholder; JavaScript derives the real value, always emit it>,
+  "bonds": {
+    "<Character Name>↔User": {
+      "positive_interaction": true | false,
+      "slight": true | false,
+      "insult": true | false,
+      "betrayal": true | false,
+      "apology": true | false
+    }
+  },
+  "agendas": {
+    "<Character Name>": {
+      "task": "<current goal>",
+      "step": { "current": <int>, "max": <int> },
+      "status": "<on-screen state or off-screen location>"
+    }
+  },
+  "gm_notes": ["[R] ...", "[T] ...", "[S] ..."],
+  "physics": {
+    "location": "",
+    "environment": "",
+    "posture_and_position": "",
+    "contact_points": "",
+    "clothing_state": ""
+  }
+}
+
+Every user pair seen in the exchanges MUST appear in bonds. Never output bond scores, sparks, grudge values, gate names, deltas, or any arithmetic; emit the five booleans per pair only.
+Name rule: ${AUDITOR_NAME_RULE}
+Discovery rule: ${AUDITOR_DISCOVERY_RULE}`;
+
+const AUDITOR_CRITICAL_RULES = `${AUDITOR_PRESERVATION_RULES}
+You never do arithmetic: bond scores, sparks, grudges, gates, and turn counting are computed by JavaScript from your booleans.
+Write the output mainly in English; short non-English names, titles, and source-language phrases are allowed.`;
+
+export const DEFAULT_AUDITOR_SYSTEM_PROMPT = buildSystemPrompt(
+    'Role: continuity auditor and database manager. You evaluate the latest exchanges and emit one full-state JSON rewrite. You never write narrative prose.',
+    `Bond engine: judge each exchange per pair and flag it with the five booleans only (positive_interaction, slight, insult, betrayal, apology).
+Agenda engine: on-screen NPCs update task progress in place; off-screen NPCs keep or advance their step counter.
+Canonical names: ${AUDITOR_NAME_RULE}
+NPC discovery: ${AUDITOR_DISCOVERY_RULE}
+GM notebook contract: [R] reminders are dynamic rules and persistent constraints; [T] threads are commitments, deadlines, and pending arcs; [S] secrets are asymmetric knowledge: who knows and who is ignorant.
+Physics extractor: record room/environment, relative positioning and distance, posture, contact points, and clothing alterations.
+Anti-omniscient verification: if a character was not present when an event happened, that event is an [S] secret noting who knows and who is ignorant.`,
+);
+
+export const DEFAULT_AUDITOR_USER_PROMPT = buildUserPrompt({
+    inputBlocks: AUDITOR_INPUT_BLOCKS,
+    schemaBlock: AUDITOR_SCHEMA_BLOCK,
+    taskRules: `Rewrite the ENTIRE state object from <prior_continuity_state> plus what <latest_exchanges> changed. Output is a full state rewrite, not a delta.
+The state has exactly five sections — turn_count, bonds, agendas, gm_notes, physics — and no others.
+${AUDITOR_FACT_ROUTING_RULE}
+Keep the exchanges' consequences only: permanent lore, resolved threads, and static card facts stay out of the dynamic state.
+Physical gates and intimacy tiers are read-only context; never emit them.`,
+    criticalRules: AUDITOR_CRITICAL_RULES,
+    triggerLine: EXECUTION_TRIGGER_AUDITOR,
 });

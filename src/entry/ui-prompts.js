@@ -1,4 +1,6 @@
 import {
+    AUDITOR_PROMPT_PRESETS,
+    AUDITOR_SYSTEM_PROMPT_PRESETS,
     PROMOTION_PROMPT_PRESETS,
     PROMOTION_REPAIR_PROMPT_PRESETS,
     PROMOTION_SYSTEM_PROMPT_PRESETS,
@@ -8,7 +10,7 @@ import {
     SUMMARIZER_SYSTEM_PROMPT_PRESETS,
     defaultSettings,
 } from '../foundation/constants.js';
-import { getSettings, saveSettings } from '../foundation/state.js';
+import { getSettings, saveSettings } from '../foundation/settings.js';
 
 // PROMPT_SETTING_KEYS owns the (presetKey, settingKey) pairs. This map adds
 // the UI selectors and preset tables, keyed by presetKey.
@@ -42,6 +44,16 @@ const PROMPT_FIELD_UI = {
         presetSelect: '#sc_promotion_repair_prompt_preset',
         textarea: '#sc_promotion_repair_prompt',
         presets: PROMOTION_REPAIR_PROMPT_PRESETS,
+    },
+    auditorSystemPromptPreset: {
+        presetSelect: '#sc_auditor_system_prompt_preset',
+        textarea: '#sc_auditor_system_prompt',
+        presets: AUDITOR_SYSTEM_PROMPT_PRESETS,
+    },
+    auditorPromptPreset: {
+        presetSelect: '#sc_auditor_prompt_preset',
+        textarea: '#sc_auditor_user_prompt',
+        presets: AUDITOR_PROMPT_PRESETS,
     },
 };
 

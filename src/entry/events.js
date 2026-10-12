@@ -1,21 +1,17 @@
-import { getChat, isDryRunEvent } from '../foundation/context.js';
-import { debug, info, isDebugEnabled, warn } from '../foundation/logger.js';
+import { getChat, getGroupId, getName1, isDryRunEvent } from '../foundation/context.js';
+import { isTraceEnabled, trace, warn } from '../foundation/logger.js';
 import { ensureChatScIds } from '../foundation/message-identity.js';
-import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
-import { refreshFull, refreshUi } from '../foundation/refresh.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getEffectiveSettings } from '../foundation/settings.js';
+import { refreshFull, refreshPreview, refreshUi } from '../foundation/refresh.js';
 import { syncGhosting } from '../core/ghosting.js';
+import { isAuditorTriggerMessage } from '../core/continuity-audit.js';
+import { discardCheckpoint } from '../core/continuity-checkpoint.js';
 import { maskUserRoleAsAssistantInGenerateData } from '../core/assistant-role-mask.js';
 import { evaluateStaleCacheAdvice, isProviderCacheMode } from '../core/cache-staleness.js';
 import { buildChatWindowPlan } from '../core/chat-window-planner.js';
-import {
-    beginForegroundGeneration,
-    endForegroundGeneration,
-    isPromptMutationFrozen,
-    recoverStalePromptFreeze,
-    resetPromptMutationGuard,
-} from '../core/summarizer-commit.js';
-import { isRequestLive, requestSummarization } from '../core/summarizer-queue.js';
-import { updateInjection } from '../features/injection.js';
+import { updateContinuityInjection } from '../features/continuity-injection.js';
+import { updateContinuityMarker } from './continuity-marker.js';
 import { flushPendingChatSave, persistChatState } from '../core/persist-state.js';
 import { pauseMemoryToastForGeneration, showStaleCacheAdvice } from './ui-dialogs.js';
 
@@ -43,9 +39,9 @@ export function onChatCompletionPromptReady(...args) {
     const prefixBroken = previousLength > 0 && stablePrefixLength < previousLength;
 
     if (previousLength === 0) {
-        debug(`Prompt prefix baseline: ${nextHashes.length} blocks`);
+        trace(`Prompt prefix baseline: ${nextHashes.length} blocks`);
     } else if (prefixBroken) {
-        if (isDebugEnabled()) {
+        if (isTraceEnabled()) {
             logBrokenPromptPrefix({
                 stablePrefixLength,
                 previousLength,
@@ -59,7 +55,7 @@ export function onChatCompletionPromptReady(...args) {
             .map((section) => String(section?.role || 'unknown'))
             .join(', ');
         const added = nextHashes.length - previousLength;
-        debug(
+        trace(
             `Prompt prefix OK: ${stablePrefixLength} stable blocks, ${added} added${addedRoles ? ` (${addedRoles})` : ''}`,
         );
     }
@@ -69,7 +65,7 @@ export function onChatCompletionPromptReady(...args) {
 
 function logBrokenPromptPrefix({ stablePrefixLength, previousLength, currentLength, block }) {
     const title = `Prompt prefix BROKEN at block ${stablePrefixLength}: previous ${previousLength}, current ${currentLength}`;
-    console.groupCollapsed(`[Summaryception] [DEBUG] ${title}`);
+    console.groupCollapsed(`[Summaryception] [TRACE] ${title}`);
     try {
         console.log(
             JSON.stringify(
@@ -121,8 +117,6 @@ function stableSerialize(value) {
         .join(',')}}`;
 }
 
-// ─── Event Handlers ──────────────────────────────────────────────────
-
 let reconcileTimer = null;
 let reconcilePromise = null;
 let reconcileQueued = false;
@@ -130,18 +124,32 @@ let promptFreezeRecoveryBound = false;
 
 /**
  * Debounces the automatic cycle so fast message streams queue one request.
+ * A fresh or regenerated assistant reply also kicks off one Continuity
+ * Audit; the audit owns every further gate.
+ * @param {number} messageIndex
+ * @param {object} options
+ * @param {import('../core/notify.js').NotifyAdapter} [options.notify] - Notify adapter for auditor notices
+ * @param {unknown} [options.type] - MESSAGE_RECEIVED type argument; 'normal' triggers an audit, the other types dispatch nothing
+ * @param {{ audit: (input: import('../core/continuity-audit.js').ContinuityAuditInput) => Promise<unknown> }} options.auditor - Continuity Audit built at the composition root
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} options.queue - Summarizer Queue a new reply kicks.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} options.gate - Foreground Gate owning the Reroll Tail the audit's coverage input reads.
  * @returns {void}
  */
-export function onMessageReceived(messageIndex) {
+export function onMessageReceived(messageIndex, { notify, type, auditor, queue, gate }) {
     try {
         const chat = getChat();
         const msg = chat[messageIndex];
         if (msg && !msg.is_user && !msg.is_system) {
-            debug('New assistant message at index', messageIndex);
+            trace('New assistant message at index', messageIndex);
             setTimeout(async () => {
-                await requestSummarization();
+                await queue.request();
                 refreshUi();
             }, 500);
+            if (isAuditorTriggerMessage(msg, type)) {
+                void auditor.audit(gatherAuditInputs(gate, notify)).catch((e) => {
+                    warn('Continuity auditor run error:', e);
+                });
+            }
         }
     } catch (e) {
         warn('onMessageReceived error:', e);
@@ -149,40 +157,61 @@ export function onMessageReceived(messageIndex) {
 }
 
 /**
- * Reconciles the loaded chat before any automatic cycle can read it.
- * @returns {void}
+ * Read the host facts one Continuity Audit needs. Entry owns the host reads;
+ * the audit owns every gate past this point.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate - Foreground Gate owning the Reroll Tail the audit input reads.
+ * @param {import('../core/notify.js').NotifyAdapter} [notify] - Notify adapter threaded to the dispatch call.
+ * @returns {import('../core/continuity-audit.js').ContinuityAuditInput}
  */
-export function onChatChanged() {
-    debug('Chat changed.');
-    recoverPromptFreeze('chat change');
-    scheduleLoadedChatReconciliation();
+function gatherAuditInputs(gate, notify) {
+    return {
+        chat: getChat(),
+        store: getChatStore(),
+        settings: getEffectiveSettings(),
+        hasGroup: Boolean(getGroupId()),
+        playerName: getName1(),
+        rerollTail: gate.isRerollTail(),
+        notify,
+    };
 }
 
 /**
- * Reconcile persisted Summaryception state after app load.
+ * Reconciles the loaded chat before any automatic cycle can read it.
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate, queue: import('../core/summarizer-queue.js').SummarizerQueue }} deps
+ * @returns {void}
+ */
+export function onChatChanged({ gate, queue }) {
+    trace('Chat changed.');
+    recoverPromptFreeze('chat change', gate);
+    scheduleLoadedChatReconciliation(gate, queue);
+}
+
+/**
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate, queue: import('../core/summarizer-queue.js').SummarizerQueue }} deps
  * @returns {Promise<void>}
  */
-export async function onAppReady() {
-    resetPromptMutationGuard();
-    await runSerializedReconciliation();
+export async function onAppReady({ gate, queue }) {
+    gate.reset();
+    await runSerializedReconciliation(gate, queue);
 }
 
 /**
  * Bind browser lifecycle cleanup for prompt mutation freezes.
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate }} deps
  * @returns {void}
  */
-export function bindPromptFreezeRecoveryEvents() {
+export function bindPromptFreezeRecoveryEvents({ gate }) {
     const win = globalThis.window;
     if (promptFreezeRecoveryBound || !win || typeof win.addEventListener !== 'function') {
         return;
     }
 
-    win.addEventListener('beforeunload', onBeforeUnload);
-    win.addEventListener('focus', onWindowFocus);
+    win.addEventListener('beforeunload', () => recoverPromptFreeze('page unload', gate));
+    win.addEventListener('focus', () => recoverPromptFreeze('window focus', gate));
 
     const doc = globalThis.document;
     if (doc && typeof doc.addEventListener === 'function') {
-        doc.addEventListener('visibilitychange', onVisibilityChange);
+        doc.addEventListener('visibilitychange', () => onVisibilityChange(gate));
     }
 
     promptFreezeRecoveryBound = true;
@@ -190,46 +219,56 @@ export function bindPromptFreezeRecoveryEvents() {
 
 /**
  * Freezes prompt mutations for host generations; dry runs and own requests are excluded.
+ * @param {unknown[]} args - GENERATION_STARTED event arguments.
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate, queue: import('../core/summarizer-queue.js').SummarizerQueue }} deps
  * @returns {void}
  */
-export function onGenerationStarted(...args) {
+export function onGenerationStarted(args, { gate, queue }) {
     if (isDryRunEvent(args[1], args[2])) {
-        debug('Ignoring generation start from SillyTavern dry run.');
+        trace('Ignoring generation start from SillyTavern dry run.');
         return;
     }
-    if (isRequestLive()) {
-        debug('Ignoring generation start from active Summaryception request.');
+    if (queue.isRequestLive()) {
+        trace('Ignoring generation start from active Summaryception request.');
         return;
     }
-    info('Foreground generation start detected; freezing Summaryception prompt mutations.');
-    beginForegroundGeneration();
+    // A reroll replaces the last reply; its own checkpoint must leave the
+    // read model and the prompt view must exclude that reply before the freeze
+    // locks the slot content in. The hook is the gate's pre-freeze window, so
+    // both land even when a stale-heal is still in flight.
+    const chat = getChat();
+    gate.beginGeneration({
+        generationType: args[0],
+        chat,
+        beforeFreeze: () => {
+            if (discardCheckpoint(chat, args[0])) {
+                updateContinuityInjection({ rerollTail: gate.isRerollTail() });
+                updateContinuityMarker();
+            }
+        },
+    });
     pauseMemoryToastForGeneration();
     refreshUi();
 }
 
 /**
- * Unfreezes prompt mutations after a host generation ends.
+ * @param {{ gate: import('../core/foreground-gate.js').ForegroundGate, queue: import('../core/summarizer-queue.js').SummarizerQueue }} deps
  * @returns {void}
  */
-export function onGenerationEnded() {
-    const hasActiveSummaryRequest = isRequestLive();
-    const hasFrozenMutations = isPromptMutationFrozen();
+export function onGenerationEnded({ gate, queue }) {
+    const hasActiveSummaryRequest = queue.isRequestLive();
+    const hasFrozenMutations = gate.isFrozen();
 
     if (hasActiveSummaryRequest && !hasFrozenMutations) {
-        debug('Ignoring generation end from active Summaryception request.');
+        trace('Ignoring generation end from active Summaryception request.');
         return;
     }
 
-    info(
-        'Generation end detected; flushing Summaryception prompt mutations.',
-        `activeSummaryRequest=${hasActiveSummaryRequest}`,
-        `frozen=${hasFrozenMutations}`,
-    );
     void (async () => {
         try {
-            await endForegroundGeneration();
+            await gate.endGeneration();
             await flushPendingChatSave();
-            await requestSummarization();
+            await queue.request();
         } finally {
             refreshUi();
         }
@@ -243,7 +282,6 @@ export function onGenerationEnded() {
 }
 
 /**
- * Rewrite final foreground prompt roles after ST assembles generation data.
  * @param {unknown} dryRun - Whether this is a prompt-inspection dry run.
  * @returns {void}
  */
@@ -258,63 +296,70 @@ export function onGenerateAfterData(generateData, dryRun) {
     }
 }
 
-function onBeforeUnload() {
-    recoverPromptFreeze('page unload');
-}
-
-function onWindowFocus() {
-    recoverPromptFreeze('window focus');
-}
-
-function onVisibilityChange() {
+/**
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ * @returns {void}
+ */
+function onVisibilityChange(gate) {
     const doc = globalThis.document;
     if (!doc || doc.visibilityState === 'visible' || doc.hidden === false) {
-        recoverPromptFreeze('tab visible');
+        recoverPromptFreeze('tab visible', gate);
     }
 }
 
-function recoverPromptFreeze(reason) {
-    void recoverStalePromptFreeze(reason, { refreshUi }).catch((error) => {
+/**
+ * @param {string} reason
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ * @returns {void}
+ */
+function recoverPromptFreeze(reason, gate) {
+    void gate.heal(reason, { refreshUi }).catch((error) => {
         warn('Error while recovering foreground generation freeze:', error);
     });
 }
 
-/** Normalize message IDs, refresh injection, then restore missing ghost flags. */
-async function reconcileLoadedChatState() {
+/**
+ * Normalize message IDs, refresh injection, then restore missing ghost flags.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ */
+async function reconcileLoadedChatState(gate) {
     const chat = getChat();
     if (ensureChatScIds(chat)) {
         await persistChatState();
     }
-    getChatStore();
-    updateInjection();
-    await syncGhosting();
+    refreshPreview();
+    await syncGhosting({ gate });
 }
 
 /**
  * Debounce loaded-chat reconciliation after chat save/load bursts.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue
  * @returns {void}
  */
-function scheduleLoadedChatReconciliation() {
+function scheduleLoadedChatReconciliation(gate, queue) {
     if (reconcileTimer) {
         clearTimeout(reconcileTimer);
     }
     reconcileTimer = setTimeout(() => {
         reconcileTimer = null;
-        void runSerializedReconciliation();
+        void runSerializedReconciliation(gate, queue);
     }, 100);
 }
 
 /**
  * Run loaded-chat reconciliation serially, coalescing queued requests.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue
  * @returns {Promise<void>}
  */
-async function runSerializedReconciliation() {
+async function runSerializedReconciliation(gate, queue) {
     if (reconcilePromise) {
         reconcileQueued = true;
         return await reconcilePromise;
     }
 
-    reconcilePromise = drainReconciliationQueue();
+    reconcilePromise = drainReconciliationQueue(gate, queue);
     try {
         await reconcilePromise;
     } finally {
@@ -323,16 +368,17 @@ async function runSerializedReconciliation() {
 }
 
 /**
- * Drain one or more coalesced reconciliation requests.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} gate
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue
  * @returns {Promise<void>}
  */
-async function drainReconciliationQueue() {
+async function drainReconciliationQueue(gate, queue) {
     do {
         reconcileQueued = false;
-        await reconcileLoadedChatState();
+        await reconcileLoadedChatState(gate);
         refreshUi();
     } while (reconcileQueued);
-    await checkStaleCacheAdvice();
+    await checkStaleCacheAdvice(queue);
 }
 
 let staleCacheAdviceKey = '';
@@ -340,12 +386,13 @@ let staleCacheAdviceKey = '';
 /**
  * Suggest an early Force Summarize when the loaded chat's provider cache is
  * stale. Shown once per queue state per page session.
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} queue
  * @returns {Promise<void>}
  */
-async function checkStaleCacheAdvice() {
+async function checkStaleCacheAdvice(queue) {
     try {
         const settings = getEffectiveSettings();
-        if (!settings.enabled || !isProviderCacheMode(settings) || isRequestLive()) {
+        if (!settings.enabled || !isProviderCacheMode(settings) || queue.isRequestLive()) {
             return;
         }
         const chat = getChat();

@@ -1,18 +1,19 @@
 import { NOTIFY_EVENTS } from '../foundation/constants.js';
 import { warn } from '../foundation/logger.js';
-import { getChatStore } from '../foundation/state.js';
-import { getEffectiveMemoryUsage } from './memory-budget.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { buildInjection, measureInjection } from './memory-injection.js';
 import { getLayer0SummaryTokenTarget } from './layer0-compression.js';
 import {
     buildHypotheticalLayersAfterPromotion,
     getPromotionSummaryTokenHardMax,
     getPromotionSummaryTokenTarget,
 } from './promotion-planner.js';
-import { isSummarizerOutputSafe } from './summarizer-output.js';
 import { buildRepairDiagnostics } from './repair-diagnostics.js';
-import { parseSnippet } from './summarizer-state.js';
-import { callSummarizer } from './summarizer-request.js';
-import { formatSnippetAnchor, stripLeadingSnippetAnchor } from './snippet-metadata.js';
+import {
+    formatSnippetAnchor,
+    parseSnippet,
+    stripLeadingSnippetAnchor,
+} from './snippet-metadata.js';
 import { countTextTokens, formatTokenValue } from './token-count.js';
 
 /**
@@ -30,10 +31,12 @@ import { countTextTokens, formatTokenValue } from './token-count.js';
  * @param {string} prepared.contextStr
  * @param {object} prepared.promotedMetadata
  * @param {object} prepared.promotionMetadata
- * @param {import('./notify.js').NotifyAdapter} [notify] - Notify adapter; runs without one stay silent.
+ * @param {object} p
+ * @param {import('./notify.js').NotifyAdapter} [p.notify] - Notify adapter; runs without one stay silent.
+ * @param {import('./summarizer-request.js').SummarizerDispatch['call']} p.dispatch - Summarizer Dispatch both requests go through.
  * @returns {Promise<object | null>} The promoted snippet, or null when rejected.
  */
-export async function generateValidatedPromotion(prepared, notify) {
+export async function generateValidatedPromotion(prepared, { notify, dispatch }) {
     notify?.transient({
         kind: NOTIFY_EVENTS.PROMOTION_STARTED,
         mergedCount: prepared.toMerge.length,
@@ -45,20 +48,25 @@ export async function generateValidatedPromotion(prepared, notify) {
         return null;
     }
 
-    const metaOutcome = await callSummarizer(
-        prepared.storyTxt,
-        prepared.contextStr,
-        prepared.promotionMetadata,
+    const metaOutcome = await dispatch({
+        storyTxt: prepared.storyTxt,
+        contextStr: prepared.contextStr,
+        metadata: prepared.promotionMetadata,
         notify,
-    );
+    });
     if (metaOutcome.status !== 'completed') {
         return null;
     }
 
-    return await buildValidatedPromotionSnippet({ prepared, narrative: metaOutcome.text, notify });
+    return await buildValidatedPromotionSnippet({
+        prepared,
+        narrative: metaOutcome.text,
+        notify,
+        dispatch,
+    });
 }
 
-async function buildValidatedPromotionSnippet({ prepared, narrative, notify }) {
+async function buildValidatedPromotionSnippet({ prepared, narrative, notify, dispatch }) {
     const {
         layerIndex,
         mergeCount,
@@ -96,10 +104,10 @@ async function buildValidatedPromotionSnippet({ prepared, narrative, notify }) {
         return null;
     }
 
-    const repairOutcome = await callSummarizer(
+    const repairOutcome = await dispatch({
         storyTxt,
         contextStr,
-        {
+        metadata: {
             ...metadata,
             promotionRepair: {
                 reason: firstValidation.reason,
@@ -113,7 +121,7 @@ async function buildValidatedPromotionSnippet({ prepared, narrative, notify }) {
             },
         },
         notify,
-    );
+    });
     if (repairOutcome.status !== 'completed') {
         return null;
     }
@@ -169,9 +177,6 @@ async function validatePromotionCandidate({
 }
 
 async function validatePromotionSize({ layerIndex, promotedSnippet, settings, sourceTokens }) {
-    if (!isPromotionSummarySafe({ layerIndex, promotedSnippet, sourceTokens })) {
-        return { valid: false, reason: 'integrity' };
-    }
     const outputTokens = await countTextTokens(promotedSnippet.text);
     const targetTokens = getLayer0SummaryTokenTarget(settings);
     const minTokens = getPromotionSummaryTokenTarget({ layerIndex, targetTokens });
@@ -198,14 +203,14 @@ async function validatePromotionCompressesMemory({
     settings,
 }) {
     const store = getChatStore();
-    const memoryTokensBefore = await getEffectiveMemoryUsage(store.layers, settings);
+    const memoryTokensBefore = await measureInjection(buildInjection(store.layers, settings));
     const nextLayers = buildHypotheticalLayersAfterPromotion(
         store.layers,
         layerIndex,
         mergeCount,
         promotedSnippet,
     );
-    const memoryTokensAfter = await getEffectiveMemoryUsage(nextLayers, settings);
+    const memoryTokensAfter = await measureInjection(buildInjection(nextLayers, settings));
     if (memoryTokensAfter.total.count < memoryTokensBefore.total.count) {
         return { valid: true };
     }
@@ -223,18 +228,6 @@ async function validatePromotionCompressesMemory({
     return { valid: false, reason: 'memory-total' };
 }
 
-function isPromotionSummarySafe({ layerIndex, promotedSnippet, sourceTokens }) {
-    return isSummarizerOutputSafe(
-        promotedSnippet.text,
-        {
-            kind: 'promotion',
-            memoryTokensBefore: sourceTokens.count,
-            memoryTokensBeforeEstimated: sourceTokens.estimated,
-        },
-        `Promotion L${layerIndex} rejected: `,
-    );
-}
-
 function rejectPromotionSize({
     layerIndex,
     promotedSnippet,
@@ -250,7 +243,7 @@ function rejectPromotionSize({
         sections: [
             {
                 id: 'draft',
-                label: '[NARRATIVE]',
+                label: '<narrative>',
                 actualTokens: outputTokens.count,
                 targetTokens: minTokens,
                 hardMaxTokens,

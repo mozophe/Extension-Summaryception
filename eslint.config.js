@@ -21,13 +21,19 @@ const jsdocDefinedTypes = [
     'SillyTavernStreamingProcessor',
     'SlashCommand',
     'SlashCommandParser',
+    'SummaryceptionAgenda',
+    'SummaryceptionContinuityBond',
+    'SummaryceptionContinuityFlags',
+    'SummaryceptionContinuityPhysics',
+    'SummaryceptionContinuityState',
+    'SummaryceptionContinuityStep',
     'SummaryceptionSnippet',
     'SummaryceptionStore',
 ];
 
 export default [
     {
-        ignores: ['node_modules/**', 'dist/**', 'build/**', '.git/**'],
+        ignores: ['node_modules/**', 'dist/**', 'build/**', '.git/**', 'src/vendor/**'],
     },
     js.configs.recommended,
     prettierConfig,
@@ -62,7 +68,10 @@ export default [
                 { type: 'context', pattern: 'src/foundation/context.js' },
                 { type: 'logger', pattern: 'src/foundation/logger.js' },
                 { type: 'retry', pattern: 'src/foundation/retry.js' },
-                { type: 'state', pattern: 'src/foundation/state.js' },
+                {
+                    type: 'state',
+                    pattern: ['src/foundation/settings.js', 'src/foundation/chat-store.js'],
+                },
                 { type: 'core', pattern: 'src/core/*.js' },
                 { type: 'feature', pattern: 'src/features/*.js' },
                 { type: 'entry', pattern: 'src/entry/*.js' },
@@ -161,7 +170,10 @@ export default [
                         { from: 'context', allow: ['constants', 'context'] },
                         { from: 'logger', allow: ['constants', 'context', 'logger'] },
                         { from: 'retry', allow: ['constants', 'context', 'retry'] },
-                        { from: 'state', allow: ['constants', 'context', 'logger', 'state'] },
+                        {
+                            from: 'state',
+                            allow: ['constants', 'context', 'logger', 'state'],
+                        },
                         {
                             from: 'core',
                             allow: ['constants', 'context', 'logger', 'retry', 'state', 'core'],

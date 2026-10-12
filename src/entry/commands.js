@@ -1,12 +1,15 @@
 import { layerLabel, listNonEmptyLayers } from '../foundation/constants.js';
 import { getChat, getSlashCommand, getSlashCommandParser } from '../foundation/context.js';
 import { warn } from '../foundation/logger.js';
-import { getChatStore, getCurrentSummarizedBoundary } from '../foundation/state.js';
-import { assembleSummaryBlock } from '../features/injection.js';
-import { clearSummaryceptionMemory } from '../features/memory.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { clearChatData } from '../core/chat-data.js';
+import { buildInjection } from '../core/memory-injection.js';
+import { getCurrentSummarizedBoundary } from '../core/snippet-provenance.js';
 
 /**
- *
+ * Registers the extension's slash commands with the host parser.
+ * Skips registration when the host omits the parser.
+ * @returns {void}
  */
 export function registerSlashCommands() {
     try {
@@ -43,7 +46,7 @@ export function registerSlashCommands() {
             SlashCommand.fromProps({
                 name: 'sc-clear',
                 callback: async () => {
-                    await clearSummaryceptionMemory({ updateUi: true });
+                    await clearChatData();
                     return 'Summaryception memory cleared and messages unghosted.';
                 },
                 helpString: 'Clear all Summaryception memory and unghost messages for this chat',
@@ -54,7 +57,7 @@ export function registerSlashCommands() {
             SlashCommand.fromProps({
                 name: 'sc-preview',
                 callback: () => {
-                    return assembleSummaryBlock() || '(No summaries yet)';
+                    return buildInjection(getChatStore().layers).text || '(No summaries yet)';
                 },
                 helpString: 'Preview the summary block that would be injected',
             }),

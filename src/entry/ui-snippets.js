@@ -1,6 +1,6 @@
 import { TOAST_TITLE, layerLabel, listNonEmptyLayers } from '../foundation/constants.js';
 import { refreshUi } from '../foundation/refresh.js';
-import { getChatStore } from '../foundation/state.js';
+import { getChatStore } from '../foundation/chat-store.js';
 import { getSnippetDisplayMeta } from '../core/snippet-metadata.js';
 import {
     deleteSnippetAt,
@@ -14,14 +14,33 @@ import { showBusySummaryToast } from './ui-dialogs.js';
 import { ensureChild } from './ui-dom.js';
 
 let notifyAdapter = null;
+/** @type {import('../core/foreground-gate.js').ForegroundGate | null} */
+let foregroundGate = null;
+/** @type {import('../core/summarizer-queue.js').SummarizerQueue | null} */
+let summarizerQueue = null;
+/** @type {import('../core/summarizer-request.js').SummarizerDispatch | null} */
+let summarizerDispatch = null;
+/** @type {import('../core/summarizer-usage.js').UsageLedger | null} */
+let usageLedger = null;
 
 /**
- * Core receives the notify adapter only through this call; it serves only snippet regeneration notices.
- * @param {import('../core/notify.js').NotifyAdapter} notify - Toastr-backed adapter distributed to core calls.
+ * Core receives the notify adapter, the Foreground Gate, the Summarizer
+ * Queue, the Summarizer Dispatch, and the Usage Ledger only through this
+ * call; they serve the snippet write paths a browser action triggers.
+ * @param {object} options - The runtime instances entry distributes to core.
+ * @param {import('../core/notify.js').NotifyAdapter} options.notify - Toastr-backed adapter distributed to core calls.
+ * @param {import('../core/foreground-gate.js').ForegroundGate} options.gate - Foreground Gate every snippet commit crosses.
+ * @param {import('../core/summarizer-queue.js').SummarizerQueue} options.queue - Summarizer Queue regeneration leases.
+ * @param {import('../core/summarizer-request.js').SummarizerDispatch} options.dispatch - Summarizer Dispatch regeneration requests go through.
+ * @param {import('../core/summarizer-usage.js').UsageLedger} options.usage - Usage Ledger regeneration calls record into.
  * @returns {void}
  */
-export function initSnippetBrowser(notify) {
+export function initSnippetBrowser({ notify, gate, queue, dispatch, usage }) {
     notifyAdapter = notify;
+    foregroundGate = gate;
+    summarizerQueue = queue;
+    summarizerDispatch = dispatch;
+    usageLedger = usage;
 }
 
 /**
@@ -29,7 +48,7 @@ export function initSnippetBrowser(notify) {
  * @property {string} key - Stable row key for this render pass
  * @property {number} layerIndex - Source layer index
  * @property {number} snippetIndex - Source snippet index within the layer
- * @property {string} text
+ * @property {string} text - Snippet body text shown in the browser row
  * @property {string} meta - Compact source metadata label
  * @property {boolean} canRedo - Whether the row can be regenerated
  */
@@ -100,7 +119,11 @@ function buildSnippetBrowserItem(snippet, layerIndex, snippetIndex) {
         snippetIndex,
         text: snippet.text,
         meta: getSnippetMeta(snippet),
-        canRedo: isRegenerationCandidate(layerIndex, snippetIndex),
+        canRedo: isRegenerationCandidate(
+            layerIndex,
+            snippetIndex,
+            /** @type {import('../core/summarizer-queue.js').SummarizerQueue} */ (summarizerQueue),
+        ),
     };
 }
 
@@ -357,6 +380,11 @@ async function commitSnippetEdit(textarea, position) {
         position.layerIdx,
         position.snippetIdx,
         textarea.val(),
+        {
+            gate: /** @type {import('../core/foreground-gate.js').ForegroundGate} */ (
+                foregroundGate
+            ),
+        },
     );
     if (result.status === 'updated') {
         toastr.success('Snippet updated', TOAST_TITLE, {
@@ -381,7 +409,11 @@ async function onSnippetRedoClick() {
         return;
     }
 
-    const target = getSnippetRegenerationTarget(position.layerIdx, position.snippetIdx);
+    const target = getSnippetRegenerationTarget(
+        position.layerIdx,
+        position.snippetIdx,
+        /** @type {import('../core/summarizer-queue.js').SummarizerQueue} */ (summarizerQueue),
+    );
     if (target.status !== 'ready') {
         handleRegenerationTargetStatus(target);
         return;
@@ -407,7 +439,9 @@ async function onSnippetDeleteClick() {
         return;
     }
 
-    const result = await deleteSnippetAt(position.layerIdx, position.snippetIdx);
+    const result = await deleteSnippetAt(position.layerIdx, position.snippetIdx, {
+        gate: /** @type {import('../core/foreground-gate.js').ForegroundGate} */ (foregroundGate),
+    });
     if (result.status === 'deleted') {
         refreshUi();
         toastr.info(`Snippet removed from Layer ${result.layerIndex}`, TOAST_TITLE);
@@ -431,11 +465,20 @@ function handleRegenerationTargetStatus(target) {
 async function runSnippetRegeneration(btn, position) {
     btn.prop('disabled', true).removeClass('fa-rotate-right').addClass('fa-spinner fa-spin');
     try {
-        const result = await regenerateSnippetAt(
-            position.layerIdx,
-            position.snippetIdx,
-            notifyAdapter,
-        );
+        const result = await regenerateSnippetAt(position.layerIdx, position.snippetIdx, {
+            notify: notifyAdapter ?? undefined,
+            gate: /** @type {import('../core/foreground-gate.js').ForegroundGate} */ (
+                foregroundGate
+            ),
+            queue: /** @type {import('../core/summarizer-queue.js').SummarizerQueue} */ (
+                summarizerQueue
+            ),
+            dispatch: /** @type {import('../core/summarizer-request.js').SummarizerDispatch} */ (
+                summarizerDispatch
+            ).call,
+            withRun: /** @type {import('../core/summarizer-usage.js').UsageLedger} */ (usageLedger)
+                .withRun,
+        });
         handleRegenerationResult(result);
     } finally {
         btn.prop('disabled', false).removeClass('fa-spinner fa-spin').addClass('fa-rotate-right');

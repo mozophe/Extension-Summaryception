@@ -1,6 +1,6 @@
 import { INTERNAL_MAX_LAYER_DEPTH } from '../foundation/constants.js';
 import { warn } from '../foundation/logger.js';
-import { getEffectiveMemoryUsage } from './memory-budget.js';
+import { buildInjection, measureInjection } from './memory-injection.js';
 import { LAYER_HARD_MAX_RATIO, LAYER_MIN_RATIO } from './token-budget.js';
 
 const MIN_PROMOTION_MERGE_COUNT = 3;
@@ -9,6 +9,8 @@ const LAYER0_INITIAL_BUDGET_RATIO = 0.6;
 const LAYER0_DEEP_BUDGET_RATIO = 0.5;
 const LAYER1_BUDGET_RATIO = 0.3;
 const DEEP_LAYER_BUDGET_RATIO = 0.2;
+// The floor keeps Layer 0 from draining toward empty: injected memory below
+// steady state silently truncates.
 const LAYER0_PROMOTION_RETENTION_FLOOR_RATIO = 0.4;
 
 /**
@@ -49,7 +51,7 @@ async function buildLayerMemoryQuotas(store, settings) {
         return [];
     }
 
-    const usage = await getEffectiveMemoryUsage(store.layers, settings);
+    const usage = await measureInjection(buildInjection(store.layers, settings));
     const layerTokens = getTokenCountsByLayer(usage);
     const hasDeepLayers = active.some((layer) => layer.layerIndex >= 2);
     const deepLayerTokens = getDeepLayerTokenCount(active, layerTokens);
@@ -87,9 +89,6 @@ function getTokenCountsByLayer(usage) {
     const tokens = new Map();
     for (const part of usage.layers) {
         tokens.set(part.layerIndex, part.count);
-    }
-    if (usage.state) {
-        tokens.set(0, (tokens.get(0) || 0) + usage.state.count);
     }
     return tokens;
 }
@@ -236,7 +235,7 @@ async function wouldViolateLayer0RetentionFloor({
     }
 
     const projectedLayers = buildHypotheticalLayersAfterPromotion(layers, 0, mergeCount);
-    const usage = await getEffectiveMemoryUsage(projectedLayers, settings);
+    const usage = await measureInjection(buildInjection(projectedLayers, settings));
     const projectedTokens = getTokenCountsByLayer(usage).get(0) || 0;
     const floor = Math.floor(quota * LAYER0_PROMOTION_RETENTION_FLOOR_RATIO);
     return projectedTokens < floor;

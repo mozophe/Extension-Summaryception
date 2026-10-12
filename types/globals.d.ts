@@ -44,6 +44,47 @@ interface SummaryceptionSnippet {
     regenerated?: boolean;
 }
 
+interface SummaryceptionContinuityStep {
+    current: number;
+    max: number;
+}
+
+interface SummaryceptionContinuityBond {
+    bond: number;
+    sparks: number;
+    grudge: number;
+}
+
+interface SummaryceptionAgenda {
+    task: string;
+    step: SummaryceptionContinuityStep;
+    status: string;
+}
+
+interface SummaryceptionContinuityPhysics {
+    location: string;
+    environment: string;
+    posture_and_position: string;
+    contact_points: string;
+    clothing_state: string;
+}
+
+interface SummaryceptionContinuityFlags {
+    positive_interaction: boolean;
+    slight: boolean;
+    insult: boolean;
+    betrayal: boolean;
+    apology: boolean;
+}
+
+interface SummaryceptionContinuityState {
+    turn_count: number;
+    bonds: Record<string, SummaryceptionContinuityBond>;
+    agendas: Record<string, SummaryceptionAgenda>;
+    gm_notes: string[];
+    physics: SummaryceptionContinuityPhysics;
+}
+
 interface SummaryceptionStore {
     layers: SummaryceptionSnippet[][];
     ghostedMessageIds: string[];
@@ -53,6 +94,7 @@ interface SummaryceptionStore {
 interface ExtensionSettings {
     enabled: boolean;
     autoPaused: boolean;
+    continuityEnabled: boolean;
     configMode: string;
     uiMode: string;
     memoryMode: string;
@@ -60,13 +102,6 @@ interface ExtensionSettings {
     customMemoryPosition: string;
     customMemoryRole: string;
     customMemoryDepth: number;
-    injectCurrentState: boolean;
-    stateCatDateTime: boolean;
-    stateCatBonds: boolean;
-    stateCatChekhov: boolean;
-    stateCatGmNotes: boolean;
-    stateCatInventory: boolean;
-    stateCatLocation: boolean;
     minSummaryTurns: number;
     maxSummaryTurns: number;
     layer0SummaryTokenTarget: number;
@@ -89,6 +124,10 @@ interface ExtensionSettings {
     promotionUserPrompt: string;
     promotionRepairPromptPreset: string;
     promotionRepairPrompt: string;
+    auditorSystemPromptPreset: string;
+    auditorSystemPrompt: string;
+    auditorPromptPreset: string;
+    auditorUserPrompt: string;
     promptPreset: string;
     applyRegexScripts: boolean;
     promotionPromptPreset: string;
@@ -101,6 +140,8 @@ interface ExtensionSettings {
     traceMode: boolean;
     promptInputLogMode: boolean;
     promptOutputLogMode: boolean;
+    continuityStateLogMode: boolean;
+    continuityStateLogFullMode: boolean;
     connectionSource: string;
     summarizerResponseLength: number;
     connectionProfileId: string;
@@ -113,6 +154,10 @@ interface ExtensionSettings {
     fallbackSummarizerResponseLength: number;
     fallbackConnectionProfileId: string;
     fallbackRequestTimeoutSeconds: number;
+    auditorConnectionSource: string;
+    auditorSummarizerResponseLength: number;
+    auditorConnectionProfileId: string;
+    auditorRequestTimeoutSeconds: number;
 }
 
 interface GenerateRawMessage {
@@ -169,7 +214,6 @@ interface ConnectionProvider {
     /** Whether generate() forwards an AbortSignal (timeouts genuinely cancel). */
     cancellable: boolean;
     generate(params: ConnectionGenerateParams): Promise<string>;
-    displayName(settings: ExtensionSettings): string;
 }
 
 interface SillyTavernPromptManager {
@@ -193,6 +237,8 @@ interface SillyTavernStreamingProcessor {
 
 interface SillyTavernContext {
     chat: ChatMessage[];
+    /** Active group chat id; absent or null in solo chats. */
+    groupId?: string | null;
     extensionSettings: Record<string, ExtensionSettings>;
     addOneMessage?: (message: ChatMessage, options?: Record<string, unknown>) => unknown;
     updateViewMessageIds?: (startIndex?: number | null) => void;

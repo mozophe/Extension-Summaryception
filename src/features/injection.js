@@ -6,106 +6,112 @@ import {
     MODULE_NAME,
 } from '../foundation/constants.js';
 import { registerMacro, setExtensionPrompt } from '../foundation/context.js';
-import { getChatStore, getEffectiveSettings } from '../foundation/state.js';
+import { getChatStore } from '../foundation/chat-store.js';
+import { getEffectiveSettings } from '../foundation/settings.js';
 import { debug, isDebugEnabled, warn } from '../foundation/logger.js';
-import { buildEffectiveMemoryText } from '../core/memory-budget.js';
-import { isPromptMutationFrozen } from '../core/summarizer-commit.js';
+import { buildInjection } from '../core/memory-injection.js';
 import { countTextTokens, formatTokenCount } from '../core/token-count.js';
-
-// ─── Core: Assemble Full Summary Block ──────────────────────────────
-
-/**
- * @returns {string} The assembled summary block, or '' if no snippets exist
- */
-export function assembleSummaryBlock() {
-    const s = getEffectiveSettings();
-    const store = getChatStore();
-    return buildEffectiveMemoryText(store.layers, s);
-}
 
 // ─── Injection via setExtensionPrompt ────────────────────────────────
 
-let _lastInjectionKey = '';
-let _activeInjectionSnapshot = null;
-let _activeInjectionOptions = null;
-let _memoryMacroRegistered = false;
-
-export const MEMORY_MACRO_NAME = 'summaryception_memory';
+const MEMORY_MACRO_NAME = 'summaryception_memory';
 
 /**
- * @param {{ logMemoryStatus?: boolean }} [options] - Diagnostic logging options
- * @returns {void}
+ * Build the Memory Injection writer: one instance owns the prompt slot's
+ * last-written key, its committed snapshot, and the macro registration flag.
+ * The composition root constructs it once (ADR-0031); a test builds its own
+ * instance instead of resetting module state.
+ * @returns {{
+ *   update: (options?: { logMemoryStatus?: boolean }) => void,
+ *   reassert: () => void,
+ *   registerMacro: () => Promise<boolean>,
+ *   options: (settings?: ExtensionSettings) => { position: number, depth: number, scan: boolean, role: number },
+ * }}
  */
-export function updateInjection({ logMemoryStatus = false } = {}) {
-    try {
-        if (isPromptMutationFrozen()) {
-            return;
+export function createMemoryInjectionWriter() {
+    let lastInjectionKey = '';
+    let activeInjectionSnapshot = null;
+    let activeInjectionOptions = null;
+    let memoryMacroRegistered = false;
+
+    /**
+     * @param {{ logMemoryStatus?: boolean }} [updateOptions] - Diagnostic logging options
+     * @returns {void}
+     */
+    function update({ logMemoryStatus = false } = {}) {
+        try {
+            const store = getChatStore();
+            const settings = getEffectiveSettings();
+            const nextInjection = buildDirectInjectionText(settings);
+            const nextOptions = getMemoryInjectionOptions(settings);
+            activeInjectionSnapshot = nextInjection;
+            activeInjectionOptions = nextOptions;
+
+            const nextKey = getInjectionKey(nextInjection, nextOptions);
+            if (nextKey === lastInjectionKey) {
+                return;
+            }
+
+            setExtensionPrompt(MODULE_NAME, nextInjection, nextOptions);
+            lastInjectionKey = nextKey;
+
+            if (logMemoryStatus) {
+                queueMemoryStatusLog(nextInjection, store.layers);
+            }
+        } catch (e) {
+            warn('memory injection update error:', e);
         }
-
-        const store = getChatStore();
-        const settings = getEffectiveSettings();
-        const nextInjection = buildDirectInjectionText(settings);
-        const nextOptions = getMemoryInjectionOptions(settings);
-        _activeInjectionSnapshot = nextInjection;
-        _activeInjectionOptions = nextOptions;
-
-        const nextKey = getInjectionKey(nextInjection, nextOptions);
-        if (nextKey === _lastInjectionKey) {
-            return;
-        }
-
-        setExtensionPrompt(MODULE_NAME, nextInjection, nextOptions);
-        _lastInjectionKey = nextKey;
-
-        if (logMemoryStatus) {
-            queueMemoryStatusLog(nextInjection, store.layers);
-        }
-    } catch (e) {
-        warn('updateInjection error:', e);
-    }
-}
-
-/**
- * Reapply the last committed injection snapshot without reading pending changes.
- * @returns {void}
- */
-export function reassertInjectionSnapshot() {
-    try {
-        if (_activeInjectionSnapshot === null) {
-            _activeInjectionSnapshot = buildDirectInjectionText();
-        }
-        if (_activeInjectionOptions === null) {
-            _activeInjectionOptions = getMemoryInjectionOptions();
-        }
-
-        setExtensionPrompt(MODULE_NAME, _activeInjectionSnapshot, _activeInjectionOptions);
-        _lastInjectionKey = getInjectionKey(_activeInjectionSnapshot, _activeInjectionOptions);
-    } catch (e) {
-        warn('reassertInjectionSnapshot error:', e);
-    }
-}
-
-/**
- * @returns {Promise<boolean>} Whether ST accepted the macro registration.
- */
-export async function registerSummaryceptionMemoryMacro() {
-    if (_memoryMacroRegistered) {
-        return true;
     }
 
-    _memoryMacroRegistered = await registerMacro(
-        MEMORY_MACRO_NAME,
-        () => buildEnabledMemoryText(),
-        'Returns the current Summaryception memory block.',
-    );
-    return _memoryMacroRegistered;
+    /**
+     * Reapply the last committed injection snapshot without reading pending changes.
+     * @returns {void}
+     */
+    function reassert() {
+        try {
+            if (activeInjectionSnapshot === null) {
+                activeInjectionSnapshot = buildDirectInjectionText();
+            }
+            if (activeInjectionOptions === null) {
+                activeInjectionOptions = getMemoryInjectionOptions();
+            }
+
+            setExtensionPrompt(MODULE_NAME, activeInjectionSnapshot, activeInjectionOptions);
+            lastInjectionKey = getInjectionKey(activeInjectionSnapshot, activeInjectionOptions);
+        } catch (e) {
+            warn('memory injection reassert error:', e);
+        }
+    }
+
+    /**
+     * @returns {Promise<boolean>} Whether ST accepted the macro registration.
+     */
+    async function registerMemoryMacro() {
+        if (memoryMacroRegistered) {
+            return true;
+        }
+
+        memoryMacroRegistered = await registerMacro(
+            MEMORY_MACRO_NAME,
+            () => buildEnabledMemoryText(),
+            'Returns the current Summaryception memory block.',
+        );
+        return memoryMacroRegistered;
+    }
+
+    return {
+        update,
+        reassert,
+        registerMacro: registerMemoryMacro,
+        options: getMemoryInjectionOptions,
+    };
 }
 
 /**
  * @param {ExtensionSettings} [settings]
  * @returns {{ position: number, depth: number, scan: boolean, role: number }}
  */
-export function getMemoryInjectionOptions(settings = getEffectiveSettings()) {
+function getMemoryInjectionOptions(settings = getEffectiveSettings()) {
     if (settings.customMemoryPosition === MEMORY_POSITIONS.MACRO_ONLY) {
         return {
             position: EXTENSION_PROMPT_POSITIONS.NONE,
@@ -143,7 +149,7 @@ function buildEnabledMemoryText(settings = getEffectiveSettings()) {
     if (!settings.enabled) {
         return '';
     }
-    return assembleSummaryBlock() || '';
+    return buildInjection(getChatStore().layers, settings).text;
 }
 
 function mapMemoryPosition(position) {

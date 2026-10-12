@@ -30,6 +30,14 @@ export function getChatMetadata() {
 }
 
 /**
+ * Active group chat id; empty in solo chats. Presence alone marks a group.
+ * @returns {string | undefined}
+ */
+export function getGroupId() {
+    return getContext().groupId ?? undefined;
+}
+
+/**
  * Cross-chat settings root.
  * @returns {Record<string, ExtensionSettings>}
  */
@@ -241,6 +249,16 @@ export function getStreamingProcessor() {
 }
 
 /**
+ * Read the host body[data-generating] liveness flag. ST keeps the flag set
+ * past GENERATION_ENDED until activateSendButtons clears it, so a true here
+ * means the teardown window is still running.
+ * @returns {boolean}
+ */
+export function isGeneratingFlagSet() {
+    return globalThis.document?.body?.dataset?.generating === 'true';
+}
+
+/**
  * @returns {boolean}
  */
 export function isSendButtonInStopMode() {
@@ -305,6 +323,7 @@ function hasStopButtonMarker(element) {
 /**
  * SillyTavern versions expose eventTypes or event_types; read both.
  * @param {SillyTavernContext} ctx
+ * @returns {object | null} Event types registry, or null when neither is present.
  */
 function getContextEventTypes(ctx) {
     return ctx.eventTypes || ctx.event_types || null;

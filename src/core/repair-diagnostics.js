@@ -1,4 +1,4 @@
-import { computeSentenceCap, computeStateLineCap } from './token-budget.js';
+import { computeSentenceCap } from './token-budget.js';
 
 const REDUCTION_GUIDANCE = [
     { amount: 0.8, label: 'about four-fifths' },
@@ -15,7 +15,7 @@ const REDUCTION_GUIDANCE = [
 /**
  * @param {object} p
  * @param {string} [p.scope] - Prompt family or output contract name
- * @param {number} p.totalTokens - Total draft tokens, for diagnostics only
+ * @param {number} [p.totalTokens] - Total draft tokens, for diagnostics only
  * @param {Array<object>} p.sections - Section size specifications
  * @param {string} [p.rejectedDraft] - Full rejected draft text
  * @returns {object}
@@ -38,7 +38,6 @@ export function buildRepairDiagnostics({
 }
 
 /**
- * Describe how much text should be removed to reach a soft target.
  * @param {number} actualTokens
  * @param {number} targetTokens
  * @returns {string}
@@ -97,7 +96,7 @@ export function formatRepairDiagnostics(
 /**
  * Build countable repair feedback for output above a hard maximum.
  * @param {object} diagnostics
- * @param {{ sourceStateKeyCount?: number, targetTokens?: number, layer?: 'l0' | 'l1' | 'l2' }} [sourceBudget]
+ * @param {{ targetTokens?: number, layer?: 'l0' | 'l1' | 'l2' }} [sourceBudget]
  * @returns {string}
  */
 export function buildStructuralRepairFeedback(diagnostics = {}, sourceBudget = {}) {
@@ -109,20 +108,12 @@ export function buildStructuralRepairFeedback(diagnostics = {}, sourceBudget = {
             continue;
         }
         const text = String(violation.text || '');
-        if (violation.id === 'state') {
-            const actual = countStateLines(text);
-            const cap = computeStateLineCap(sourceBudget.sourceStateKeyCount);
-            if (actual > cap) {
-                lines.push(
-                    `Your [STATE] had ${actual} lines; maximum ${cap}. Remove the ${actual - cap} least-durable keys.`,
-                );
-            }
-        } else if (violation.id === 'narrative') {
+        if (violation.id === 'narrative') {
             const actual = countSentences(text);
             const cap = computeSentenceCap(sourceBudget.layer ?? 'l0', sourceBudget.targetTokens);
             if (actual > cap) {
                 lines.push(
-                    `Your [NARRATIVE] had ${actual} sentences; maximum ${cap}. Merge or drop the ${actual - cap} least-important.`,
+                    `Your <narrative> section had ${actual} sentences; maximum ${cap}. Merge or drop the ${actual - cap} least-important.`,
                 );
             }
         }
@@ -140,13 +131,6 @@ export function countSentences(text) {
     return trimmed ? trimmed.split(/[.!?]+\s+/).filter(Boolean).length : 0;
 }
 
-function countStateLines(text) {
-    return String(text || '')
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && /.+:.+/.test(line)).length;
-}
-
 function normalizeCount(value) {
     const count = Number(value);
     return Number.isFinite(count) && count > 0 ? Math.round(count) : 0;
@@ -159,7 +143,10 @@ function normalizeRepairSection(section) {
     const minimumTokens = normalizeCount(section.minimumTokens);
     const tooShort = minimumTokens > 0 && actualTokens < minimumTokens;
     const tooLong = hardMaxTokens > 0 && actualTokens > hardMaxTokens;
-    const violation = tooShort || tooLong;
+    // Callers with no token contract (e.g. section-level verdicts) reject a
+    // section explicitly instead of through bounds.
+    const explicitlyRejected = section.violation === true;
+    const violation = tooShort || tooLong || explicitlyRejected;
     return {
         ...resolveSectionIdentity(section),
         actualTokens,
@@ -167,7 +154,13 @@ function normalizeRepairSection(section) {
         hardMaxTokens,
         minimumTokens,
         violation,
-        reason: tooShort ? 'below-minimum' : tooLong ? 'above-hard-maximum' : '',
+        reason: tooShort
+            ? 'below-minimum'
+            : tooLong
+              ? 'above-hard-maximum'
+              : explicitlyRejected
+                ? 'section-rejected'
+                : '',
         reductionGuidance:
             tooLong && targetTokens > 0 ? getReductionGuidance(actualTokens, targetTokens) : '',
         text: String(section.text || ''),

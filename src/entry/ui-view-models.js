@@ -1,10 +1,11 @@
+import { OPERATION_MODES, UI_MODES } from '../foundation/constants.js';
 import { formatTokenValue } from '../core/token-count.js';
 
 /**
  * @typedef {object} ContextBudgetTokenPart
- * @property {string} label - Segment label for budget displays.
+ * @property {string} label - Display string as shown in the budget card.
  * @property {string} kind - Segment category used for styling and ordering.
- * @property {number} count - Token count for the segment.
+ * @property {number} count - Token count for the segment, measured or estimated.
  * @property {boolean} estimated - Whether the count came from fallback estimation.
  */
 
@@ -82,7 +83,7 @@ export function formatBudgetTokenLabel(count, estimated = false) {
 
 /**
  * @param {import('../core/summarization-routes.js').AutoWorkReadModel | null} work
- * @param {ReturnType<import('../foundation/state.js').getEffectiveSettings>} s
+ * @param {ReturnType<import('../foundation/settings.js').getEffectiveSettings>} s
  * @returns {{ queuedTokens: number, queuedEstimated: boolean, triggerTokens: number, label: string }}
  */
 export function buildTriggerGaugeModel(work, s) {
@@ -91,6 +92,30 @@ export function buildTriggerGaugeModel(work, s) {
         queuedEstimated: Boolean(work?.queuedEstimated),
         triggerTokens: normalizeBudgetCount(s.queuedTokenBudget),
         label: 'Summarize at Recent + Queued',
+    };
+}
+
+/**
+ * Mode-derived chrome for one settings render: the Off banner, the visible
+ * complexity panel, and the controls the Operation Mode gates. The Off banner
+ * keeps the remembered panel visible so configuration stays editable while
+ * the extension is off.
+ * @param {{ mode: string, complexity: string, enabled: boolean }} mode - Operation Mode verdict.
+ * @param {{ autoPaused?: boolean }} [options] - Pause Latch state, which only swaps the run controls.
+ * @returns {{ modeLabel: string, off: boolean, easyPanel: boolean, advancedPanel: boolean, continuitySection: boolean, stop: boolean, resume: boolean }}
+ */
+export function buildEnabledContentModel(mode, { autoPaused = false } = {}) {
+    const off = mode.mode !== OPERATION_MODES.ON;
+    const advanced = mode.complexity === UI_MODES.ADVANCED;
+    const paused = Boolean(autoPaused);
+    return {
+        modeLabel: off ? 'Off' : advanced ? 'Advanced' : 'Easy',
+        off,
+        easyPanel: !advanced,
+        advancedPanel: advanced,
+        continuitySection: !off && advanced,
+        stop: !off && !paused,
+        resume: !off && paused,
     };
 }
 

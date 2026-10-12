@@ -1,9 +1,7 @@
 import { defaultSettings } from '../foundation/constants.js';
-import { getActiveLineCap } from '../foundation/state-categories.js';
-import { countTextTokens } from './token-count.js';
-import { parseStateBlock } from './summarizer-state.js';
 
-export const STATE_KEY_CEILING = 12;
+// One source of per-layer size policy: Layer 0 output bounds, promotion
+// quotas, and the repair ceiling all derive from these ratios.
 export const TOKENS_PER_SENTENCE = 35;
 export const LAYER_MIN_RATIO = { l0: 0.4, l1: 0.4, l2: 0.3 };
 export const LAYER_HARD_MAX_RATIO = { l0: 1.5, l1: 1.75, l2: 1.5 };
@@ -17,20 +15,7 @@ export const LAYER_SAFETY_MULTIPLIER = { l0: 0.85, l1: 0.5, l2: 0.5 };
 export const SUBSTANTIAL_SOURCE_TOKEN_THRESHOLD = 500;
 
 /**
- * Maximum number of `[STATE]` key:value lines the model should emit.
- * @param {number | undefined} sourceStateKeyCount
- * @returns {number}
- */
-export function computeStateLineCap(sourceStateKeyCount) {
-    const count = Number(sourceStateKeyCount);
-    if (!Number.isFinite(count) || count <= 0) {
-        return STATE_KEY_CEILING;
-    }
-    return Math.min(count, STATE_KEY_CEILING);
-}
-
-/**
- * Integer sentence cap for a layer, anchored to slider target T.
+ * Integer sentence cap for a layer, derived from the configured token target.
  * @param {'l0' | 'l1' | 'l2' | number} layer
  * @param {number | undefined} targetTokens
  * @returns {number}
@@ -92,42 +77,19 @@ export function buildSizeConstraintsBlock({ wrapperTag, targetLine, repairLine =
 /**
  * Build the Layer 0 model-countable source budget block.
  * @param {object} p
- * @param {number} p.sourceStateTokens
- * @param {number} p.sourceStateKeyCount
  * @param {number} p.targetTokens
- * @param {ExtensionSettings} p.settings
  * @returns {string}
  */
-export function buildLayer0BudgetHint({
-    sourceStateTokens,
-    sourceStateKeyCount,
-    targetTokens,
-    settings,
-}) {
+export function buildLayer0BudgetHint({ targetTokens }) {
     const sentenceCap = computeSentenceCap('l0', targetTokens);
-    const hasState = Number(sourceStateTokens) > 0;
-    const stateLineCap = hasState
-        ? computeStateLineCap(sourceStateKeyCount)
-        : getActiveLineCap(settings, STATE_KEY_CEILING);
-    const existingStateLine = hasState
-        ? `Existing [STATE]: ${sourceStateKeyCount} keys.`
-        : 'No existing [STATE] yet; build the first snapshot.';
-
     return [
         '<summaryception_source_budget>',
         'Compress the source passage hard.',
         buildSizeTargetLine({
-            label: '[NARRATIVE]',
+            label: '<narrative>',
             verb: 'write',
             cap: sentenceCap,
             unit: 'sentences',
-        }),
-        existingStateLine,
-        buildSizeTargetLine({
-            label: '[STATE]',
-            verb: 'rewrite the full snapshot;',
-            cap: stateLineCap,
-            unit: 'lines',
         }),
         '</summaryception_source_budget>',
     ].join('\n');
@@ -135,14 +97,14 @@ export function buildLayer0BudgetHint({
 
 /**
  * Resolve the source-side token count for a summarizer call.
- * @param {{ sourceTokensBefore?: number, regexStats?: { finalTokens?: number }, memoryTokensBefore?: number }} [metadata]
+ * @param {import('./call-profile.js').CallProvenance} [provenance]
  * @returns {number}
  */
-export function getSourceTokenCount(metadata = {}) {
+export function getSourceTokenCount(provenance = {}) {
     const candidates = [
-        metadata.sourceTokensBefore,
-        metadata.regexStats?.finalTokens,
-        metadata.memoryTokensBefore,
+        provenance.sourceTokensBefore,
+        provenance.regexStats?.finalTokens,
+        provenance.memoryTokensBefore,
     ];
     for (const value of candidates) {
         const count = Number(value);
@@ -153,29 +115,6 @@ export function getSourceTokenCount(metadata = {}) {
     return 0;
 }
 
-/**
- * Compute narrative and prior-state token counts for a Layer 0 call.
- * @param {object} p
- * @param {number} p.sourceNarrativeTokens
- * @param {string} p.sourceStateText
- * @returns {Promise<{ narrativeTokens: number, stateTokens: number, stateKeyCount: number }>}
- */
-export async function countLayer0SourceBudget({ sourceNarrativeTokens, sourceStateText }) {
-    const narrativeValue = Number(sourceNarrativeTokens);
-    const narrativeTokens = Number.isFinite(narrativeValue) ? narrativeValue : 0;
-    const stateText = String(sourceStateText || '').trim();
-    if (!stateText) {
-        return { narrativeTokens, stateTokens: 0, stateKeyCount: 0 };
-    }
-
-    const stateTokens = (await countTextTokens(stateText)).count;
-    return {
-        narrativeTokens,
-        stateTokens,
-        stateKeyCount: Object.keys(parseStateBlock(stateText).state).length,
-    };
-}
-
 /** Overhead of the surrounding SillyTavern prompt in the main-request preview. */
 const PREVIEW_BASE_PROMPT_OVERHEAD = 2000;
 /** Fixed allowance for deep-layer snippets in the L1 preview line. */
@@ -183,7 +122,7 @@ const PREVIEW_DEEP_MEMORY_OVERHEAD = 1000;
 
 /**
  * Estimate the injected-context sizes shown by the settings preview panel.
- * @param {ReturnType<typeof import('../foundation/state.js').getSettings>} settings
+ * @param {ReturnType<typeof import('../foundation/settings.js').getSettings>} settings
  * @returns {{ rawChatMin: number, rawChatMax: number, mainMin: number, mainMax: number, l0Typical: number, l0Max: number, l1Total: number }}
  */
 export function estimateContextPreview(settings) {

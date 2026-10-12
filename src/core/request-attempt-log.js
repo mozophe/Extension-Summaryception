@@ -5,7 +5,6 @@ import {
     isPromptOutputLogEnabled,
     serializeError,
 } from '../foundation/logger.js';
-import { formatPromotionLabel, formatRange } from './summarizer-usage.js';
 
 /**
  * @returns {{ status: string, cleanedResult: string, error: Error | null }}
@@ -20,40 +19,32 @@ export function createAttemptLogState() {
 
 /**
  * @param {{ status: string, cleanedResult: string, error: Error | null }} logState - Mutable log state
- * @param {{ success: boolean, result?: string, cleanedResult?: string, aborted?: boolean, failureStatus?: string, error: Error }} result - Attempt outcome
+ * @param {import('./request-series.js').AttemptResult} result - Attempt outcome
  * @returns {void}
  */
 export function updateAttemptLogState(logState, result) {
     logState.status = getAttemptLogStatus(result);
-    logState.cleanedResult = result.cleanedResult || result.result || '';
-    logState.error = result.success ? null : result.error;
+    logState.cleanedResult = result.text || '';
+    logState.error = result.status === 'completed' ? null : result.error || null;
 }
 
 function getAttemptLogStatus(result) {
-    if (result.success) {
+    if (result.status === 'completed') {
         return 'success';
     }
-    if (result.aborted) {
+    if (result.status === 'aborted') {
         return 'aborted';
     }
-    return result.failureStatus || 'failed';
-}
-
-/**
- * @param {import('./summarizer-usage.js').SummarizerCallMetadata} metadata
- * @returns {string}
- */
-export function describePromptLogCall(metadata = {}) {
-    if (metadata.kind === 'layer0') {
-        return `L0 turns ${formatRange(metadata.sourceRange)}`;
+    if (result.status === 'rejected') {
+        return result.reason || 'failed';
     }
-    if (metadata.kind === 'promotion') {
-        return `promotion ${formatPromotionLabel(metadata, '->')}`;
+    if (result.status === 'hard-failover') {
+        return 'hard-failover';
     }
-    if (metadata.kind === 'regenerate') {
-        return `regenerate turns ${formatRange(metadata.sourceRange)}`;
+    if (result.status === 'guard-stopped') {
+        return 'easy-context-guard';
     }
-    return metadata.kind || 'summarizer';
+    return 'failed';
 }
 
 /**

@@ -16,20 +16,22 @@
 ## Memory
 
 - Balanced and Prefix Cache are the only memory modes. Stored legacy Append Only normalizes to Prefix Cache on load.
-- Layer 0 converts turns outside the verbatim window into narrative and a rolling state snapshot.
+- Layer 0 converts turns outside the verbatim window into a `<narrative>` envelope plus a trailing `current_date_time` scene-time line.
+- A snippet stores the raw enveloped response; the reader strips the envelope or the legacy `[NARRATIVE]` header of snippets stored before it.
 - A promotion overflow drain stops after a fixed number of consecutive promotion failures. The failure counter resets on success.
 - One drain driver owns Promotion overflow clearing; commit applies one merge and never re-drains.
 - The drain asks the Foreground Gate before and after every attempt.
 - Auto cycles tolerate one consecutive promotion failure; manual runs tolerate three.
-- Promotion uses the final state snapshot in the promoted span.
+- Promotion carries the last known scene time from the promoted span.
 - Generated output outside its layer bounds triggers section-aware repair.
 - Repair retries only the failed section.
 - Narrative dates omit years, ISO syntax, and clock lead-ins.
-- Re-derive the state weekday from the ISO date in UTC.
+- Re-derive the current_date_time weekday from the ISO date in UTC.
 - Stable message identifiers own snippet provenance and hiding.
 - Resolve identifiers to current chat indexes only for host commands and planning.
 - Do not infer ownership from old array positions.
-- Ghosting receives the notify adapter through its options. The notify adapter enters core only through explicit arguments; entry wiring creates and distributes the instance.
+- Injection text and its token cost come from one Memory Injection read model (src/core/memory-injection.js). Build once and measure the built injection; never re-derive the text to count it.
+- Ghosting receives the notify adapter through its options. The notify adapter, the Summarizer Dispatch, and the Usage Ledger enter core only through explicit arguments; entry wiring creates and distributes the instances.
 - Unhide only store-owned messages.
 - Clear unhides the chat and removes extension-owned chat data.
 - Standard placements use the host extension prompt.
@@ -49,6 +51,7 @@
 - Dry runs may mark the payload or a separate argument.
 - A broken-prefix report includes the complete first changed block.
 - Keep structural header patterns in the shared header module. Do not define local copies.
+- The `<declined>` marker is the sanctioned refusal channel; the Refusal Guard classifies Refusals deterministically and a classified Refusal is a retryable rejection, never stored prose.
 
 ## Connection
 
@@ -62,6 +65,7 @@
 - Timeouts on uncancellable adapters are non-retryable; adapters declare `cancellable`.
 - Map all adapter failures through one shared error wrapper. Do not rebuild status or retryable per provider.
 - Build the request series context once at entry and thread it down. Per-route fallback flags and retry budgets stay per-route.
+- Attempt-path modules never read settings; the resolved Call Profile is the call's frozen policy (ADR-0023).
 
 ## Run Control
 
@@ -78,6 +82,8 @@
 - Manual run callbacks and the abort signal pass as an explicit argument. Never carry them on the task object.
 - A manual run needs a numeric target boundary. Reject the run when the route plan omits it.
 - Automatic work must not mutate the prompt during generation.
+- Every prompt mutation crosses the Foreground Gate; renderers render, they never self-check the freeze.
+- Pre-freeze prompt steps cross beginGeneration's beforeFreeze hook; entry sequencing enforces no ordering.
 - Loaded-chat reconciliation runs at the app-ready signal: normalize keys, update injection, re-apply ghosting.
 - Chat-changed re-runs reconciliation when the store still holds the empty default.
 - Recover stale prompt freezes at the start of an automatic cycle.
@@ -92,14 +98,15 @@
 - Status panels read the auto work read model; entry renders scalars.
 - Sliders save on input. Text and numeric controls save on change or blur.
 - Operating mode gates runtime behavior. Complexity mode selects the visible panel.
+- Mode transitions cross the Operation Mode module (src/foundation/operation-mode.js). Nothing writes uiMode, configMode, or enabled by hand.
 - Bind plain settings through the data-attribute engine. Hand-bind only controls with special semantics.
-- Prompt Profiles bind through src/entry/ui-prompts.js; defaults reset lives in foundation/state.js resetSettingsToDefaults.
+- Prompt Profiles bind through src/entry/ui-prompts.js; defaults reset lives in foundation/settings.js resetSettingsToDefaults.
 - One layer-label helper serves status panel, snippet browser, and slash commands.
 - Keep the selected panel editable while the extension is Off.
 - Show the Off banner beside the selected panel.
 - Open the Status tab on every startup.
 - A state category toggle needs both write handling and render synchronization.
-- Feature modules return structured outcomes and emit notify events; entry owns all notice text, display duration, and update cadence (ADR-0004).
+- Feature modules return structured outcomes and emit notify events; entry owns all notice text, display duration, and update cadence (ADR-0019).
 - Bind toast action buttons with delegated document clicks. Toast content does not exist at bind time.
 - Keep user-facing text out of feature modules.
 - Keep the first view focused on status, activity, and required action.

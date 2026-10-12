@@ -9,16 +9,24 @@ vi.mock('../src/core/request-runner.js', () => ({
         }
     },
 }));
-vi.mock('../src/foundation/state.js', () => ({
+vi.mock('../src/foundation/settings.js', () => ({
     getEffectiveSettings: vi.fn(() => ({})),
 }));
-vi.mock('../src/core/summarizer-pipeline.js', () => ({
-    buildSummarizerPipelineInput: vi.fn(async (input) => ({ ...input })),
-    traceSummarizerInputTokens: vi.fn(async () => {}),
-}));
+vi.mock('../src/core/summarizer-pipeline.js', async () => {
+    const { resolveCallProfile } = await import('../src/core/call-profile.js');
+    return {
+        buildSummarizerPipelineInput: vi.fn(async (input) => ({
+            ...input,
+            profile: resolveCallProfile(input.settings ?? {}, input.metadata ?? {}),
+        })),
+        traceSummarizerInputTokens: vi.fn(async () => {}),
+    };
+});
 
-import { abortAllRequests, callSummarizer, isRequestLive } from '../src/core/summarizer-request.js';
 import { SummarizerQueue } from '../src/core/summarizer-queue.js';
+import { makeSummarizerDispatch, makeUsageLedger } from './test-helpers.js';
+
+const usageLedger = await makeUsageLedger();
 
 /** Build a queue with injected fake dependencies. The queue needs no host context. */
 function makeGateQueue(drainOneCycle, { isRequestLive = () => false } = {}) {
@@ -27,7 +35,7 @@ function makeGateQueue(drainOneCycle, { isRequestLive = () => false } = {}) {
         abortAllRequests: vi.fn(),
         isRequestLive: vi.fn(isRequestLive),
         refreshUi: vi.fn(),
-        withUsageRun: vi.fn(async (_label, work) => await work()),
+        withRun: usageLedger.withRun,
         yieldCycle: vi.fn(async () => {}),
     });
 }
@@ -45,6 +53,7 @@ describe('summarizer request registry', () => {
     });
 
     it('gives two concurrent requests their own abort signals', async () => {
+        const dispatch = await makeSummarizerDispatch();
         let releaseFirst;
         runnerMocks.run
             .mockImplementationOnce(
@@ -58,51 +67,56 @@ describe('summarizer request registry', () => {
             )
             .mockImplementationOnce(abortableRun);
 
-        const first = callSummarizer('story', 'context');
-        const second = callSummarizer('story', 'context');
+        const first = dispatch.call({ storyTxt: 'story', contextStr: 'context' });
+        const second = dispatch.call({ storyTxt: 'story', contextStr: 'context' });
         await vi.waitFor(() => expect(runnerMocks.run).toHaveBeenCalledTimes(2));
 
         const [firstSignal, secondSignal] = runnerMocks.run.mock.calls.map(([req]) => req.signal);
         expect(firstSignal).not.toBe(secondSignal);
-        expect(isRequestLive()).toBe(true);
+        expect(dispatch.isLive()).toBe(true);
 
         releaseFirst();
         await expect(first).resolves.toEqual({ status: 'completed', text: 'a' });
 
         // The settled request must neither clobber the registry nor touch the live one.
-        expect(isRequestLive()).toBe(true);
+        expect(dispatch.isLive()).toBe(true);
         expect(secondSignal.aborted).toBe(false);
 
-        abortAllRequests();
+        dispatch.abort();
         expect(secondSignal.aborted).toBe(true);
         await expect(second).resolves.toEqual({ status: 'aborted' });
-        expect(isRequestLive()).toBe(false);
+        expect(dispatch.isLive()).toBe(false);
     });
 
     it('aborts every live request signal at once', async () => {
+        const dispatch = await makeSummarizerDispatch();
         runnerMocks.run.mockImplementation(abortableRun);
 
-        const first = callSummarizer('story', 'context');
-        const second = callSummarizer('story', 'context');
+        const first = dispatch.call({ storyTxt: 'story', contextStr: 'context' });
+        const second = dispatch.call({ storyTxt: 'story', contextStr: 'context' });
         await vi.waitFor(() => expect(runnerMocks.run).toHaveBeenCalledTimes(2));
 
         const signals = runnerMocks.run.mock.calls.map(([req]) => req.signal);
         expect(signals[0].aborted).toBe(false);
         expect(signals[1].aborted).toBe(false);
 
-        abortAllRequests();
+        dispatch.abort();
 
         await expect(first).resolves.toEqual({ status: 'aborted' });
         await expect(second).resolves.toEqual({ status: 'aborted' });
-        expect(isRequestLive()).toBe(false);
+        expect(dispatch.isLive()).toBe(false);
     });
 
     it('reports no live request once both requests settle', async () => {
+        const dispatch = await makeSummarizerDispatch();
         runnerMocks.run.mockResolvedValue({ status: 'completed', text: 'done' });
 
-        await Promise.all([callSummarizer('story', 'context'), callSummarizer('story', 'context')]);
+        await Promise.all([
+            dispatch.call({ storyTxt: 'story', contextStr: 'context' }),
+            dispatch.call({ storyTxt: 'story', contextStr: 'context' }),
+        ]);
 
-        expect(isRequestLive()).toBe(false);
+        expect(dispatch.isLive()).toBe(false);
     });
 });
 

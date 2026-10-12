@@ -1,6 +1,6 @@
 import { MEMORY_MODES, TOAST_TITLE } from '../foundation/constants.js';
 import { error } from '../foundation/logger.js';
-import { getEffectiveSettings } from '../foundation/state.js';
+import { getEffectiveSettings } from '../foundation/settings.js';
 import {
     describeManualRun,
     ELASTIC_STRATEGIES,
@@ -8,60 +8,52 @@ import {
     resumeAutoSummarization,
     runManual,
 } from '../core/summarizer-engine.js';
-import { isBusy, stopSummarization } from '../core/summarizer-queue.js';
-import { updateInjection } from '../features/injection.js';
-import { updateUI } from './ui.js';
+import { refreshPreview, refreshUi } from '../foundation/refresh.js';
 import {
     clearManualProgressToast,
     confirmSlopBreaker,
     createManualProgressToast,
+    manualRunView,
     showBusySummaryToast,
-    showCatchupOutcome,
-    showSlopBreakerNoop,
-    showSlopBreakerOutcome,
+    showManualRunIdle,
     updateManualProgressToast,
 } from './ui-dialogs.js';
 
 /** @type {import('../core/summarizer-engine.js').ManualRunnerDeps} */
 let manualRunnerDeps;
-/** @type {import('../core/summarizer-engine.js').PauseLatchDeps} */
-let pauseLatchDeps;
 
 /**
- * Abort a manual summarization run from its progress toast.
  * @param {AbortController} controller
  * @returns {void}
  */
 function cancelManualRun(controller) {
     controller.abort();
-    stopSummarization();
+    manualRunnerDeps.queue.stop();
 }
 
 const MANUAL_RUN_BUSY_HTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Working...</span>';
 
 /**
- * Shared manual-run driver: busy button, abort/progress wiring, outcome
- * report, injection refresh, reload, and UI update. `run` receives the
- * engine options carrying the abort signal; returning undefined skips the
- * outcome report (nothing ran).
+ * Shared manual-run driver for both strategies. `run` receives the engine
+ * options carrying the abort signal; returning undefined skips the notice
+ * because nothing ran.
  * @param {object | null} $button jQuery-wrapped trigger button, disabled while running.
  * @param {string} idleHtml Button html restored after the run.
- * @param {{ run: (options: object) => Promise<object | undefined>, report: (outcome: object) => void, notify: import('../core/notify.js').NotifyAdapter }} ops
+ * @param {{ run: (options: object) => Promise<import('../core/run-outcome.js').ManualRunOutcome | undefined>, notify: import('../core/notify.js').NotifyAdapter, view: import('./ui-dialogs.js').ManualRunView }} ops
  * @returns {Promise<void>}
  */
-async function runManualSummarization($button, idleHtml, { run, report, notify }) {
+async function runManualSummarization($button, idleHtml, { run, notify, view }) {
     const controller = new AbortController();
     let progressToast = null;
     const options = {
         signal: controller.signal,
         notify,
         onStart: (progress) => {
-            progressToast = createManualProgressToast({
-                ...progress,
-                onCancel: () => cancelManualRun(controller),
-            });
+            progressToast = createManualProgressToast(progress, view, () =>
+                cancelManualRun(controller),
+            );
         },
-        onProgress: (progress) => updateManualProgressToast(progressToast, progress),
+        onProgress: (progress) => updateManualProgressToast(progressToast, progress, view),
     };
     if ($button) {
         $button.prop('disabled', true).html(MANUAL_RUN_BUSY_HTML);
@@ -80,17 +72,17 @@ async function runManualSummarization($button, idleHtml, { run, report, notify }
         if ($button) {
             $button.prop('disabled', false).html(idleHtml);
         }
-        updateUI();
+        refreshUi();
     }
     if (outcome !== undefined) {
-        report(outcome);
-        updateInjection();
+        view.notices[outcome.status]?.(outcome);
+        refreshPreview();
         reloadAfterManualRun(outcome);
     }
 }
 
 /**
- * Shared manual-run guard. Show the toast for the first failing check.
+ * Manual-run guard; the checks run in order and the first failure shows its toast.
  * @param {object} s Effective settings.
  * @returns {boolean} true when a manual run is allowed.
  */
@@ -99,7 +91,7 @@ function guardManualRun(s) {
         toastr.warning('Enable Summaryception first.');
         return false;
     }
-    if (isBusy()) {
+    if (manualRunnerDeps.queue.isBusy()) {
         showBusySummaryToast();
         return false;
     }
@@ -125,7 +117,7 @@ async function executeForceSummarize($button, notify) {
             run: async (options) => {
                 const preview = await describeManualRun(ELASTIC_STRATEGIES.FORCE);
                 if (!preview.ready) {
-                    toastr.info('Nothing eligible to summarize.', TOAST_TITLE);
+                    showManualRunIdle(ELASTIC_STRATEGIES.FORCE);
                     return;
                 }
                 toastr.info(`${preview.backlog} turns ready to process. Starting...`, TOAST_TITLE, {
@@ -134,8 +126,8 @@ async function executeForceSummarize($button, notify) {
 
                 return runManual(manualRunnerDeps, ELASTIC_STRATEGIES.FORCE, options);
             },
-            report: showCatchupOutcome,
             notify,
+            view: manualRunView(ELASTIC_STRATEGIES.FORCE),
         },
     );
 }
@@ -154,7 +146,7 @@ async function onSlopBreaker(buttonEl, notify) {
 
     const preview = await describeManualRun(ELASTIC_STRATEGIES.SLOP);
     if (!preview.ready) {
-        showSlopBreakerNoop();
+        showManualRunIdle(ELASTIC_STRATEGIES.SLOP);
         return;
     }
     if (!(await confirmSlopBreaker())) {
@@ -166,8 +158,8 @@ async function onSlopBreaker(buttonEl, notify) {
         '<i class="fa-solid fa-broom"></i><span>Slop Breaker</span>',
         {
             run: (options) => runManual(manualRunnerDeps, ELASTIC_STRATEGIES.SLOP, options),
-            report: showSlopBreakerOutcome,
             notify,
+            view: manualRunView(ELASTIC_STRATEGIES.SLOP),
         },
     );
 }
@@ -184,18 +176,16 @@ function showManualCacheWarning(settings) {
 }
 
 /**
- * Reload the page after successful manual context changes.
- * @param {{ fullyCommitted?: boolean } | undefined} outcome
+ * @param {import('../core/run-outcome.js').ManualRunOutcome | undefined} outcome
  * @returns {void}
  */
 function reloadAfterManualRun(outcome) {
-    if (outcome?.fullyCommitted) {
+    if (outcome?.status === 'completed') {
         reloadPage();
     }
 }
 
 /**
- * Reload the SillyTavern page after context-changing actions.
  * @returns {void}
  */
 export function reloadPage() {
@@ -211,7 +201,7 @@ export function reloadPage() {
  * @returns {Promise<void>}
  */
 async function onStopSummarize() {
-    const status = await pauseAutoSummarization(pauseLatchDeps);
+    const status = await pauseAutoSummarization(manualRunnerDeps);
     if (status === 'already-paused') {
         toastr.info('Already paused.', TOAST_TITLE);
         return;
@@ -225,7 +215,7 @@ async function onStopSummarize() {
     });
     $(this).prop('disabled', true);
     setTimeout(() => $(this).prop('disabled', false), 2000);
-    updateUI();
+    refreshUi();
 }
 
 /**
@@ -233,7 +223,7 @@ async function onStopSummarize() {
  * @returns {Promise<void>}
  */
 async function onResumeSummarize() {
-    const status = await resumeAutoSummarization(pauseLatchDeps);
+    const status = await resumeAutoSummarization(manualRunnerDeps);
     if (status === 'not-paused') {
         toastr.info('Not paused.', TOAST_TITLE);
         return;
@@ -241,23 +231,15 @@ async function onResumeSummarize() {
     toastr.success('Resumed. Automatic summarization is active again.', TOAST_TITLE, {
         timeOut: 3000,
     });
-    updateUI();
+    refreshUi();
 }
 
 /**
- * Bind the manual-run controls: Force Summarize, Slop Breaker, the
- * stale-cache advice toast action that starts the same manual run, and the
- * Stop/Resume controls.
- * @param {{ notify: import('../core/notify.js').NotifyAdapter, manualRunnerDeps: import('../core/summarizer-engine.js').ManualRunnerDeps, pauseLatchDeps: import('../core/summarizer-engine.js').PauseLatchDeps }} deps
+ * @param {{ notify: import('../core/notify.js').NotifyAdapter, manualRunnerDeps: import('../core/summarizer-engine.js').ManualRunnerDeps }} deps
  * @returns {void}
  */
-export function bindManualRunControls({
-    notify,
-    manualRunnerDeps: runnerDeps,
-    pauseLatchDeps: latchDeps,
-}) {
+export function bindManualRunControls({ notify, manualRunnerDeps: runnerDeps }) {
     manualRunnerDeps = runnerDeps;
-    pauseLatchDeps = latchDeps;
     $(document).on('click', '#sc_force_summarize, #sc_easy_force_summarize', async function () {
         await executeForceSummarize($(this), notify);
     });

@@ -35,10 +35,11 @@ That sounds abstract until you hit a 2,000 message chat and the model still reme
 - Keeps a rolling verbatim window for recent chat.
 - Compresses older chat into Layer 0 memories.
 - Promotes older Layer 0 memories into deeper layers when the layer gets crowded.
-- Separates narrative continuity from a compact rolling state snapshot using `[NARRATIVE]` and `[STATE]`.
+- Keeps each memory a single `<narrative>` envelope with a trailing `current_date_time` scene-time line.
 - Ghosts summarized messages with SillyTavern's `/hide`, so they stop reaching the model but remain readable in the UI.
 - Injects the assembled memory through SillyTavern extension prompts, or exposes it as `{{summaryception_memory}}` for custom prompt layouts.
 - Runs background summarization without mutating the prompt during an active generation.
+- Optional Continuity Auditor keeps a live game-state in an `<active_continuity>` block next to the injected memory.
 
 ## Install
 
@@ -55,25 +56,27 @@ In SillyTavern:
 
 Start with Easy mode unless you already know what you want to tune.
 
-Set Fast Summarizer to your normal API or a SillyTavern Connection Profile. This model handles raw chat to Layer 0 summaries, so it should be cheap, fast, and good enough at extracting facts.
+Set Fast Summarizer to your normal API or a SillyTavern Connection Profile. This model turns raw chat into Layer 0 summaries, so it should be cheap, fast, and good enough at extracting facts.
 
-Smart Deep Memory is optional. Use it when you want Layer 1+ merges to use a stronger model than the raw-chat summarizer.
+Smart Deep Memory is optional. Point it at a stronger model if you want Layer 1+ merges to read better than what the raw-chat summarizer produces.
 
-Then pick a memory mode. The provider's cache rules decide whether the fancy options save money or merely make the prompt fatter.
+Then pick a memory mode. Your provider's cache rules decide whether Prefix Cache saves you money or just makes the prompt fatter.
 
-### Default
+### Balanced
 
-Use this unless you have a good reason not to. Default keeps recent chat near the 22k verbatim target and summarizes overflow as it arrives. The goal is simple: keep the model inside a useful context range without relying on provider caching.
+The one to pick unless you have a reason not to. Balanced keeps recent chat near the 22k verbatim budget and summarizes overflow into a 6k queued range as it arrives. The goal is simple: keep the model inside a useful context range without relying on provider caching.
 
 This mode works everywhere and keeps context size fairly steady. If cached input is not much cheaper than normal input, stop here. You are done.
 
 ### Prefix Cache
 
-Use Prefix Cache with the normal prompt caches offered by most providers. It lets live chat span 36k — 20k verbatim plus a 16k queued range — so more of each request can stay cached.
+Use Prefix Cache with the normal prompt caches most providers offer. It holds a 36k live span: 20k verbatim plus a 16k queued range, so more of each request can stay cached.
 
-Suppose the next request keeps the same start but changes the tail. A normal prefix cache can still reuse that unchanged start. Your usual lorebooks work normally; no migration or special outlet is needed.
+Suppose the next request keeps the same start but changes the tail. A prefix cache can still reuse that unchanged start. Your usual lorebooks work normally; no migration or special outlet is needed.
 
-Pick this mode when cached input is cheaper and your provider supports that kind of partial prefix reuse. The tradeoff is a larger prompt. A summary flush also gives the provider a new prefix to cache.
+Pick this mode when cached input is cheaper and your provider supports partial prefix reuse. The tradeoff is a larger prompt, and a summary flush also hands the provider a new prefix to cache.
+
+One more knob matters here and only here. The cache TTL decides when Prefix Cache considers the provider cache expired: once the chat has sat idle longer than the TTL (default 30 minutes), loading it triggers a stale-cache suggestion to Force Summarize first. The next message pays full input price either way, so summarizing first avoids paying for the same tokens twice.
 
 The defaults are intentionally conservative: 22k recent verbatim tokens, 10k injected memory, 280-token Layer 0 targets, and promotion after old memories stack up.
 
@@ -114,7 +117,63 @@ There are three routes:
 - Merge for deeper Layer 1+ promotion work.
 - Fallback for retryable failures after the primary route gives up.
 
-OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. After v20 we dont use preset for summarization tasks so it doesnt matter what you linked to connection.
+OpenAI-compatible local endpoints may need SillyTavern's CORS proxy. Since v20, summarization tasks do not use presets, so it does not matter what your connection is linked to.
+
+## Continuity Auditor
+
+Everything above is narrative memory: prose about what happened. The Continuity Auditor is the other half. It is an opt-in background call that audits each finished reply in solo chats and keeps a live game-state: positions, relationship bonds, NPC agendas, secrets. Off by default.
+
+Why bother? Without it, keeping the story straight is the main model's job. It spends its output re-stating who stands where, how the relationship shifted, and which agenda moved, and that bookkeeping crowds out the scene itself. The Auditor does that bookkeeping outside the main model and hands the result back as a compact block, so replies come out shorter and more focused on what is actually happening. The block describes the last audited reply, so it runs one message behind the live chat.
+
+Enable it under Continuity Auditor and give it a fast model. It runs after every reply, so latency matters more than brains here. Connection settings live under Models → Continuity Connections, separate from the summarizer routes: it inherits Layer 0 unless you point it elsewhere, and "Fall back to the Narrative Chain" lets it use the Layer 0 chain as last resort when both Auditor routes fail.
+
+The game-state is four things:
+
+- Scene and positioning: location, environment, posture, contact points, clothing.
+- Bonds: one per character pair, with Sparks and Grudge. A high enough bond shows a gate: hug, handhold, kiss, intimacy.
+- Agendas: each NPC's current task and step.
+- Notes: short GM remarks, with `[S]` marking secrets some characters do not know.
+
+The Auditor only reads and flags. All the math is done by code, and the result is stored on the audited reply as a checkpoint. The newest checkpoint is the live state.
+
+### What the model gets
+
+The live checkpoint is injected into the chat itself, near the newest messages, as a system block:
+
+```text
+<active_continuity>
+[SCENE & POSITIONING]
+Location: Old mill - upstairs loft
+Environment: rain against the shutters, one lantern lit
+Physics: Mira sitting on the windowsill, feet off the floor
+Contact: Dave by the door, arms crossed
+Clothing: Mira barefoot, coat still wet
+
+[RELATIONSHIP GATES]
+Mira & Dave: BOND +6 (Sparks: 2, Grudge: 0); Gate: handhold
+
+[SECRETS & ASYMMETRIC KNOWLEDGE]
+[S] Mira never actually lost the key
+
+[ACTIVE AGENDAS & THREADS]
+- Mira: find out who paid the mercs (Step 2/5: active)
+- Dave: quiet about the second key
+</active_continuity>
+```
+
+This is the real renderer's output shape: only non-empty sections appear, secret `[S]` notes get their own section, and ordinary GM notes render under agendas as active threads. Replies that have not been audited yet are covered by the last checkpoint, and the block says so until the Auditor catches up.
+
+### The green check mark
+
+Every audited reply gets a green ✓ after the character name in chat. The newest one also shows a ●. That reply holds the live checkpoint the injected block comes from. Swipe or regenerate the last reply and its checkpoint is dropped, so the check vanishes until the new answer gets audited.
+
+### How it works with narrative memory
+
+The layers summarize the story. The Auditor tracks the state. One knows what happened, the other knows what is true right now, and they share nothing at runtime: separate routes, separate prompt.
+
+### Preset
+
+Try it with [ff_summaryception_5.5.0.json](docs/preset/ff_summaryception_5.5.0.json)
 
 ## Slash commands
 
@@ -132,7 +191,7 @@ If something looks off, use Clear or `/sc-clear`. That removes Summaryception's 
 
 ## Presets
 
-For default and prefix cache any preset works. I like this one https://rentry.org/freaky-frankenstein-presets 
+For default and prefix cache any preset works. I like this one https://rentry.org/freaky-frankenstein-presets
 
 ## Version history
 
@@ -140,6 +199,8 @@ Older major versions are still available as branches. Open SillyTavern's extensi
 
 <img src="img/how_to_switch_branch.png" width="700" alt="Branch button beside Summaryception in SillyTavern's extension list" />
 
+- **v24:** Continuity Auditor
+- **v23:** Closed most github issues
 - **v22:** Big code refactor
 
 ## Troubleshooting
@@ -148,9 +209,9 @@ Extension refuses to update: remove and install it again.
 
 Major updates can reset settings or misbehave: clear memories before updating and stick to the named branches.
 
-### Continuity issues
+### Timestamps in bot replies
 
-Make sure each bot message contain timestamps! Exact format is not important. Some gaps are allowed, as long as it repeated once every 4-5 bot messages.Example prompt:
+Make sure each bot message contain timestamps! Exact format is not important. Some gaps are allowed, as long as it repeated once every 4-5 bot messages. Example prompt:
 
 ```
 {{// Grounds scene with date, time, location, weather. Affected entire RP.}}{{trim}}
@@ -167,6 +228,20 @@ Rules:
 </header_instructions>
 ```
 
+### Low cache hit @ hapuppy
+
+Set plugin to cache mode. Can also increase `Queued Chat` size
+
+<img width="621" height="418" alt="{88BA0613-3DE7-4CAC-A983-58867A0E0E33}" src="https://github.com/user-attachments/assets/cb00b636-0525-44b0-a32d-81d22a3beb82" />
+
+Navigate to ST `config.yaml`: `enableSystemPromptCache: true` and `cachingAtDepth: 2`. Then it will look like
+
+<img width="1898" height="743" alt="{4435D170-E730-4E84-98C9-14CF8A5E8932}" src="https://github.com/user-attachments/assets/32e8a361-60d7-4082-81ba-8bca562812a5" />
+
+### No thinking @ hapuppy
+
+Use preset FF5.4 or later with forced reasoning. 
+
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
