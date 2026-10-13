@@ -166,6 +166,7 @@ async function validatePromotionCandidate({
     const sourceTokens = providedSourceTokens || (await countTextTokens(sourceNarrativeText));
     const sizeValidation = await validatePromotionSize({
         layerIndex,
+        mergeCount,
         promotedSnippet,
         settings,
         sourceTokens,
@@ -176,10 +177,21 @@ async function validatePromotionCandidate({
     return validatePromotionCompressesMemory({ layerIndex, mergeCount, promotedSnippet, settings });
 }
 
-async function validatePromotionSize({ layerIndex, promotedSnippet, settings, sourceTokens }) {
+async function validatePromotionSize({
+    layerIndex,
+    mergeCount,
+    promotedSnippet,
+    settings,
+    sourceTokens,
+}) {
     const outputTokens = await countTextTokens(promotedSnippet.text);
     const targetTokens = getLayer0SummaryTokenTarget(settings);
-    const minTokens = getPromotionSummaryTokenTarget({ layerIndex, targetTokens });
+    // The floor follows the merged snippets' average size when they run smaller
+    // than the slider target, or a merge of short snippets could never clear it.
+    const minTokens = getPromotionSummaryTokenTarget({
+        layerIndex,
+        targetTokens: Math.min(targetTokens, sourceTokens.count / mergeCount),
+    });
     const hardMaxTokens = getPromotionSummaryTokenHardMax({ layerIndex, targetTokens });
     const tooShort = outputTokens.count < minTokens;
     if (outputTokens.count > hardMaxTokens || tooShort) {

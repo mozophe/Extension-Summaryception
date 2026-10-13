@@ -141,6 +141,23 @@ describe('generateValidatedPromotion', () => {
         ]);
     });
 
+    it('scales the over-merge floor down when the merged snippets are smaller than the target', async () => {
+        installStore();
+        // 150 source tokens over 3 snippets: the floor follows the 50-token
+        // average, not the 100-token slider target.
+        const prepared = makePrepared({ memoryTokensBefore: { count: 150, estimated: false } });
+        const smallNarrative = 'word '.repeat(6).trim(); // 29 tokens: under 40, over 20
+        dispatch.mockImplementation(outcomeWithProfile(smallNarrative));
+
+        const result = await generateValidatedPromotion(prepared, {
+            notify: makeNotifyRecorder(),
+            dispatch,
+        });
+
+        expect(result).toEqual({ text: smallNarrative, sourceMessageIds: ['msg-0', 'msg-2'] });
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
     it('repairs an oversized output once and rejects when the repair still misses', async () => {
         installStore();
         const prepared = makePrepared();
