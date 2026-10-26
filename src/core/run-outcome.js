@@ -33,6 +33,7 @@
  * @property {boolean} blocked - The Foreground Gate closed.
  * @property {string} [blockReason] - 'no-progress' when a batch succeeded without moving the boundary.
  * @property {boolean} failureLimitReached - The run gave up on consecutive failures.
+ * @property {boolean} promotionFailed - The post-commit promotion drain gave up this run.
  */
 
 /**

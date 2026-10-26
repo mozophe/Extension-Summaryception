@@ -16,9 +16,12 @@ const LAYER0_PROMOTION_RETENTION_FLOOR_RATIO = 0.4;
 /**
  * Compute the target size for a promotion, anchored to the slider target T.
  * Doubles as the acceptance floor: a shorter output is rejected as over-merged.
+ * Callers may pass an effective target below the slider when the merged
+ * sources are smaller than one slider-sized summary.
  * @param {object} p
  * @param {number} p.layerIndex - Promotion SOURCE layer (0 => produces L1, >=1 => L2+).
- * @param {number} p.targetTokens - Slider target T.
+ * @param {number} p.targetTokens - Slider target T, or a smaller effective
+ *     target when the merged sources are smaller than one slider summary.
  * @returns {number}
  */
 export function getPromotionSummaryTokenTarget({ layerIndex, targetTokens }) {

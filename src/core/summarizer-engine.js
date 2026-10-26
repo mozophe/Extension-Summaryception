@@ -385,7 +385,9 @@ async function applyManualLoopStep({
         if (promotion.status === 'blocked') {
             tally.blocked = true;
         } else if (promotion.status === 'failed') {
-            tally.failed++;
+            // A drain that gave up is not a failed batch: the run still
+            // committed its work, so it reports partial, not failed.
+            tally.promotionFailed = true;
             return { exit: true, consecutiveFailures };
         }
     }
@@ -427,7 +429,13 @@ async function processStrategyBatch(plan, strategy, { notify, gate, dispatch }) 
 }
 
 async function normalizeManualMemory(tally, notify, gate, dispatch) {
-    if (tally.aborted || tally.blocked || tally.completed === 0 || tally.failed > 0) {
+    if (
+        tally.aborted ||
+        tally.blocked ||
+        tally.completed === 0 ||
+        tally.failed > 0 ||
+        tally.promotionFailed
+    ) {
         return 'skipped';
     }
     if ((await gate.promptWorkGate('manual promotion')) === 'blocked') {
@@ -456,6 +464,7 @@ function createManualRunTally(overrides = {}) {
         aborted: false,
         blocked: false,
         failureLimitReached: false,
+        promotionFailed: false,
         ...overrides,
     };
 }

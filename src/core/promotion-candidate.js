@@ -185,14 +185,16 @@ async function validatePromotionSize({
     sourceTokens,
 }) {
     const outputTokens = await countTextTokens(promotedSnippet.text);
-    const targetTokens = getLayer0SummaryTokenTarget(settings);
-    // The floor follows the merged snippets' average size when they run smaller
-    // than the slider target, or a merge of short snippets could never clear it.
-    const minTokens = getPromotionSummaryTokenTarget({
+    const sliderTarget = getLayer0SummaryTokenTarget(settings);
+    // Merged sources smaller than one slider-sized summary shrink the
+    // acceptance floor with them, so a faithful fold is not rejected as
+    // over-merged (issue #44).
+    const effectiveTarget = Math.min(sliderTarget, sourceTokens.count / mergeCount);
+    const minTokens = getPromotionSummaryTokenTarget({ layerIndex, targetTokens: effectiveTarget });
+    const hardMaxTokens = getPromotionSummaryTokenHardMax({
         layerIndex,
-        targetTokens: Math.min(targetTokens, sourceTokens.count / mergeCount),
+        targetTokens: sliderTarget,
     });
-    const hardMaxTokens = getPromotionSummaryTokenHardMax({ layerIndex, targetTokens });
     const tooShort = outputTokens.count < minTokens;
     if (outputTokens.count > hardMaxTokens || tooShort) {
         return rejectPromotionSize({

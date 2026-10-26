@@ -17,6 +17,9 @@ import {
  */
 
 const settings = makeSummarySettings({ layer0SummaryTokenTarget: 100 });
+// Merged sources of 312 tokens / 3 merges sit below this slider, so the
+// effective target drops to 104 and the L0->L1 floor to floor(104 * 0.4) = 41.
+const shortSourceSettings = makeSummarySettings({ layer0SummaryTokenTarget: 280 });
 /** The dispatch stand-in; returns the outcome the real request layer would. */
 const dispatch = vi.fn();
 const GOOD_NARRATIVE = 'word '.repeat(30).trim(); // 149 tokens: inside the band
@@ -28,10 +31,10 @@ function overflowLayers() {
         sourceMessageIds: [`msg-a-${i}`],
     }));
 }
-function installStore(layers = [overflowLayers()]) {
+function installStore(layers = [overflowLayers()], storeSettings = settings) {
     installSummaryContext({
         metadata: { summaryception: makeSummaryStore({ layers }) },
-        settings,
+        settings: storeSettings,
     });
 }
 
@@ -63,11 +66,11 @@ function makePrepared(overrides = {}) {
 }
 
 /** Completed dispatch outcome whose profile resolves from the dispatch metadata. */
-function outcomeWithProfile(text) {
+function outcomeWithProfile(text, profileSettings = settings) {
     return async ({ metadata }) => ({
         status: 'completed',
         text,
-        profile: resolveCallProfile(settings, metadata),
+        profile: resolveCallProfile(profileSettings, metadata),
     });
 }
 
@@ -139,23 +142,6 @@ describe('generateValidatedPromotion', () => {
                 toLayer: 1,
             },
         ]);
-    });
-
-    it('scales the over-merge floor down when the merged snippets are smaller than the target', async () => {
-        installStore();
-        // 150 source tokens over 3 snippets: the floor follows the 50-token
-        // average, not the 100-token slider target.
-        const prepared = makePrepared({ memoryTokensBefore: { count: 150, estimated: false } });
-        const smallNarrative = 'word '.repeat(6).trim(); // 29 tokens: under 40, over 20
-        dispatch.mockImplementation(outcomeWithProfile(smallNarrative));
-
-        const result = await generateValidatedPromotion(prepared, {
-            notify: makeNotifyRecorder(),
-            dispatch,
-        });
-
-        expect(result).toEqual({ text: smallNarrative, sourceMessageIds: ['msg-0', 'msg-2'] });
-        expect(dispatch).toHaveBeenCalledTimes(1);
     });
 
     it('repairs an oversized output once and rejects when the repair still misses', async () => {
@@ -232,6 +218,108 @@ describe('generateValidatedPromotion', () => {
         });
 
         expect(result).toBeNull();
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    /** Prepared promotion whose 3 merged sources (312 tokens) sit below the 280 slider target. */
+    function makeShortSourcePrepared(overrides = {}) {
+        const memoryTokensBefore = { count: 312, estimated: false };
+        return makePrepared({
+            settings: shortSourceSettings,
+            memoryTokensBefore,
+            promotionMetadata: {
+                kind: 'promotion',
+                layerIndex: 0,
+                memoryTokensBefore: memoryTokensBefore.count,
+                memoryTokensBeforeEstimated: memoryTokensBefore.estimated,
+            },
+            ...overrides,
+        });
+    }
+
+    it('lowers the promotion floor when the merged sources are smaller than the slider target', async () => {
+        installStore();
+        // 90 tokens clears floor(312 / 3 * 0.4) = 41 but not the slider-anchored 112.
+        dispatch.mockImplementation(outcomeWithProfile('x'.repeat(90), shortSourceSettings));
+
+        const result = await generateValidatedPromotion(makeShortSourcePrepared(), {
+            notify: makeNotifyRecorder(),
+            dispatch,
+        });
+
+        expect(result).toEqual({ text: 'x'.repeat(90), sourceMessageIds: ['msg-0', 'msg-2'] });
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the slider-anchored floor when the merged sources match the slider target', async () => {
+        installStore();
+        const memoryTokensBefore = { count: 840, estimated: false };
+        dispatch
+            .mockImplementationOnce(outcomeWithProfile('x'.repeat(90), shortSourceSettings))
+            .mockImplementationOnce(outcomeWithProfile('x'.repeat(120), shortSourceSettings));
+
+        const result = await generateValidatedPromotion(
+            makePrepared({
+                settings: shortSourceSettings,
+                memoryTokensBefore,
+                promotionMetadata: {
+                    kind: 'promotion',
+                    layerIndex: 0,
+                    memoryTokensBefore: memoryTokensBefore.count,
+                    memoryTokensBeforeEstimated: memoryTokensBefore.estimated,
+                },
+            }),
+            { notify: makeNotifyRecorder(), dispatch },
+        );
+
+        expect(result).toEqual({ text: 'x'.repeat(120), sourceMessageIds: ['msg-0', 'msg-2'] });
+        // 840 / 3 merges = 280 = the slider, so the floor stays floor(280 * 0.4) = 112
+        // and a 90-token output that a lowered floor would accept stays too-short.
+        const { metadata } = dispatch.mock.calls[1][0];
+        expect(metadata.promotionRepair).toMatchObject({ reason: 'too-short', targetTokens: 112 });
+    });
+
+    it('reports the lowered floor in the repair diagnostics for a too-short output', async () => {
+        installStore();
+        dispatch
+            .mockImplementationOnce(outcomeWithProfile('x'.repeat(20), shortSourceSettings))
+            .mockImplementationOnce(outcomeWithProfile('x'.repeat(90), shortSourceSettings));
+
+        const result = await generateValidatedPromotion(makeShortSourcePrepared(), {
+            notify: makeNotifyRecorder(),
+            dispatch,
+        });
+
+        expect(result).toEqual({ text: 'x'.repeat(90), sourceMessageIds: ['msg-0', 'msg-2'] });
+        const { metadata } = dispatch.mock.calls[1][0];
+        expect(metadata.promotionRepair).toMatchObject({ reason: 'too-short', targetTokens: 41 });
+        const draft = metadata.promotionRepair.diagnostics.sections.find(
+            (section) => section.id === 'draft',
+        );
+        expect(draft.minimumTokens).toBe(41);
+    });
+
+    it('applies the deeper-layer ratio to the lowered floor', async () => {
+        // The L1+ hypothetical must find source snippets on the destination side,
+        // so layer 1 carries its own overflow snippets.
+        installStore([overflowLayers(), overflowLayers().slice(0, 3)]);
+        // 40 tokens clears floor(104 * 0.3) = 31 but not the slider-anchored 84.
+        dispatch.mockImplementation(outcomeWithProfile('x'.repeat(40), shortSourceSettings));
+
+        const result = await generateValidatedPromotion(
+            makeShortSourcePrepared({
+                layerIndex: 1,
+                promotionMetadata: {
+                    kind: 'promotion',
+                    layerIndex: 1,
+                    memoryTokensBefore: 312,
+                    memoryTokensBeforeEstimated: false,
+                },
+            }),
+            { notify: makeNotifyRecorder(), dispatch },
+        );
+
+        expect(result).toEqual({ text: 'x'.repeat(40), sourceMessageIds: ['msg-0', 'msg-2'] });
         expect(dispatch).toHaveBeenCalledTimes(1);
     });
 });

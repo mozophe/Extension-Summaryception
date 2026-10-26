@@ -37,6 +37,7 @@ vi.mock('../src/core/summary-preflight.js', () => ({
 
 import { ELASTIC_STRATEGIES, runManual } from '../src/core/summarizer-engine.js';
 import { SUMMARY_COMMIT_MODES } from '../src/core/summarization-routes.js';
+import { drainPromotionOverflow } from '../src/core/summarizer-promotion.js';
 import {
     installSummaryContext,
     makeChatPersistence,
@@ -303,5 +304,33 @@ describe('manual run gate outcome', () => {
 
         expect(outcome).toEqual({ status: 'blocked', completed: 0, failed: 0, totalBatches: 1 });
         expect(layer0Mocks.runLayer0).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('manual run promotion drain failure', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        gate = makeForegroundGate().gate;
+        installSummaryContext({ chat: [] });
+        chatStoreMocks.getChatStore.mockReturnValue({});
+        settingsMocks.getEffectiveSettings.mockReturnValue({});
+        provenanceMocks.getCurrentSummarizedBoundary.mockImplementation(() => boundary);
+        boundary = 0;
+        // One commit moves the boundary to the target, so the plan turns unready.
+        layer0Mocks.runLayer0.mockImplementation(async () => {
+            boundary = TARGET_INDEX;
+            return { status: 'completed' };
+        });
+        routeMocks.buildForceSummaryRoutePlan.mockResolvedValue(forceRoutePlan());
+    });
+
+    it('reports partial without a failed batch when the post-commit drain gives up', async () => {
+        drainPromotionOverflow.mockResolvedValueOnce({ status: 'failed', attempts: 3 });
+
+        const outcome = await runManual(makeDeps(), ELASTIC_STRATEGIES.FORCE, {});
+
+        expect(outcome).toEqual({ status: 'partial', completed: 1, failed: 0, totalBatches: 1 });
+        // The end-of-run normalization must not re-attempt the abandoned drain.
+        expect(drainPromotionOverflow).toHaveBeenCalledTimes(1);
     });
 });
